@@ -30,26 +30,28 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/SeniorStackOverflo
 
 ## How to play
 
-Everything is in the **CO-OP** button at the top right of the main menu and of
-the in-game menu (Esc).
+Everything is in **Multiplayer → Co-op game** (in the Russian game **Сеть →
+Кооперативная игра**). It takes the place of Quick game: the multiplayer servers
+are gone. In the game, Esc opens the same page.
 
-**Host:** start **Crysis Coop** and click **CO-OP**:
+**Host:** start **Crysis Coop** and click **Multiplayer → Co-op game**:
 
 * **Continue** carries on the newest campaign from its last checkpoint.
 * **New campaign** starts one on any of the 11 levels. A name is optional.
 * **All campaigns** lists your campaigns on this PC and in the cloud. From there
   you can continue one, go back to the checkpoint before, or delete it.
 
-When the level has loaded, the code appears on the screen and in the CO-OP menu,
+When the level has loaded, the code appears on the screen and in the co-op menu,
 for example `Co-op code: 382615`. It is always the same code for the same host.
 
-**Friend:** start **Crysis Coop**, click **CO-OP → Join a friend**, type the
+**Friend:** start **Crysis Coop**, click **Multiplayer → Co-op game → Join a
+friend**, type the
 host's code and click **Join**. Next time the code is already filled in.
 
 The friend appears next to the host once the host has landed or finished the
 level's intro. At the end of a level, everybody goes on to the next one together.
 
-**In the game** (Esc → CO-OP):
+**In the game** (Esc → Co-op game):
 
 * The host sees his code and who is connected, and has:
   * **Save now**;
@@ -74,7 +76,7 @@ saved" on everybody's screen).
 played in that campaign. The campaign is not tied to one PC: any friend who
 played in it finds it in his **All campaigns** and can continue it as the host.
 The others join him as usual. The checkbox "Keep my checkpoints in the cloud" in
-the CO-OP menu turns it off.
+the co-op menu turns it off.
 
 The progress lives in `Documents\My Games\Crysis\SaveGames`: the `coop` folder
 and the `coop_checkpoint_*` saves.

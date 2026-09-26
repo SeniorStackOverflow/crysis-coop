@@ -1,6 +1,6 @@
-// Crysis Coop: the co-op menu. A "CO-OP" button on the main menu and on the
-// in-game menu (Esc) opens a panel from which everything co-op is done with
-// the mouse: a new campaign on any level, the campaigns on this PC and in the
+// Crysis Coop: the co-op menu. Network > Co-op game (the old Quick game: the
+// multiplayer servers are gone), on the main menu and on the in-game menu
+// (Esc), opens a panel from which everything co-op is done with the mouse: a new campaign on any level, the campaigns on this PC and in the
 // cloud (continue, the checkpoint before, delete), joining a friend by his
 // code, and in the game the host's code, saving and going back to a
 // checkpoint, or leaving a friend's game. While the host plays, the HUD
@@ -15,8 +15,8 @@ struct IFFont;
 namespace CoopMenu
 {
 	void Init();                                // coop_ui test command
-	// the Flash menu is on screen (inGame: the Esc menu): draws the CO-OP
-	// button, and the panel when it is open
+	// the Flash menu is on screen (inGame: the Esc menu): draws the panel
+	// when it is open
 	void RenderMenu(bool inGame);
 	// in the game with no menu: the host's code line
 	void RenderHud(IUIDraw* pUIDraw, IFFont* pFont);
@@ -27,4 +27,7 @@ namespace CoopMenu
 	// the Flash menu was closed: so is the panel
 	void OnMenuClosed();
 	bool IsOpen();
+	// Network > Quick game (renamed "Co-op game"): opens the panel; true when
+	// the co-op menu took it
+	bool OnQuickGame();
 }

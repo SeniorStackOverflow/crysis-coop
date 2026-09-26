@@ -36,7 +36,7 @@ namespace
 	// widgets
 	enum
 	{
-		ID_NONE, ID_OPEN, ID_CLOSE, ID_BACK,
+		ID_NONE, ID_CLOSE, ID_BACK,
 		ID_CONTINUE, ID_NEW, ID_CAMPAIGNS, ID_JOIN_PAGE,
 		ID_CLOUD, ID_DIRECT, ID_KEYBOARD,
 		ID_NAME_FIELD, ID_CODE_FIELD, ID_JOIN, ID_LEAVE,
@@ -255,9 +255,6 @@ namespace
 
 	// ---- pages
 	const float PX = 150, PY = 60, PW = 500, PH = 480;
-	// the CO-OP button: top right, where both menus leave room (their Back
-	// button is at the bottom right)
-	const float OPEN_X = 648, OPEN_Y = 62, OPEN_W = 136, OPEN_H = 44;
 
 	void DrawSettings(float y)
 	{
@@ -351,7 +348,7 @@ namespace
 		Text(x, PY + 60, 16, "Your friend's code:");
 		Field(ID_CODE_FIELD, x, PY + 84, 200, s_codeField, "123456");
 		Button(ID_JOIN, x + 215, PY + 84, 120, 30, "Join", !s_codeField.empty());
-		Text(x, PY + 130, 13, "The host sees his code on the screen and in his CO-OP menu.", 0.7f, 0.85f, 0.7f);
+		Text(x, PY + 130, 13, "The host sees his code on the screen and in his co-op menu.", 0.7f, 0.85f, 0.7f);
 		Text(x, PY + 148, 13, "It is always the same code: next time it is filled in already.", 0.7f, 0.85f, 0.7f);
 		string error;
 		int code = 0;
@@ -385,7 +382,7 @@ namespace
 				text = CoopRelay::IsHosting() ? "Co-op code: waiting for the relay..." : "Co-op code: not online yet";
 			Text(x, y, 26, text.c_str(), 0.95f, 1.0f, 0.95f);
 			y += 36;
-			Text(x, y, 13, "Friends: CO-OP > Join a friend, and this code. It never changes.", 0.7f, 0.85f, 0.7f);
+			Text(x, y, 13, "Friends: Co-op game > Join a friend, and this code. It never changes.", 0.7f, 0.85f, 0.7f);
 			y += 26;
 			int direct = 0;
 			const int friends = CoopRelay::FriendsConnected(&direct);
@@ -477,9 +474,7 @@ namespace
 		s_focus = ID_NONE;
 		if (id != ID_CAMPAIGN_DELETE && (id < ID_ROW || id >= ID_ROW + 1000))
 			s_deleteArmed = -1;
-		if (id == ID_OPEN)
-			Open(s_inGame ? eP_Game : eP_Main);
-		else if (id == ID_CLOSE)
+		if (id == ID_CLOSE)
 			Close();
 		else if (id == ID_BACK)
 			// in the game the co-op page is the first one, the main page below it
@@ -580,7 +575,51 @@ namespace
 		vy = y * H / h;
 	}
 
+	// the menu texts the mod changes (Network > Quick game is the co-op game).
+	// A label that is loaded already keeps its first text, so the mod's
+	// spreadsheet is loaded first and the game's own ones again after it
+	// (the game's files are not touched).
+	void OverrideMenuTexts()
+	{
+		ILocalizationManager* pLoc = gEnv->pSystem->GetLocalizationManager();
+		if (!pLoc)
+			return;
+		const string language = pLoc->GetLanguage() ? pLoc->GetLanguage() : "";
+		const bool russian = !stricmp(language.c_str(), "russian");
+		std::vector<string> tables;
+		_finddata_t fd;
+		const intptr_t h = gEnv->pCryPak->FindFirst("Languages/*.xml", &fd);
+		if (h != -1)
+		{
+			do
+			{
+				if (strnicmp(fd.name, "coop_", 5))
+					tables.push_back(string("Languages/") + fd.name);
+			}
+			while (gEnv->pCryPak->FindNext(h, &fd) >= 0);
+			gEnv->pCryPak->FindClose(h);
+		}
+		const int before = pLoc->GetLocalizedStringCount();
+		if (tables.empty() || before <= 0)
+			return;
+		pLoc->FreeData();
+		pLoc->SetLanguage(language.c_str());     // FreeData forgets it
+		const bool loaded = pLoc->LoadExcelXmlSpreadsheet(russian ? "Languages/coop_ui_text_russian.xml" : "Languages/coop_ui_text.xml");
+		for (size_t i = 0; i < tables.size(); ++i)
+			pLoc->LoadExcelXmlSpreadsheet(tables[i].c_str());
+		CryLogAlways("[CoopMenu] localization reloaded after the mod's texts: %d tables, %d texts (%d before)",
+			(int)tables.size(), pLoc->GetLocalizedStringCount(), before);
+		wstring label;
+		pLoc->LocalizeLabel("@ui_menu_QUICKGAME", label);
+		string ascii;
+		for (size_t i = 0; i < label.length(); ++i)
+			ascii += label[i] < 128 ? (char)label[i] : '?';
+		CryLogAlways("[CoopMenu] menu texts (%s) %s: Quick game is now \"%s\" (first letter U+%04X)", language.c_str(),
+			loaded ? "loaded" : "NOT loaded", ascii.c_str(), label.empty() ? 0 : (unsigned)label[0]);
+	}
+
 	// coop_ui open | close | click <x> <y> (800x600) | mouse <x> <y> (pixels) | type <text> | ingame [0|1] | hits
+	//         flashdown|flashup <x> <y> (pixels: the Flash menu, as the mouse) | fs <command> [<args>]
 	void CmdUI(IConsoleCmdArgs* pArgs)
 	{
 		const char* what = pArgs->GetArgCount() > 1 ? pArgs->GetArg(1) : "";
@@ -611,6 +650,21 @@ namespace
 			if (CFlashMenuObject* pMenu = g_pGame->GetMenu())
 				pMenu->ShowInGameMenu(pArgs->GetArgCount() < 3 || atoi(pArgs->GetArg(2)) != 0);
 		}
+		else if ((!stricmp(what, "flashdown") || !stricmp(what, "flashup")) && pArgs->GetArgCount() > 3)
+		{
+			// the mouse on the Flash menu: down and up come in different frames
+			if (CFlashMenuObject* pMenu = g_pGame->GetMenu())
+			{
+				const int x = atoi(pArgs->GetArg(2)), y = atoi(pArgs->GetArg(3));
+				pMenu->OnHardwareMouseEvent(x, y, HARDWAREMOUSEEVENT_MOVE);
+				pMenu->OnHardwareMouseEvent(x, y, !stricmp(what, "flashdown") ? HARDWAREMOUSEEVENT_LBUTTONDOWN : HARDWAREMOUSEEVENT_LBUTTONUP);
+			}
+		}
+		else if (!stricmp(what, "fs") && pArgs->GetArgCount() > 2)
+		{
+			if (CFlashMenuObject* pMenu = g_pGame->GetMenu())
+				pMenu->HandleFSCommand(pArgs->GetArg(2), pArgs->GetArgCount() > 3 ? pArgs->GetArg(3) : "");
+		}
 		else if (!stricmp(what, "hits"))
 			for (size_t i = 0; i < s_hits.size(); ++i)
 				CryLogAlways("[CoopMenu] widget %d at %.0f,%.0f %.0fx%.0f", s_hits[i].id, s_hits[i].x, s_hits[i].y, s_hits[i].w, s_hits[i].h);
@@ -620,6 +674,7 @@ namespace
 
 void CoopMenu::Init()
 {
+	OverrideMenuTexts();
 	gEnv->pConsole->AddCommand("coop_ui", CmdUI, 0,
 		"Crysis Coop testing: the co-op menu: open | close | click <x> <y> (800x600) | mouse <x> <y> (pixels) | type <text> | ingame [0|1] | hits");
 	gEnv->pConsole->RegisterInt("coop_hud_code", 1, VF_DUMPTODISK,
@@ -636,20 +691,13 @@ void CoopMenu::RenderMenu(bool inGame)
 		if (s_page != eP_Closed)
 			Open(inGame ? eP_Game : eP_Main);
 	}
-	if (!Begin())
+	// the panel is opened from Network > Co-op game: closed, nothing is drawn
+	if (s_page == eP_Closed || !Begin())
 		return;
 	s_drawnFrame = gEnv->pRenderer->GetFrameID(false);
 	s_hits.clear();
 	s_pUI->PreRender();
-	if (s_page == eP_Closed)
-	{
-		string sub;
-		if (inGame && gEnv->bServer && CoopRelay::HostCode())
-			sub.Format("code %d", CoopRelay::HostCode());
-		Button(ID_OPEN, OPEN_X, OPEN_Y, OPEN_W, OPEN_H, "CO-OP", true, sub.empty() ? (inGame ? "game, code" : "host / join") : sub.c_str());
-	}
-	else
-		DrawPanel();
+	DrawPanel();
 	s_pUI->PostRender();
 }
 
@@ -671,7 +719,7 @@ void CoopMenu::RenderHud(IUIDraw* pUIDraw, IFFont* pFont)
 		return;
 	s_hudLeft -= gEnv->pTimer->GetFrameTime(ITimer::ETIMER_UI);
 	string text;
-	text.Format("CO-OP code %d  -  %d friend%s in the game  -  Esc > CO-OP for the co-op menu", code, friends, friends == 1 ? "" : "s");
+	text.Format("CO-OP code %d  -  %d friend%s in the game  -  Esc > Co-op game for the co-op menu", code, friends, friends == 1 ? "" : "s");
 	pUIDraw->DrawText(pFont, 12, 8, 15, 15, text.c_str(), 0.9f, 0.8f, 1.0f, 0.8f,
 		UIDRAWHORIZONTAL_LEFT, UIDRAWVERTICAL_TOP, UIDRAWHORIZONTAL_LEFT, UIDRAWVERTICAL_TOP);
 }
@@ -745,6 +793,14 @@ bool CoopMenu::OnKey(const SInputEvent& event)
 	}
 	else if (c && field.length() < 32)
 		field += c;
+	return true;
+}
+
+bool CoopMenu::OnQuickGame()
+{
+	// the multiplayer servers are gone: Network > Co-op game opens this menu
+	CryLogAlways("[CoopMenu] Network > Co-op game: the co-op menu");
+	Open(s_inGame ? eP_Game : eP_Main);
 	return true;
 }
 

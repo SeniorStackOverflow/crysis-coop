@@ -3290,7 +3290,7 @@ void CFlashMenuObject::OnPostUpdate(float fDeltaTime)
 		{
 			m_pCurrentFlashMenuScreen->GetFlashPlayer()->Advance(fDeltaTime);
 			m_pCurrentFlashMenuScreen->GetFlashPlayer()->Render();
-			// Crysis Coop: the CO-OP button and panel over the main and in-game menu
+			// Crysis Coop: the co-op panel over the main and in-game menu
 			if(m_pCurrentFlashMenuScreen == m_apFlashMenuScreens[MENUSCREEN_FRONTENDSTART] || m_pCurrentFlashMenuScreen == m_apFlashMenuScreens[MENUSCREEN_FRONTENDINGAME])
 				CoopMenu::RenderMenu(m_pCurrentFlashMenuScreen == m_apFlashMenuScreens[MENUSCREEN_FRONTENDINGAME]);
 		}

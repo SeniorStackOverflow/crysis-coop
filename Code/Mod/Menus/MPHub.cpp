@@ -15,6 +15,7 @@
 
 #include "Game.h"
 #include "CoopRelay.h"
+#include "CoopMenu.h"
 #include "IGameFramework.h"
 #include "IPlayerProfiles.h"
 #include "OptionsManager.h"
@@ -389,7 +390,10 @@ bool CMPHub::HandleFSCommand(const char* pCmd, const char* pArgs)
 		}
     break;
   case eGUC_quickGame:
-    OnQuickGame();
+    // Crysis Coop: Network > Quick game is the co-op game now (the
+    // multiplayer servers are gone)
+    if(!CoopMenu::OnQuickGame())
+      OnQuickGame();
     break;
   case eGUC_back:
     if(m_quickGame)

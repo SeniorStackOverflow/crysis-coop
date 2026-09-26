@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:x="urn:schemas-microsoft-com:office:excel"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+ <!-- Crysis Coop: menu texts the mod changes (loaded after the game's own, see CoopMenu.cpp) -->
+ <Worksheet ss:Name="Coop">
+  <Table>
+   <Row><Cell ss:Index="2"><Data ss:Type="String">AUDIO_FILENAME</Data></Cell><Cell ss:Index="3"><Data ss:Type="String">Person</Data></Cell><Cell ss:Index="4"><Data ss:Type="String">ENGLISH DIALOGUE</Data></Cell><Cell ss:Index="5"><Data ss:Type="String">VOLUME</Data></Cell><Cell ss:Index="6"><Data ss:Type="String">PROTOTYPE EVENT</Data></Cell><Cell ss:Index="7"><Data ss:Type="String">RADIO RATIO</Data></Cell><Cell ss:Index="8"><Data ss:Type="String">RADIO BACKGROUND</Data></Cell><Cell ss:Index="9"><Data ss:Type="String">RADIO SQUELCH</Data></Cell><Cell ss:Index="10"><Data ss:Type="String">DUCKING</Data></Cell><Cell ss:Index="11"><Data ss:Type="String">Placed and working</Data></Cell><Cell ss:Index="12"><Data ss:Type="String">Pickup and placeholder</Data></Cell><Cell ss:Index="13"><Data ss:Type="String">Context</Data></Cell><Cell ss:Index="14"><Data ss:Type="String">DIRECTION </Data></Cell><Cell ss:Index="15"><Data ss:Type="String">To Whom</Data></Cell><Cell ss:Index="16"><Data ss:Type="String">Time Restriction Info</Data></Cell><Cell ss:Index="17"><Data ss:Type="String">Type of Line</Data></Cell><Cell ss:Index="18"><Data ss:Type="String">Korean Translation</Data></Cell><Cell ss:Index="19"><Data ss:Type="String">Your Translation</Data></Cell></Row>
+   <Row><Cell ss:Index="2"><Data ss:Type="String">ui_menu_QUICKGAME</Data></Cell><Cell ss:Index="4"><Data ss:Type="String">CO-OP GAME</Data></Cell><Cell ss:Index="13"><Data ss:Type="String">menu</Data></Cell><Cell ss:Index="19"><Data ss:Type="String">КООПЕРАТИВНАЯ ИГРА</Data></Cell></Row>
+   <Row><Cell ss:Index="2"><Data ss:Type="String">ui_menu_JOIN WELL-POPULATED</Data></Cell><Cell ss:Index="4"><Data ss:Type="String">PLAY THE CAMPAIGN WITH FRIENDS: HOST OR JOIN BY CODE</Data></Cell><Cell ss:Index="13"><Data ss:Type="String">menu</Data></Cell><Cell ss:Index="19"><Data ss:Type="String">КАМПАНИЯ ВМЕСТЕ С ДРУЗЬЯМИ: СВОЯ ИГРА ИЛИ ВХОД ПО КОДУ</Data></Cell></Row>
+  </Table>
+ </Worksheet>
+</Workbook>

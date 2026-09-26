@@ -23,9 +23,9 @@ run `install.bat`, or run this in PowerShell:
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/SeniorStackOverflow/crysis-coop/releases/latest/download/install.ps1 | iex"
 ```
 
-* Host: start the **Crysis Coop** shortcut and click **CO-OP** (top right of the menu), then **New campaign** or **Continue**.
-* Friend: **CO-OP → Join a friend**, the code the host sees, **Join**.
-* In the game, Esc → **CO-OP**: the code, the players, saving and going back to a checkpoint, leaving.
+* Host: start the **Crysis Coop** shortcut, **Multiplayer → Co-op game** (it replaces Quick game; Russian: Сеть → Кооперативная игра), then **New campaign** or **Continue**.
+* Friend: **Multiplayer → Co-op game → Join a friend**, the code the host sees, **Join**.
+* In the game, Esc → **Co-op game**: the code, the players, saving and going back to a checkpoint, leaving.
 * Console commands (`coop_host`, `coop_continue`, `coop_join <code>`...) do the same without the menu.
 
 Needs Crysis 1.2.1 (GOG, Steam, EA; DVD + patches) on Windows 8 or later. Each player needs their own copy of the game.
