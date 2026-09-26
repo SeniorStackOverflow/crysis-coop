@@ -1,0 +1,37 @@
+--------------------------------------------------------------------------
+-- Crysis Coop - tunables. Safe to edit; restart the level after changes.
+--------------------------------------------------------------------------
+CoopConfig =
+{
+	VERSION = "0.1.0",
+	DEBUG = true,                       -- "[Coop] ..." lines in Game.log
+
+	TEAM_NAME = "black",                -- US nanosuit models (stock TIA team)
+	START_TIMER = 3,
+
+	RESPAWN_DELAY = 8,                  -- seconds dead before auto-respawn
+	SPAWN_INVULNERABILITY = 5,          -- seconds of invulnerability after (re)spawn
+	SPAWN_RADIUS = 2.5,                 -- meters from the leader
+	SPAWN_Z_OFFSET = 0.5,
+	SPAWN_SLOTS = 6,                    -- positions on the ring around the leader
+	ANCHOR_INTERVAL = 3,                -- ticks (seconds) between leader position snapshots
+	TELEPORT_COOLDOWN = 20,
+	SETTLE_SECONDS = 8,                 -- host must stand still this long (intro over) before teammates spawn
+	SETTLE_MAX_SPEED = 3,               -- m/s; faster than this = still in plane / falling / driving
+
+	-- autotest only (sv_servername contains "AUTOTEST"): observe-only AI report
+	-- radius around the host once he stands on solid ground
+	AUTOTEST_REPORT_RADIUS = 60,             -- seconds between coop_tp uses per player
+
+	AI_DAMAGE_TO_PLAYER_MULT = 1.0,     -- difficulty knob: <1 easier, >1 harder
+
+	EQUIP_PACK = "DefaultPlayer",       -- same pack SinglePlayer gives the SP player
+	EXTRA_ITEMS = { "OffHand", "Fists", "Binoculars", "SOCOM" },
+	SELECT_ITEM = "SCAR",               -- given last and selected
+
+	LEVEL_PREFIX = "multiplayer/tia/coop_",
+	MAP_COMMAND_FMT = "coop_change_map %s",   -- keeps the players connected
+	MAPCHANGE_DELAY_MS = 8000,
+	CAMPAIGN = { "island", "village", "rescue", "harbor", "tank", "mine",
+	             "core", "ice", "sphere", "ascension", "fleet" },
+};
