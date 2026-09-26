@@ -10,6 +10,7 @@
 #include "Game.h"
 #include "Nodes/G2FlowBaseNode.h"
 #include "CoopAI.h"
+#include "CoopSave.h"
 #include "Actor.h"
 #include "GameRules.h"
 
@@ -218,16 +219,34 @@ CActor* CoopGraphPlayer(IFlowGraph* pGraph)
 namespace
 {
 	IFlowNodePtr s_pOriginalEndLevel;
+	IFlowNodePtr s_pOriginalSaveGame;
+
+	IFlowNodePtr CaptureOriginal(IFlowSystem* pFlow, const char* type)
+	{
+		const TFlowNodeTypeId typeId = pFlow->GetTypeId(type);
+		IFlowGraphPtr pGraph = typeId != InvalidFlowNodeTypeId ? pFlow->CreateFlowGraph() : IFlowGraphPtr();
+		const TFlowNodeId id = pGraph ? pGraph->CreateNode(typeId, "CoopOriginal") : InvalidFlowNodeId;
+		IFlowNodeData* pData = id != InvalidFlowNodeId ? pGraph->GetNodeData(id) : 0;
+		IFlowNodePtr pNode = pData ? pData->GetNode() : 0;
+		CryLogAlways("[CoopFlow] %s: CryAction's node %s", type, pNode ? "kept for single player" : "NOT FOUND");
+		return pNode;
+	}
+
+	int FindInputPort(IFlowNode* pNode, const char* name)
+	{
+		SFlowNodeConfig config;
+		pNode->GetConfiguration(config);
+		for (int i = 0; config.pInputPorts && config.pInputPorts[i].name; ++i)
+			if (!stricmp(config.pInputPorts[i].name, name))
+				return i;
+		return -1;
+	}
 }
 
 void CoopCaptureOriginalFlowNodes(IFlowSystem* pFlow)
 {
-	const TFlowNodeTypeId typeId = pFlow->GetTypeId("Mission:EndLevelNew");
-	IFlowGraphPtr pGraph = typeId != InvalidFlowNodeTypeId ? pFlow->CreateFlowGraph() : IFlowGraphPtr();
-	const TFlowNodeId id = pGraph ? pGraph->CreateNode(typeId, "CoopOriginalEndLevel") : InvalidFlowNodeId;
-	IFlowNodeData* pData = id != InvalidFlowNodeId ? pGraph->GetNodeData(id) : 0;
-	s_pOriginalEndLevel = pData ? pData->GetNode() : 0;
-	CryLogAlways("[CoopFlow] Mission:EndLevelNew: CryAction's node %s", s_pOriginalEndLevel ? "kept for single player" : "NOT FOUND");
+	s_pOriginalEndLevel = CaptureOriginal(pFlow, "Mission:EndLevelNew");
+	s_pOriginalSaveGame = CaptureOriginal(pFlow, "System:SaveGame");
 }
 
 class CFlowNode_CoopEndLevel : public CFlowBaseNode
@@ -321,3 +340,85 @@ private:
 };
 
 REGISTER_FLOW_NODE("Mission:EndLevelNew", CFlowNode_CoopEndLevel);
+
+// System:SaveGame (the campaign's checkpoints) replaces CryAction's node the
+// same way. In coop CryAction's node does nothing (autosave is off: a single
+// player save cannot be made or loaded from a network game as it is); on the
+// coop server the checkpoint goes to CoopSave, which saves the progress.
+class CFlowNode_CoopSaveGame : public CFlowBaseNode
+{
+public:
+	CFlowNode_CoopSaveGame(SActivationInfo* pActInfo)
+	{
+		if (s_pOriginalSaveGame)
+			m_pOriginal = s_pOriginalSaveGame->Clone(pActInfo);
+	}
+
+	IFlowNodePtr Clone(SActivationInfo* pActInfo)
+	{
+		return new CFlowNode_CoopSaveGame(pActInfo);
+	}
+
+	void GetConfiguration(SFlowNodeConfig& config)
+	{
+		if (s_pOriginalSaveGame)
+		{
+			s_pOriginalSaveGame->GetConfiguration(config);
+			return;
+		}
+		static const SInputPortConfig in_ports[] =
+		{
+			InputPortConfig_Void("Save", _HELP("Save the game")),
+			InputPortConfig_Void("Load", _HELP("Load the game")),
+			InputPortConfig<string>("Name", _HELP("Name of SaveGame to save/load")),
+			{0}
+		};
+		static const SOutputPortConfig out_ports[] =
+		{
+			{0}
+		};
+		config.pInputPorts = in_ports;
+		config.pOutputPorts = out_ports;
+		config.SetCategory(EFLN_APPROVED);
+	}
+
+	bool SerializeXML(SActivationInfo* pActInfo, const XmlNodeRef& root, bool reading)
+	{
+		return m_pOriginal ? m_pOriginal->SerializeXML(pActInfo, root, reading) : true;
+	}
+
+	void Serialize(SActivationInfo* pActInfo, TSerialize ser)
+	{
+		if (m_pOriginal)
+			m_pOriginal->Serialize(pActInfo, ser);
+	}
+
+	void ProcessEvent(EFlowEvent event, SActivationInfo* pActInfo)
+	{
+		if (!CoopAI::IsCoopSession())
+		{
+			if (m_pOriginal)
+				m_pOriginal->ProcessEvent(event, pActInfo);
+			return;
+		}
+		if (event != eFE_Activate || !gEnv->bServer)
+			return;
+		const int save = FindInputPort(this, "Save"), name = FindInputPort(this, "Name");
+		if (save < 0 || !IsPortActive(pActInfo, save))
+			return;
+		string checkpoint;
+		if (name >= 0)
+			pActInfo->pInputPorts[name].GetValueWithConversion(checkpoint);
+		CoopSave::RequestCheckpoint(checkpoint.c_str());
+	}
+
+	virtual void GetMemoryStatistics(ICrySizer* s)
+	{
+		s->Add(*this);
+	}
+
+private:
+	IFlowNodePtr m_pOriginal;
+};
+
+REGISTER_FLOW_NODE("System:SaveGame", CFlowNode_CoopSaveGame);

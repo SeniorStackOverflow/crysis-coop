@@ -30,6 +30,7 @@
 
 #include "CoopAI.h"
 #include "CoopRelay.h"
+#include "CoopSave.h"
 #include "Game.h"
 #include "GameCVars.h"
 #include "GameRules.h"
@@ -69,6 +70,7 @@ namespace
 	void UpdatePlayerMovers();
 	void UpdateVehicleExits(float frameTime);
 	void UpdateTestCursor();
+	void UpdateTestCmdFile();
 	void ScanUsableObjects(bool atLoad);
 	void UpdateDebugExplosions(float frameTime);
 	void UpdateKillWatch(float frameTime);
@@ -293,12 +295,7 @@ namespace
 	// the player his own last inventory back (like a campaign checkpoint), a
 	// joining player gets a copy of the host's. Items/ammo the level scripts
 	// hand out are therefore kept (story scripts check them).
-	struct SInvSnapshot
-	{
-		std::vector<string> items;
-		std::vector<std::pair<string, int> > ammo;
-		string current;
-	};
+	typedef CoopAI::SInventory SInvSnapshot;
 	std::map<EntityId, SInvSnapshot> s_invSnapshots;
 	float s_invTimer = 0.0f;
 
@@ -450,25 +447,9 @@ namespace
 	{
 		if (!gEnv->bServer || pArgs->GetArgCount() < 2)
 			return;
-		s_invCarry.clear();
-		s_invCarryLevel = LevelShortName(pArgs->GetArg(1));
-		IActorIteratorPtr pIt = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
-		while (IActor* pActor = pIt->Next())
-		{
-			if (!pActor->IsPlayer())
-				continue;
-			SInvSnapshot snap;
-			if (pActor->GetHealth() <= 0 || !TakeInventorySnapshot(pActor, snap))
-			{
-				std::map<EntityId, SInvSnapshot>::iterator it = s_invSnapshots.find(pActor->GetEntityId());
-				if (it == s_invSnapshots.end())
-					continue;
-				snap = it->second;
-			}
-			s_invCarry[pActor->GetEntity()->GetName()] = snap;
-			CryLogAlways("[CoopInv] %s: %d items / %d ammo types carried to %s", pActor->GetEntity()->GetName(),
-				(int)snap.items.size(), (int)snap.ammo.size(), s_invCarryLevel.c_str());
-		}
+		std::map<string, SInvSnapshot> inventories;
+		CoopAI::CollectInventories(inventories, true);
+		CoopAI::SetInventoryCarry(pArgs->GetArg(1), inventories);
 	}
 
 	IActor* FindActorByName(const char* name)
@@ -1527,6 +1508,7 @@ void CoopAI::Init()
 {
 	RegisterCommands();
 	CoopRelay::Init();
+	CoopSave::Init();
 	if (gEnv->pConsole && !s_pTrace)
 	{
 		s_pTrace = gEnv->pConsole->RegisterInt("coop_trace", 1, 0, "Crysis Coop debugging: 1 = detailed trace to coop_trace_server.log / coop_trace_client.log");
@@ -1571,8 +1553,9 @@ void CoopAI::Init()
 		gEnv->pConsole->RegisterFloat("coop_debug_physquery_time", 30.0f, 0, "Crysis Coop debugging: see coop_debug_physquery");
 		gEnv->pConsole->RegisterString("coop_debug_physdump", "", 0, "Crysis Coop debugging: every 2 s the physics state of living soldiers whose name contains this is traced (on every machine that has it set)");
 		gEnv->pConsole->RegisterInt("coop_keep_vehicles", 1, 0, "Crysis Coop: 1 = vehicles the players leave stay (no network 'abandoned vehicle' destruction), as in single player");
+		gEnv->pConsole->RegisterString("coop_test_cmdfile", "", 0, "Crysis Coop testing: the lines of this file (relative to the game folder) are run as console commands, then the file is deleted");
 		gEnv->pConsole->RegisterInt("coop_test_free_cursor", 0, 0, "Crysis Coop testing: 1 keeps the system cursor free (as with a menu open): a test window never takes the mouse");
-		gEnv->pConsole->RegisterString("coop_debug_flow", "", 0, "Crysis Coop debugging: \"<graph entity> <node> <output port index>\" is activated on the server coop_debug_flow_time s after the game started");
+		gEnv->pConsole->RegisterString("coop_debug_flow", "", 0, "Crysis Coop debugging: \"<graph entity> <node> <output port index or name>\" is activated on the server coop_debug_flow_time s after the game started");
 		gEnv->pConsole->RegisterFloat("coop_debug_flow_time", 20.0f, 0, "Crysis Coop debugging: see coop_debug_flow");
 		gEnv->pConsole->RegisterFloat("coop_debug_menu_at", 0.0f, 0, "Crysis Coop debugging: the host opens the in-game menu this many s after coop_debug_flow fired (0: never)");
 		gEnv->pConsole->RegisterInt("coop_hud_enemy_names", 0, 0, "Crysis Coop: 1 shows the multiplayer names over soldiers that were shot (0: none, as in single player)");
@@ -1625,6 +1608,7 @@ void CoopNetSerClearTrace();
 void CoopAI::OnLoadingStart(const char* levelName)
 {
 	CoopNetSerClearTrace();
+	CoopSave::OnLoadingStart(levelName);
 	ResetFlowMirror();
 	ResetSync();
 	ResetLoadoutCatchup();
@@ -1838,6 +1822,9 @@ void CoopAI::OnLoadingComplete()
 	}
 
 	s_levelReady = true;
+	if (ILevel* pLevel = g_pGame->GetIGameFramework()->GetILevelSystem()->GetCurrentLevel())
+		if (pLevel->GetLevelInfo() && IsCoopLevel(pLevel->GetLevelInfo()->GetName()))
+			CoopSave::OnLevelReady(pLevel->GetLevelInfo()->GetName());
 
 	// coop_sp_world 2: single player only while loading (HUD, objectives,
 	// level entities are created as in the campaign), network mode while
@@ -1873,6 +1860,54 @@ void CoopAI::OnGameEnded()
 		s_clientSPLoad = false;
 	}
 	BlockSaveLoad(false);
+}
+
+void CoopAI::CollectInventories(std::map<string, SInventory>& out, bool includeLocal)
+{
+	IGameFramework* pFramework = g_pGame->GetIGameFramework();
+	IActor* pLocal = pFramework->GetClientActor();
+	IActorIteratorPtr pIt = pFramework->GetIActorSystem()->CreateActorIterator();
+	while (IActor* pActor = pIt->Next())
+	{
+		if (!pActor->IsPlayer() || (!includeLocal && pActor == pLocal))
+			continue;
+		SInvSnapshot snap;
+		if (pActor->GetHealth() <= 0 || !TakeInventorySnapshot(pActor, snap))
+		{
+			std::map<EntityId, SInvSnapshot>::iterator it = s_invSnapshots.find(pActor->GetEntityId());
+			if (it == s_invSnapshots.end())
+				continue;
+			snap = it->second;
+		}
+		out[pActor->GetEntity()->GetName()] = snap;
+	}
+	// what the previous level left them and they did not get yet (not joined
+	// again, not equipped yet)
+	const char* localName = pLocal ? pLocal->GetEntity()->GetName() : "";
+	for (std::map<string, SInvSnapshot>::const_iterator it = s_invCarry.begin(); it != s_invCarry.end(); ++it)
+		if ((includeLocal || it->first != localName) && out.find(it->first) == out.end())
+			out[it->first] = it->second;
+}
+
+void CoopAI::SetInventoryCarry(const char* level, const std::map<string, SInventory>& inventories)
+{
+	s_invCarry = inventories;
+	s_invCarryLevel = LevelShortName(level);
+	for (std::map<string, SInvSnapshot>::const_iterator it = s_invCarry.begin(); it != s_invCarry.end(); ++it)
+		CryLogAlways("[CoopInv] %s: %d items / %d ammo types carried to %s", it->first.c_str(),
+			(int)it->second.items.size(), (int)it->second.ammo.size(), s_invCarryLevel.c_str());
+}
+
+void CoopAI::OnGameLoaded()
+{
+	// entities the save brought back (soldiers spawned during play, script
+	// objects) are new game objects: the same network setup as on level load
+	s_aiAspectsOff.clear();
+	const int ai = DisableAIDynamicAspects();
+	DisableScriptPhysicsSync();
+	// the snapshots describe the players before the load
+	s_invSnapshots.clear();
+	CryLogAlways("[CoopAI] saved game loaded: dynamic network aspects switched off for %d AI actors", ai);
 }
 
 int CoopAI::DebugFlags()
@@ -2546,7 +2581,9 @@ namespace
 void CoopAI::Update(float frameTime)
 {
 	UpdateTestCursor();
+	UpdateTestCmdFile();
 	CoopRelay::Update(frameTime);
+	CoopSave::Update(frameTime);
 	UpdateJoinerPositions();
 	if (gEnv->bServer && gEnv->bMultiplayer)
 		UpdateFakeRender();
@@ -4046,6 +4083,35 @@ namespace
 		s_freed = want;
 	}
 
+	// testing: the lines of the file coop_test_cmdfile names (game folder)
+	// are run as console commands, then the file is deleted
+	void UpdateTestCmdFile()
+	{
+		static CTimeValue s_next;
+		ICVar* pFile = gEnv->pConsole ? gEnv->pConsole->GetCVar("coop_test_cmdfile") : 0;
+		if (!pFile || !pFile->GetString()[0] || gEnv->pTimer->GetAsyncTime() < s_next)
+			return;
+		s_next = gEnv->pTimer->GetAsyncTime() + CTimeValue(0.5f);
+		FILE* f = fopen(pFile->GetString(), "rb");
+		if (!f)
+			return;
+		std::vector<string> lines;
+		char line[1024];
+		while (fgets(line, sizeof(line), f))
+		{
+			string cmd = string(line).Trim();
+			if (!cmd.empty())
+				lines.push_back(cmd);
+		}
+		fclose(f);
+		remove(pFile->GetString());
+		for (size_t i = 0; i < lines.size(); ++i)
+		{
+			CryLogAlways("[CoopTest] cmdfile: %s", lines[i].c_str());
+			gEnv->pConsole->ExecuteString(lines[i].c_str());
+		}
+	}
+
 	void GetPlayerSeat(IActor* pActor, string& vehicle, int& seat)
 	{
 		IVehicle* pVehicle = pActor->GetLinkedVehicle();
@@ -4420,10 +4486,10 @@ namespace
 		if (s_debugFlowTimer < (pTime ? pTime->GetFVal() : 20.0f))
 			return;
 		s_debugFlowDone = true;
-		char graphName[128] = "", nodeName[32] = "";
-		int port = 0;
-		if (sscanf(pFlow->GetString(), "%127s %31s %d", graphName, nodeName, &port) < 2)
+		char graphName[128] = "", nodeName[32] = "", portName[64] = "0";
+		if (sscanf(pFlow->GetString(), "%127s %31s %63s", graphName, nodeName, portName) < 2)
 			return;
+		int port = atoi(portName);
 		// several entities may share the name: the one whose graph has the node
 		IFlowGraph* pGraph = 0;
 		TFlowNodeId node = InvalidFlowNodeId;
@@ -4443,6 +4509,16 @@ namespace
 				break;
 			}
 		}
+		// the output port by name ("Enter") or by index
+		if (node != InvalidFlowNodeId && !isdigit((unsigned char)portName[0]))
+			if (IFlowNodeData* pData = pGraph->GetNodeData(node))
+			{
+				SFlowNodeConfig config;
+				pData->GetNode()->GetConfiguration(config);
+				for (int i = 0; config.pOutputPorts && config.pOutputPorts[i].name; ++i)
+					if (!stricmp(config.pOutputPorts[i].name, portName))
+						port = i;
+			}
 		if (node != InvalidFlowNodeId)
 			pGraph->ActivatePort(SFlowAddress(node, (TFlowPortId)port, true), true);
 		s_debugFlowAt = gEnv->pTimer->GetCurrTime();

@@ -36,8 +36,14 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/SeniorStackOverflo
 coop_host
 ```
 
-The campaign starts from the first level. To start from another level (co-op has no saved games), give its name:
+The campaign starts from the first level. To start from another level, give its name:
 `coop_host village`. The levels are island, village, rescue, harbor, tank, mine, core, ice, sphere, ascension and fleet (or `1`–`11`).
+
+To carry on where you stopped last time, the host types instead
+
+```
+coop_continue
+```
 
 When the level has loaded, a code appears on the screen, for example `Co-op code: 64117`.
 
@@ -49,11 +55,29 @@ coop_join 64117
 
 The friend appears next to the host once the host has landed or finished the level's intro. At the end of a level, everybody goes on to the next one together, and the code stays the same.
 
+## Saving
+
+The host's game saves the progress by itself, like the single player
+campaign: at every level start and at the campaign's checkpoints ("Game
+saved" on everybody's screen). The host can also save at any moment with
+`coop_save`.
+
+`coop_continue` hosts the game from the last checkpoint: the level with
+everything done in it so far, the host where he was. Friends join with the
+new code as usual and get back the weapons they had at that checkpoint.
+`coop_continue prev` goes back one checkpoint more.
+
+The progress lives in the host's `Documents\My Games\Crysis\SaveGames`
+(`coop_progress.txt` and the `coop_checkpoint_*` saves). A new game with
+`coop_host` overwrites it at its first checkpoint.
+
 ## Console commands
 
 | Command | |
 |---|---|
-| `coop_host [level]` | host a co-op game |
+| `coop_host [level]` | host a new co-op game |
+| `coop_continue` | host the game from the last checkpoint |
+| `coop_save` | save now (host) |
 | `coop_join <code>` | join a friend's game |
 | `coop_relay_status` | the code, who is connected, latency |
 | `coop_tp` | teleport to the leader (if stuck) |

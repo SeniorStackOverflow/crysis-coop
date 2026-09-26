@@ -16,6 +16,7 @@
 #include "GameCVars.h"
 #include "CoopAI.h"
 #include "CoopRelay.h"
+#include "CoopSave.h"
 #include "GameActions.h"
 #include "Menus/FlashMenuObject.h"
 #include "Menus/OptionsManager.h"
@@ -573,8 +574,8 @@ void CGame::OnSaveGame(ISaveGame* pSaveGame)
 		pSaveGame->AddMetadata("ModVersion", info.m_version);
 	}
 
-	//write file to profile
-	if(m_pPlayerProfileManager)
+	//write file to profile (a coop checkpoint is not the single player's last save)
+	if(m_pPlayerProfileManager && !CoopSave::IsCoopSaveName(pSaveGame->GetFileName()))
 	{
 		const char* saveGameFolder = m_pPlayerProfileManager->GetSharedSaveGameFolder();
 		const bool bSaveGameFolderShared = saveGameFolder && *saveGameFolder;
@@ -964,7 +965,7 @@ const string& CGame::GetLastSaveGame(string &levelName)
 			const int nSaveGames = pSGE->GetCount();
 			for (int i=0; i<nSaveGames; ++i)
 			{
-				if (pSGE->GetDescription(i, desc))
+				if (pSGE->GetDescription(i, desc) && !CoopSave::IsCoopSaveName(desc.name))
 				{
 					if (desc.metaData.saveTime > curLatestTime)
 					{

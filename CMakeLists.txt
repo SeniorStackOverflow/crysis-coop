@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.15)
 ################################################################################
 
 project(Coop
-	VERSION 0.2.0.0
+	VERSION 0.3.0.0
 	DESCRIPTION "Crysis co-op campaign"
 	HOMEPAGE_URL "https://github.com/SeniorStackOverflow/crysis-coop"
 	LANGUAGES CXX RC
@@ -53,6 +53,7 @@ add_library(${CMAKE_PROJECT_NAME} MODULE
 	Code/Mod/ClientSynchedStorage.cpp
 	Code/Mod/CoopAI.cpp
 	Code/Mod/CoopRelay.cpp
+	Code/Mod/CoopSave.cpp
 	Code/Mod/CompatibilityAlienMovementController.cpp
 	Code/Mod/DebugGun.cpp
 	Code/Mod/Detonate.cpp

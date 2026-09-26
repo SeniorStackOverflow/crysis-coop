@@ -13,6 +13,7 @@ History:
 *************************************************************************/
 #include "StdAfx.h"
 #include "CoopAI.h"
+#include "CoopSave.h"
 
 #include "FlashMenuObject.h"
 #include "FlashMenuScreen.h"
@@ -215,6 +216,8 @@ void CFlashMenuObject::UpdateSaveGames()
 	for (int i=0; i<pSGE->GetCount(); ++i)
 	{
 		pSGE->GetDescription(i, desc);
+		if (CoopSave::IsCoopSaveName(desc.name))
+			continue;
 
 		//check mod version
 		const char *tempModName = desc.metaData.xmlMetaDataNode->getAttr("ModName");

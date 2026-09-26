@@ -19,6 +19,7 @@
 #include "StdAfx.h"
 #include "CoopRelay.h"
 #include "CoopAI.h"
+#include "CoopSave.h"
 #include "Game.h"
 #include "GameRules.h"
 
@@ -1135,7 +1136,9 @@ void CoopRelay::Update(float frameTime)
 	}
 
 	// ---- host
-	const bool hosting = gEnv->bServer && CoopAI::IsCoopSession() && g_pGame->GetIGameFramework()->IsGameStarted();
+	// coop_continue: not before the save is loaded (the load disconnects
+	// everybody but the host)
+	const bool hosting = gEnv->bServer && CoopAI::IsCoopSession() && g_pGame->GetIGameFramework()->IsGameStarted() && !CoopSave::IsLoadPending();
 	if (!s_hosting)
 	{
 		if (hosting && s_pEnable->GetIVal())

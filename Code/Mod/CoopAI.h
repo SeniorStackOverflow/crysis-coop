@@ -1,5 +1,8 @@
 #pragma once
 
+#include <map>
+#include <vector>
+
 // Crysis Coop: run the AI system in network games.
 //
 // In a multiplayer game context CryAction keeps the AI system disabled
@@ -83,6 +86,23 @@ namespace CoopAI
 
 	// coop_god: players take no damage
 	bool GodMode();
+
+	// a player's equipment by item / ammo class, kept by player name from
+	// level to level and in the coop progress save
+	struct SInventory
+	{
+		std::vector<string> items;
+		std::vector<std::pair<string, int> > ammo;
+		string current;
+	};
+	// server: every player's inventory by name (a dead player: his last
+	// snapshot); the host's own is left out if !includeLocal
+	void CollectInventories(std::map<string, SInventory>& out, bool includeLocal);
+	// server: given back by player name when the players are equipped on
+	// that coop map (see coop_inv_restore)
+	void SetInventoryCarry(const char* level, const std::map<string, SInventory>& inventories);
+	// server: a saved game was loaded into the running level
+	void OnGameLoaded();
 
 	// an actor died (CActor::Kill, server and clients): traced, and his state
 	// a moment later (still in the vehicle? ragdoll?) too
