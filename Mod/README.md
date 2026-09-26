@@ -20,7 +20,13 @@ Run `install.bat` from the release archive. The installer:
 * installs [C1-Launcher](https://github.com/ccomrade/c1-launcher) if needed (the original `Bin32\Crysis.exe` is kept as `Crysis.exe.original`);
 * copies the mod to `Mods\Coop`;
 * builds the co-op versions of the campaign levels from your own game files (almost no extra disk space; the original files are not changed);
-* creates a **Crysis Coop** shortcut on the desktop.
+* puts the launcher `CrysisCoop.exe` into the game folder and creates **Crysis Coop** shortcuts to it on the
+  desktop and in the Start menu.
+
+The launcher starts the game with the mod (`Bin32\Crysis.exe -mod Coop -dx9`), the way the game's own shortcut
+starts the plain game. If something the mod needs is missing, it says what and how to fix it. Its arguments are
+passed on to the game (`CrysisCoop.exe -dx10`, `CrysisCoop.exe +coop_join 123456`). For Steam or GOG Galaxy, add
+`CrysisCoop.exe` as a game or program of its own.
 
 Without downloading the archive first (PowerShell):
 

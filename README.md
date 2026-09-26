@@ -23,7 +23,7 @@ run `install.bat`, or run this in PowerShell:
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/SeniorStackOverflow/crysis-coop/releases/latest/download/install.ps1 | iex"
 ```
 
-* Host: start the **Crysis Coop** shortcut, **Multiplayer → Co-op game** (it replaces Quick game; Russian: Сеть → Кооперативная игра), then **New campaign** or **Continue**.
+* Host: start the **Crysis Coop** shortcut (the launcher `CrysisCoop.exe` in the game folder), **Multiplayer → Co-op game** (it replaces Quick game; Russian: Сеть → Кооперативная игра), then **New campaign** or **Continue**.
 * Friend: **Multiplayer → Co-op game → Join a friend**, the code the host sees, **Join**.
 * In the game, Esc → **Co-op game**: the code, the players, saving and going back to a checkpoint, leaving.
 * Console commands (`coop_host`, `coop_continue`, `coop_join <code>`...) do the same without the menu.
@@ -68,6 +68,7 @@ The files:
 | `Code/Mod/` | the game DLL (`Coop.dll`), based on the CryENGINE 2 Mod SDK game code. The coop work is mostly in `CoopAI.cpp`, `CoopRelay.cpp`, `CoopSave.cpp`, `CoopCloud.cpp`, `CoopMenu.cpp`, `Nodes/CoopFlowNodes.cpp`, plus hooks in the stock files |
 | `Code/CryEngine/` | engine interface headers from the SDK |
 | `Mod/` | the mod's Lua scripts and configs (copied to `Mods/Coop`) |
+| `Launcher/` | `CrysisCoop.exe`: starts the game with the mod, checks what the mod needs first |
 | `Installer/` | `install.ps1`, `install.bat`, `uninstall.ps1` |
 | `Relay/` | the relay server (Python, no dependencies: tunnel, codes, cloud checkpoints) and its deployment |
 | `tools/` | `package.ps1` (release archive), `lua_check.py` |
@@ -85,7 +86,8 @@ Requirements:
 build_coop.bat
 ```
 
-This builds the 32-bit `Coop.dll` and copies it, together with `Mod/`, into `..\Mods\Coop`. Run the game with
+This builds the 32-bit `Coop.dll` and the launcher `CrysisCoop.exe`, and copies them, together with `Mod/`, into
+`..\Mods\Coop` (the launcher also into the game folder). Run the game with `..\CrysisCoop.exe`, or
 `Bin32\Crysis.exe -mod Coop` ([C1-Launcher](https://github.com/ccomrade/c1-launcher) is required). Edit scripts and
 configs in `Mod/`, not in `Mods\Coop`.
 

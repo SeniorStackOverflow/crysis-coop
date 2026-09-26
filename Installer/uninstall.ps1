@@ -1,7 +1,8 @@
 <#
 Crysis Coop - uninstaller (lives in Mods\Coop after installation).
 
-Removes Mods\Coop and the "Crysis Coop" shortcuts. The co-op levels in
+Removes Mods\Coop, the launcher CrysisCoop.exe and the "Crysis Coop"
+shortcuts. The co-op levels in
 Mods\Coop are hard links to the game's own level files: removing them never
 changes or deletes the originals under Game\Levels.
 
@@ -25,15 +26,17 @@ if (-not (Test-Path -LiteralPath (Join-Path $game 'Bin32\CrySystem.dll'))) {
 
 Write-Host "This removes:"
 Write-Host "  $modDir"
-Write-Host "  the 'Crysis Coop' shortcuts"
+Write-Host "  $game\CrysisCoop.exe and the 'Crysis Coop' shortcuts"
 if ($RestoreLauncher) { Write-Host "  C1-Launcher (Bin32\Crysis.exe.original is put back)" }
 if (-not $Force) {
     $a = Read-Host "Continue? [y/N]"
     if ($a -notmatch '^[Yy]') { Write-Host "Nothing removed."; exit 0 }
 }
 
-foreach ($lnk in @((Join-Path $game 'Crysis Coop.lnk'), (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Crysis Coop.lnk'))) {
-    if (Test-Path -LiteralPath $lnk) { Remove-Item -LiteralPath $lnk -Force; Write-Host "Removed $lnk" }
+$files = @((Join-Path $game 'Crysis Coop.lnk'), (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Crysis Coop.lnk'),
+    (Join-Path ([Environment]::GetFolderPath('Programs')) 'Crysis Coop.lnk'), (Join-Path $game 'CrysisCoop.exe'))
+foreach ($f in $files) {
+    if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force; Write-Host "Removed $f" }
 }
 
 if ($RestoreLauncher) {

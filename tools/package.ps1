@@ -2,8 +2,9 @@
 Builds the release archive dist\Crysis-Coop-v<version>.zip:
 
   install.bat, install.ps1, README.md, LICENSE.txt
-  Mods\Coop\  Bin32\Coop.dll, Game\ (scripts, configs), info.xml, logo.jpg,
-              README*.md, uninstall.ps1, LICENSE.txt
+  Mods\Coop\  Bin32\Coop.dll, CrysisCoop.exe (the launcher; the installer
+              copies it into the game folder), Game\ (scripts, configs),
+              info.xml, logo.jpg, README*.md, uninstall.ps1, LICENSE.txt
 
 No game files: the installer builds the co-op levels from the player's own
 copy of Crysis.
@@ -29,6 +30,9 @@ if (-not $Dll) {
         Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 }
 if (-not $Dll -or -not (Test-Path -LiteralPath $Dll)) { throw "Coop.dll not found - build the mod first." }
+# the launcher is built next to the DLL
+$Launcher = Join-Path (Split-Path -Parent $Dll) 'CrysisCoop.exe'
+if (-not (Test-Path -LiteralPath $Launcher)) { throw "CrysisCoop.exe not found next to $Dll - build the mod first." }
 
 $name = "Crysis-Coop-v$Version"
 $dist = Join-Path $root 'dist'
@@ -38,6 +42,7 @@ $mod = Join-Path $stage 'Mods\Coop'
 New-Item -ItemType Directory -Force -Path (Join-Path $mod 'Bin32') | Out-Null
 
 Copy-Item -LiteralPath $Dll -Destination (Join-Path $mod 'Bin32\Coop.dll')
+Copy-Item -LiteralPath $Launcher -Destination (Join-Path $mod 'CrysisCoop.exe')
 Copy-Item -LiteralPath (Join-Path $root 'Mod\Game') -Destination $mod -Recurse
 Get-ChildItem -LiteralPath (Join-Path $root 'Mod') -File | Copy-Item -Destination $mod
 Copy-Item -LiteralPath (Join-Path $root 'Installer\uninstall.ps1') -Destination $mod

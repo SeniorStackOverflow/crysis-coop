@@ -11,7 +11,9 @@ Installs the co-op campaign mod into an existing Crysis (2007) installation
   4. builds the co-op versions of the 11 campaign levels from the game's own
      level files (hard links: almost no extra disk space; the original files
      are never modified)
-  5. creates the "Crysis Coop" shortcut (desktop and game folder)
+  5. puts the launcher CrysisCoop.exe into the game folder (it starts the game
+     with the mod) and creates the "Crysis Coop" shortcuts to it (game folder,
+     desktop, Start menu)
 
 Usage (from the extracted release archive):
   install.bat
@@ -23,7 +25,7 @@ Or without downloading anything first (fetches the latest release):
   -GamePath   the Crysis folder (the one with Bin32 and Game in it)
   -Force      rebuild the co-op levels even if they exist
   -Yes        no questions (installs C1-Launcher when needed)
-  -NoShortcut no desktop shortcut
+  -NoShortcut no desktop and Start menu shortcuts
 #>
 [CmdletBinding()]
 param(
@@ -259,16 +261,43 @@ try {
     }
 
     # -----------------------------------------------------------------------
+    Step "Launcher"
+    # CrysisCoop.exe starts Bin32\Crysis.exe -mod Coop -dx9 (and says what is
+    # missing when something is)
+    $launcher = Join-Path $Game 'CrysisCoop.exe'
+    $modLauncher = Join-Path $modDir 'CrysisCoop.exe'
+    if (Test-Path -LiteralPath $modLauncher) {
+        Copy-Item -LiteralPath $modLauncher -Destination $launcher -Force
+        $check = Start-Process -FilePath $launcher -ArgumentList '-coop_check' -Wait -PassThru
+        $why = @{ 2 = 'Crysis not found'; 3 = 'Mods\Coop\Bin32\Coop.dll missing'; 4 = 'co-op levels missing'; 5 = 'Bin32\Crysis.exe is not C1-Launcher' }
+        if ($check.ExitCode -ne 0) { Fail "The launcher's check failed: $($why[$check.ExitCode]) (code $($check.ExitCode))." }
+        Say "   $launcher (checked: ready)" Green
+    } else {
+        # an archive from before the launcher: the shortcut starts the game itself
+        $launcher = $null
+        Say "   not in this release, the shortcut starts Bin32\Crysis.exe -mod Coop -dx9" Yellow
+    }
+
+    # -----------------------------------------------------------------------
     Step "Shortcut"
     $shell = New-Object -ComObject WScript.Shell
     $places = @(Join-Path $Game 'Crysis Coop.lnk')
-    if (-not $NoShortcut) { $places += (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Crysis Coop.lnk') }
+    if (-not $NoShortcut) {
+        $places += (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Crysis Coop.lnk')
+        $places += (Join-Path ([Environment]::GetFolderPath('Programs')) 'Crysis Coop.lnk')
+    }
     foreach ($lnk in $places) {
         $s = $shell.CreateShortcut($lnk)
-        $s.TargetPath = $exe
-        $s.Arguments = '-mod Coop -dx9'
+        if ($launcher) {
+            $s.TargetPath = $launcher
+            $s.Arguments = ''
+            $s.IconLocation = "$launcher,0"
+        } else {
+            $s.TargetPath = $exe
+            $s.Arguments = '-mod Coop -dx9'
+            $s.IconLocation = "$exe,0"
+        }
         $s.WorkingDirectory = $Game
-        $s.IconLocation = "$exe,0"
         $s.Description = 'Crysis co-op campaign'
         $s.Save()
         Say "   $lnk" Green
@@ -279,9 +308,10 @@ try {
 
 Write-Host ""
 Write-Host "Done. How to play:" -ForegroundColor White
-Write-Host "  Host:    start 'Crysis Coop', open the console (~) and type:  coop_host"
-Write-Host "           (or coop_host village, ... to start from another level). A code appears on screen."
-Write-Host "  Friend:  start 'Crysis Coop', open the console (~) and type:  coop_join <code>"
+Write-Host "  Start 'Crysis Coop' (the shortcut, or CrysisCoop.exe in the game folder)."
+Write-Host "  Host:    Multiplayer (the 2nd item of the main menu) > Co-op game > New campaign or Continue."
+Write-Host "           A code appears on screen."
+Write-Host "  Friend:  Multiplayer > Co-op game > Join a friend, the host's code, Join."
 Write-Host "  Remove:  $modDir\uninstall.ps1"
 Write-Host ""
 if (-not $Yes) { Read-Host "Press Enter to close" | Out-Null }

@@ -1,0 +1,32 @@
+#include <winver.h>
+
+// see the CrysisCoop target in CMakeLists.txt
+#include "project.h"
+
+// the first icon is the one Explorer and the shortcuts show
+1 ICON "CrysisCoop.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     PROJECT_VERSION_MAJOR,PROJECT_VERSION_MINOR,PROJECT_VERSION_PATCH,PROJECT_VERSION_TWEAK
+PRODUCTVERSION  PROJECT_VERSION_MAJOR,PROJECT_VERSION_MINOR,PROJECT_VERSION_PATCH,PROJECT_VERSION_TWEAK
+FILEOS          VOS__WINDOWS32
+FILETYPE        VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "000904b0"
+        BEGIN
+            VALUE "FileDescription",  "Crysis Coop"
+            VALUE "FileVersion",      PROJECT_VERSION
+            VALUE "InternalName",     "CrysisCoop"
+            VALUE "OriginalFilename", "CrysisCoop.exe"
+            VALUE "ProductName",      "Crysis Coop"
+            VALUE "ProductVersion",   PROJECT_VERSION
+        END
+    END
+
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x9, 1200
+    END
+END
