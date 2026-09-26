@@ -10,7 +10,7 @@ internet with a short code. Nobody has to open ports on a router.
 
 * Crysis (2007) version 1.2.1: GOG, Steam and EA are fine. A DVD copy needs the official patches 1.2 and 1.2.1.
 * Every player needs their own copy of the game and the mod.
-* Windows 8 or later.
+* Windows 8 or later, or Linux with the game under Wine (see below).
 
 ## Installation
 
@@ -33,6 +33,19 @@ Without downloading the archive first (PowerShell):
 ```powershell
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/SeniorStackOverflow/crysis-coop/releases/latest/download/install.ps1 | iex"
 ```
+
+### Linux (Wine)
+
+The game has to run under Wine already (with DXVK or without). Extract the release archive and run:
+
+```bash
+python3 install_linux.py --game ~/Games/Crysis
+```
+
+It does what `install.bat` does, then writes `launch_crysis_coop.sh` into the game folder and a **Crysis Coop**
+entry in the menu and on the desktop. The script is a copy of the game's own launch script (its Wine prefix, DXVK
+settings...) that starts `CrysisCoop.exe`; without one, it runs `wine` in the prefix given with `--prefix`
+(default `~/.wine`). `Bin32/Crysis.exe` must be C1-Launcher: GOG's current build ships it already.
 
 ## How to play
 
@@ -126,7 +139,8 @@ blocked UDP), the game keeps going through the relay.
 
 ## Uninstall
 
-Run `Mods\Coop\uninstall.ps1` (`-RestoreLauncher` also puts the original `Crysis.exe` back).
+Run `Mods\Coop\uninstall.ps1` (`-RestoreLauncher` also puts the original `Crysis.exe` back). On Linux, delete
+`Mods/Coop`, `CrysisCoop.exe`, `launch_crysis_coop.sh` and `crysis-coop.desktop` (menu and desktop).
 
 ---
 

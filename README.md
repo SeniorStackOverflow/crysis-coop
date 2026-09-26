@@ -28,7 +28,7 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/SeniorStackOverflo
 * In the game, Esc → **Co-op game**: the code, the players, saving and going back to a checkpoint, leaving.
 * Console commands (`coop_host`, `coop_continue`, `coop_join <code>`...) do the same without the menu.
 
-Needs Crysis 1.2.1 (GOG, Steam, EA; DVD + patches) on Windows 8 or later. Each player needs their own copy of the game.
+Needs Crysis 1.2.1 (GOG, Steam, EA; DVD + patches) on Windows 8 or later, or on Linux under Wine (`install_linux.py`). Each player needs their own copy of the game.
 The player guide is in [Mod/README.md](Mod/README.md).
 
 ## How it works
@@ -69,7 +69,7 @@ The files:
 | `Code/CryEngine/` | engine interface headers from the SDK |
 | `Mod/` | the mod's Lua scripts and configs (copied to `Mods/Coop`) |
 | `Launcher/` | `CrysisCoop.exe`: starts the game with the mod, checks what the mod needs first |
-| `Installer/` | `install.ps1`, `install.bat`, `uninstall.ps1` |
+| `Installer/` | `install.ps1`, `install.bat`, `uninstall.ps1`; `install_linux.py` for Linux (the game under Wine) |
 | `Relay/` | the relay server (Python, no dependencies: tunnel, codes, cloud checkpoints) and its deployment |
 | `tools/` | `package.ps1` (release archive), `lua_check.py` |
 

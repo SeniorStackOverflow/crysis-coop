@@ -1,9 +1,10 @@
 <#
 Builds the release archive dist\Crysis-Coop-v<version>.zip:
 
-  install.bat, install.ps1, README.md, LICENSE.txt
+  install.bat, install.ps1, install_linux.py, README.md, LICENSE.txt
   Mods\Coop\  Bin32\Coop.dll, CrysisCoop.exe (the launcher; the installer
-              copies it into the game folder), Game\ (scripts, configs),
+              copies it into the game folder), CrysisCoop.png (its icon for
+              Linux menus), Game\ (scripts, configs),
               info.xml, logo.jpg, README*.md, uninstall.ps1, LICENSE.txt
 
 No game files: the installer builds the co-op levels from the player's own
@@ -43,6 +44,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $mod 'Bin32') | Out-Null
 
 Copy-Item -LiteralPath $Dll -Destination (Join-Path $mod 'Bin32\Coop.dll')
 Copy-Item -LiteralPath $Launcher -Destination (Join-Path $mod 'CrysisCoop.exe')
+Copy-Item -LiteralPath (Join-Path $root 'Launcher\CrysisCoop.png') -Destination $mod
 Copy-Item -LiteralPath (Join-Path $root 'Mod\Game') -Destination $mod -Recurse
 Get-ChildItem -LiteralPath (Join-Path $root 'Mod') -File | Copy-Item -Destination $mod
 Copy-Item -LiteralPath (Join-Path $root 'Installer\uninstall.ps1') -Destination $mod
@@ -54,7 +56,7 @@ Copy-Item -LiteralPath (Join-Path $root 'logo.jpg') -Destination $mod
     Replace('${CMAKE_PROJECT_HOMEPAGE_URL}', 'https://github.com/SeniorStackOverflow/crysis-coop') |
     Set-Content -LiteralPath (Join-Path $mod 'info.xml') -Encoding UTF8
 
-foreach ($f in 'install.bat', 'install.ps1') { Copy-Item -LiteralPath (Join-Path $root "Installer\$f") -Destination $stage }
+foreach ($f in 'install.bat', 'install.ps1', 'install_linux.py') { Copy-Item -LiteralPath (Join-Path $root "Installer\$f") -Destination $stage }
 Copy-Item -LiteralPath (Join-Path $root 'LICENSE.txt') -Destination $stage
 Copy-Item -LiteralPath (Join-Path $root 'Mod\README.md') -Destination (Join-Path $stage 'README.md')
 

@@ -10,7 +10,7 @@
 
 * Crysis (2007) версии 1.2.1: подходят GOG, Steam и EA. Для DVD-версии нужны официальные патчи 1.2 и 1.2.1.
 * Своя копия игры и мода у каждого игрока.
-* Windows 8 или новее.
+* Windows 8 или новее, или Linux с игрой под Wine (см. ниже).
 
 ## Установка
 
@@ -33,6 +33,19 @@
 ```powershell
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/SeniorStackOverflow/crysis-coop/releases/latest/download/install.ps1 | iex"
 ```
+
+### Linux (Wine)
+
+Игра уже должна запускаться под Wine (с DXVK или без). Распакуйте архив выпуска и запустите:
+
+```bash
+python3 install_linux.py --game ~/Games/Crysis
+```
+
+Он делает то же, что `install.bat`, а ещё кладёт в папку игры `launch_crysis_coop.sh` и создаёт ярлык **Crysis
+Coop** в меню и на рабочем столе. Скрипт — копия скрипта запуска самой игры (её Wine-префикс, настройки DXVK...),
+который запускает `CrysisCoop.exe`; если такого скрипта нет, он запускает `wine` в префиксе из `--prefix` (по
+умолчанию `~/.wine`). `Bin32/Crysis.exe` должен быть C1-Launcher: в нынешней сборке GOG он уже есть.
 
 ## Как играть
 
@@ -125,7 +138,8 @@ my checkpoints in the cloud» в меню кооператива это откл
 
 ## Удаление
 
-Запустите `Mods\Coop\uninstall.ps1` (с `-RestoreLauncher` вернётся и оригинальный `Crysis.exe`).
+Запустите `Mods\Coop\uninstall.ps1` (с `-RestoreLauncher` вернётся и оригинальный `Crysis.exe`). В Linux удалите
+`Mods/Coop`, `CrysisCoop.exe`, `launch_crysis_coop.sh` и `crysis-coop.desktop` (в меню и на рабочем столе).
 
 ---
 
