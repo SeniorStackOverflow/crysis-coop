@@ -1007,6 +1007,8 @@ namespace
 // players, the AI near them and the vehicles near them; every change of AI /
 // vehicle state anywhere, game tokens, entity events and player input.
 // Written to coop_trace_server.log / coop_trace_client.log in the game folder.
+// Off by default; each machine turns it on itself (the host cfgs and the
+// test scripts do), a file is opened when a level starts loading.
 namespace
 {
 	ICVar* s_pTrace = nullptr;
@@ -1510,8 +1512,12 @@ void CoopAI::Init()
 	CoopMenu::Init();
 	if (gEnv->pConsole && !s_pTrace)
 	{
-		s_pTrace = gEnv->pConsole->RegisterInt("coop_trace", 1, 0, "Crysis Coop debugging: 1 = detailed trace to coop_trace_server.log / coop_trace_client.log");
+		// off for players (~200 KB a minute). Per machine: a host's trace no
+		// longer turns it on for his friends, and a friend can trace alone
+		s_pTrace = gEnv->pConsole->RegisterInt("coop_trace", 0, 0, "Crysis Coop debugging: 1 = detailed trace to coop_trace_server.log / coop_trace_client.log (set before the level loads; this machine only)");
 		s_pTraceHz = gEnv->pConsole->RegisterFloat("coop_trace_hz", 5.0f, 0, "Crysis Coop debugging: coop_trace samples per second");
+		s_pTrace->SetFlags(s_pTrace->GetFlags() | VF_NOT_NET_SYNCED);
+		s_pTraceHz->SetFlags(s_pTraceHz->GetFlags() | VF_NOT_NET_SYNCED);
 	}
 	if (gEnv->pConsole && !s_pFlowMirror)
 		s_pFlowMirror = gEnv->pConsole->RegisterString("coop_fg_mirror",
