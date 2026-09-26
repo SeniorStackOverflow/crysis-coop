@@ -18,6 +18,8 @@ CoopConfig =
 	TELEPORT_COOLDOWN = 20,
 	SETTLE_SECONDS = 8,                 -- host must stand still this long (intro over) before teammates spawn
 	SETTLE_MAX_SPEED = 3,               -- m/s; faster than this = still in plane / falling / driving
+	JOIN_WAIT_MAX = 15,                 -- seconds a joiner waits (not counting cutscenes) before he is
+	                                    -- spawned next to a host who stays still anyway (away from the keyboard)
 
 	-- autotest only (sv_servername contains "AUTOTEST"): observe-only AI report
 	-- radius around the host once he stands on solid ground

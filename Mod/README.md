@@ -48,8 +48,10 @@ for example `Co-op code: 382615`. It is always the same code for the same host.
 friend**, type the
 host's code and click **Join**. Next time the code is already filled in.
 
-The friend appears next to the host once the host has landed or finished the
-level's intro. At the end of a level, everybody goes on to the next one together.
+While the level's intro runs (a cutscene, the plane, the jump), the friend
+watches it. Then he appears next to the host: once the host has landed, and at
+the latest 15 seconds after the intro even if the host has not moved (away from
+the keyboard, still in the water). At the end of a level, everybody goes on to the next one together.
 
 **In the game** (Esc → Co-op game):
 

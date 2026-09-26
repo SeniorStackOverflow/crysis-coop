@@ -70,6 +70,7 @@ void CScriptBind_HUD::RegisterMethods()
 	SCRIPT_REG_TEMPLFUNC(SetUsability, "objId, message");
 	SCRIPT_REG_TEMPLFUNC(CoopIsVehicleCrewHostile, "vehicleId");
 	SCRIPT_REG_TEMPLFUNC(CoopIsAirborne, "playerId");
+	SCRIPT_REG_FUNC(CoopIsPlayingCutscene);
 	SCRIPT_REG_FUNC(ReloadLevel);
 	SCRIPT_REG_FUNC(ReloadLevelSavegame);
 	SCRIPT_REG_FUNC(TacWarning);
@@ -189,6 +190,12 @@ int CScriptBind_HUD::CoopIsVehicleCrewHostile(IFunctionHandler *pH, ScriptHandle
 int CScriptBind_HUD::CoopIsAirborne(IFunctionHandler *pH, ScriptHandle playerId)
 {
 	return pH->EndFunction(CoopAI::IsAirborne((EntityId)playerId.n));
+}
+
+int CScriptBind_HUD::CoopIsPlayingCutscene(IFunctionHandler *pH)
+{
+	IViewSystem* pView = g_pGame->GetIGameFramework()->GetIViewSystem();
+	return pH->EndFunction(pView && pView->IsPlayingCutScene());
 }
 
 int CScriptBind_HUD::SetUsability(IFunctionHandler *pH, int objId, const char *message)

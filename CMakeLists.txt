@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.15)
 ################################################################################
 
 project(Coop
-	VERSION 0.5.1.0
+	VERSION 0.5.2.0
 	DESCRIPTION "Crysis co-op campaign"
 	HOMEPAGE_URL "https://github.com/SeniorStackOverflow/crysis-coop"
 	LANGUAGES CXX RC

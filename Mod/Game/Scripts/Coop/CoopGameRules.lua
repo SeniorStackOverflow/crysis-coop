@@ -195,41 +195,49 @@ function TeamInstantAction:CoopGetLeader(excludeId)
 	return nil;
 end
 
--- "settled" = alive, not in the air, (almost) not moving, and not parked at the
--- world origin where SP logic puts the player before the level intro places him.
--- Guards against spawning teammates next to a host who is still in the intro
--- plane, in free fall, or in a cutscene.
-function TeamInstantAction:CoopIsSettled(entity)
+-- why the player is not in the playable world (nil: he is): dead or
+-- spectating, flying, swimming, in the air, or parked at the world origin
+-- where SP logic puts the player before the level intro places him
+function TeamInstantAction:CoopNotInWorld(entity)
 	if (not self:CoopIsAlive(entity)) then
-		return false;
+		return "not alive";
 	end
 	local okF, flying = pcall(entity.actor.IsFlying, entity.actor);
 	if (okF and flying) then
-		return false;
+		return "flying";
 	end
 	-- e.g. on Contact the HALO jump ends in the sea: a floating host is slow
 	-- and "not flying", but teammates must not be spawned in open water
 	if (STANCE_SWIM) then
 		local okS, stance = pcall(entity.actor.GetStance, entity.actor);
 		if (okS and stance == STANCE_SWIM) then
-			return false;
+			return "swimming";
 		end
 	end
+	-- in the air (the HALO jump on Contact: the script moves the host, the
+	-- actor does not report "flying") - teammates would drop like a stone
 	if (HUD and HUD.CoopIsAirborne and HUD.CoopIsAirborne(entity.id)) then
+		return "in the air";
+	end
+	local p = entity:GetWorldPos(g_Vectors.temp_v1);
+	if (math.abs(p.x) + math.abs(p.y) < 10) then
+		return "at the origin";
+	end
+	return nil;
+end
+
+-- "settled" = in the world and (almost) not moving. Guards against spawning
+-- teammates next to a host who is still in the intro plane, in free fall, or
+-- in a cutscene.
+function TeamInstantAction:CoopIsSettled(entity)
+	if (self:CoopNotInWorld(entity)) then
 		return false;
 	end
 	-- speed measured by CoopSampleSpeeds() from position deltas between ticks:
 	-- actor:IsFlying() is false during the HALO free fall and GetVelocity()
 	-- returned nothing usable, so neither can be trusted here
 	local speed = self.coopSpeed and self.coopSpeed[entity.id];
-	if ((not speed) or speed > C.SETTLE_MAX_SPEED) then
-		return false;
-	end
-	local p = entity:GetWorldPos(g_Vectors.temp_v1);
-	if (math.abs(p.x) + math.abs(p.y) < 10) then
-		return false;
-	end
-	return true;
+	return (speed ~= nil and speed <= C.SETTLE_MAX_SPEED);
 end
 
 -- called once per tick (1s): speed of every player from his position delta
@@ -255,29 +263,26 @@ end
 
 -- world is "ready" once the leader has been settled for SETTLE_SECONDS in a
 -- row at least once (i.e. the level intro is over)
--- the leader is in the playable world (alive, not in the air, not
--- swimming, not parked at the origin) - speed is not checked
+-- the leader is in the playable world - speed is not checked
 function TeamInstantAction:CoopIsInWorld(entity)
-	if (not self:CoopIsAlive(entity)) then
+	return self:CoopNotInWorld(entity) == nil;
+end
+
+-- a joiner does not wait for ever: a host away from the keyboard can stay
+-- "not landed" for the checks above (the physics may still call a host who
+-- has not moved since a cutscene "flying"; one floating in the sea swims).
+-- Once the joiner has waited JOIN_WAIT_MAX seconds outside cutscenes, he is
+-- spawned next to a host who stands still (or is in the world anyway).
+function TeamInstantAction:CoopCanJoinIdleHost(leader)
+	if (not self:CoopIsAlive(leader)) then
 		return false;
 	end
-	local okF, flying = pcall(entity.actor.IsFlying, entity.actor);
-	if (okF and flying) then
+	local p = leader:GetWorldPos(g_Vectors.temp_v1);
+	if (math.abs(p.x) + math.abs(p.y) < 10) then
 		return false;
 	end
-	if (STANCE_SWIM) then
-		local okS, stance = pcall(entity.actor.GetStance, entity.actor);
-		if (okS and stance == STANCE_SWIM) then
-			return false;
-		end
-	end
-	-- in the air (the HALO jump on Contact: the script moves the host, the
-	-- actor does not report "flying") - teammates would drop like a stone
-	if (HUD and HUD.CoopIsAirborne and HUD.CoopIsAirborne(entity.id)) then
-		return false;
-	end
-	local p = entity:GetWorldPos(g_Vectors.temp_v1);
-	return (math.abs(p.x) + math.abs(p.y) >= 10);
+	local speed = self.coopSpeed and self.coopSpeed[leader.id];
+	return (speed ~= nil and speed <= C.SETTLE_MAX_SPEED) or self:CoopIsInWorld(leader);
 end
 
 function TeamInstantAction:CoopUpdateSettled()
@@ -290,12 +295,26 @@ function TeamInstantAction:CoopUpdateSettled()
 		self.coopRelaxedSpawn = true;
 		CoopLog("world ready (fallback after 40s): leader is in the world");
 	end
-	if (self.coopWaiting and next(self.coopWaiting) and math.floor(self.coopLevelTicks/10)*10 == self.coopLevelTicks and leader) then
+	local joinersWaiting = (not self.coopWorldReady) and self.coopWaiting and next(self.coopWaiting);
+	local cutscene = HUD and HUD.CoopIsPlayingCutscene and HUD.CoopIsPlayingCutscene();
+	if (joinersWaiting and math.floor(self.coopLevelTicks/10)*10 == self.coopLevelTicks and leader) then
 		local p = leader:GetWorldPos(g_Vectors.temp_v1);
-		CoopLog(string.format("waiting joiners: leader %s pos=(%.0f,%.0f,%.0f) alive=%s inWorld=%s settled=%s speed=%s",
-			tostring(leader:GetName()), p.x, p.y, p.z, tostring(self:CoopIsAlive(leader)),
-			tostring(self:CoopIsInWorld(leader)), tostring(self:CoopIsSettled(leader)),
-			tostring(self.coopSpeed and self.coopSpeed[leader.id])));
+		CoopLog(string.format("waiting joiners: leader %s pos=(%.0f,%.0f,%.0f) notInWorld=%s settled=%s speed=%s cutscene=%s waited=%s",
+			tostring(leader:GetName()), p.x, p.y, p.z, tostring(self:CoopNotInWorld(leader)),
+			tostring(self:CoopIsSettled(leader)), tostring(self.coopSpeed and self.coopSpeed[leader.id]),
+			tostring(cutscene), tostring(self.coopJoinWait)));
+	end
+	-- see CoopCanJoinIdleHost: the wait outside cutscenes is limited
+	if (joinersWaiting and not cutscene) then
+		self.coopJoinWait = (self.coopJoinWait or 0) + 1;
+		if (self.coopJoinWait >= C.JOIN_WAIT_MAX and leader and self:CoopCanJoinIdleHost(leader)) then
+			self.coopWorldReady = true;
+			self.coopRelaxedSpawn = true;
+			self.coopIdleSpawn = true;
+			CoopLog("world ready: a joiner waited "..self.coopJoinWait.."s, the host stays where he is ("
+				..(self:CoopNotInWorld(leader) or "in the world")..", speed "..tostring(self.coopSpeed and self.coopSpeed[leader.id])
+				.."): teammates spawn next to him");
+		end
 	end
 	if (leader and self:CoopIsSettled(leader)) then
 		self.coopSettledTicks = (self.coopSettledTicks or 0) + 1;
@@ -322,7 +341,8 @@ end
 function TeamInstantAction:CoopGetSpawnTransform(player)
 	local basePos, baseAng;
 	local leader = self:CoopGetLeader(player.id);
-	if (leader and self.coopWorldReady and (self:CoopIsSettled(leader) or (self.coopRelaxedSpawn and self:CoopIsInWorld(leader)))) then
+	if (leader and self.coopWorldReady and (self:CoopIsSettled(leader) or (self.coopRelaxedSpawn and self:CoopIsInWorld(leader))
+		or (self.coopIdleSpawn and self:CoopCanJoinIdleHost(leader)))) then
 		basePos = CopyVec(leader:GetWorldPos(g_Vectors.temp_v1));
 		baseAng = CopyVec(leader:GetWorldAngles(g_Vectors.temp_v2));
 	elseif (self.coopWorldReady and self.coopAnchor) then
