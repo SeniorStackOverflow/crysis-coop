@@ -436,6 +436,7 @@ namespace
 	string s_campaignName;
 	string s_lastSave;              // the savegame slot written last
 	string s_lastEngineFile;        // CryAction's file of the last savegame
+	string s_menuStatus;            // what the co-op menu shows as the last result
 
 	const char* ShortLevelName(const char* level)
 	{
@@ -630,6 +631,7 @@ namespace
 		s_lastSave = save;
 		CryLogAlways("[CoopSave] checkpoint %s saved: campaign \"%s\", %s, %s (%d players' equipment)", name.c_str(), s_campaignName.c_str(),
 			progress.level.c_str(), save.c_str(), (int)progress.players.size());
+		s_menuStatus.Format("Saved: checkpoint %s, %s", name.c_str(), stamp);
 		Notify("@game_saved");
 		if (CoopCloud::Enabled())
 			UploadCheckpoint(progress);
@@ -727,6 +729,15 @@ namespace
 	enum EContinueState { eCS_None, eCS_Listing, eCS_Downloading };
 	EContinueState s_contState = eCS_None;
 	bool s_contListOnly = false;        // coop_campaigns: print the list only
+	bool s_contForMenu = false;         // the co-op menu's list: not printed
+	bool s_menuListReady = false;
+
+	// a message for the player: the console, and the co-op menu's status line
+	void Status(const char* text)
+	{
+		CryLogAlways("[CoopSave] %s", text);
+		s_menuStatus = text;
+	}
 	bool s_contDelete = false;          // coop_campaign_delete
 	string s_contArg;                   // the campaign asked for ("": the newest)
 	bool s_contPrev = false;
@@ -756,7 +767,9 @@ namespace
 		SProgress p;
 		if (!ReadProgress(CampaignFile(e.campaign, prev ? "progress_prev.txt" : "progress.txt"), p))
 		{
-			TellHost(prev ? "This campaign has no previous checkpoint on this PC" : "The campaign's checkpoint is missing on this PC");
+			const char* text = prev ? "This campaign has no previous checkpoint on this PC" : "The campaign's checkpoint is missing on this PC";
+			TellHost(text);
+			s_menuStatus = text;
 			return;
 		}
 		p.campaign = e.campaign;
@@ -796,9 +809,14 @@ namespace
 		return true;
 	}
 
-	void StartListing(bool listOnly, bool remove, const string& arg, bool prev)
+	void StartListing(bool listOnly, bool remove, const string& arg, bool prev, bool forMenu = false)
 	{
 		ImportLegacy();
+		s_contForMenu = forMenu;
+		if (forMenu)
+			s_menuListReady = false;
+		else
+			s_menuStatus.clear();
 		s_contListOnly = listOnly;
 		s_contDelete = remove;
 		s_contArg = arg;
@@ -846,7 +864,9 @@ namespace
 		}
 		if (e.cloudStamp)
 			CoopCloud::RequestDelete(e.campaign);
-		CryLogAlways("[CoopSave] campaign \"%s\" deleted%s", e.name.c_str(), e.cloudStamp ? (e.cloudOwn ? " (also from the cloud)" : " (and off your cloud list)") : "");
+		string text;
+		text.Format("Campaign \"%s\" deleted%s", e.name.c_str(), e.cloudStamp ? (e.cloudOwn ? " (also from the cloud)" : " (and off your cloud list)") : "");
+		Status(text.c_str());
 		if (e.campaign == s_campaign)
 			s_campaign.clear();
 	}
@@ -864,6 +884,11 @@ namespace
 			std::vector<SProgress> local;
 			ListLocal(local);
 			Merge(local, cloud, s_contList);
+			if (s_contListOnly && s_contForMenu)
+			{
+				s_menuListReady = true;
+				return;
+			}
 			if (s_contListOnly)
 			{
 				if (s_contList.empty())
@@ -877,7 +902,7 @@ namespace
 			const SEntry* pEntry = Pick(s_contList, s_contArg);
 			if (!pEntry)
 			{
-				CryLogAlways(s_contList.empty() ? "No saved co-op progress. Start a new game with: coop_host"
+				Status(s_contList.empty() ? "No saved co-op progress. Start a new game with: coop_host"
 					: "No such campaign (coop_campaigns lists them)");
 				return;
 			}
@@ -890,7 +915,7 @@ namespace
 			const bool cloudNewer = s_contEntry.cloudStamp > s_contEntry.localStamp && (!s_contPrev || s_contEntry.cloudPrevious);
 			if (cloudNewer)
 			{
-				CryLogAlways("[CoopSave] downloading the campaign's checkpoint from the cloud...");
+				Status("Downloading the campaign's checkpoint from the cloud...");
 				CoopCloud::RequestDownload(s_contEntry.campaign, s_contPrev ? 1 : 0);
 				s_contState = eCS_Downloading;
 				return;
@@ -908,11 +933,11 @@ namespace
 				ContinueLocal(s_contEntry, s_contPrev);
 			else if (s_contEntry.localStamp)
 			{
-				CryLogAlways("[CoopSave] the cloud's checkpoint is not available: continuing from the one on this PC");
+				Status("The cloud's checkpoint is not available: continuing from the one on this PC");
 				ContinueLocal(s_contEntry, s_contPrev);
 			}
 			else
-				CryLogAlways("[CoopSave] the campaign could not be downloaded");
+				Status("The campaign could not be downloaded");
 		}
 	}
 
@@ -965,6 +990,20 @@ namespace
 		CryLogAlways("[CoopSave] progress loaded: %s, checkpoint %s (saved %s)", s_load.level.c_str(), s_load.checkpoint.c_str(), s_load.time.c_str());
 	}
 
+	// a new campaign on this level (short name)
+	void HostNew(const char* level, const string& name)
+	{
+		ImportLegacy();
+		StartCampaign(name);
+		s_loadState = eLS_None;
+		s_contState = eCS_None;
+		s_menuStatus.clear();
+		gEnv->pConsole->ExecuteString("exec coop_settings.cfg");
+		string cmd;
+		cmd.Format("map multiplayer/tia/coop_%s s", level);
+		CoopRelay::RestartGame(cmd.c_str());
+	}
+
 	// coop_host [level] [campaign name]: a new campaign
 	void CmdHost(IConsoleCmdArgs* pArgs)
 	{
@@ -984,14 +1023,7 @@ namespace
 		string name;
 		for (int i = first; i < pArgs->GetArgCount(); ++i)
 			name += (name.empty() ? "" : " ") + string(pArgs->GetArg(i));
-		ImportLegacy();
-		StartCampaign(name);
-		s_loadState = eLS_None;
-		s_contState = eCS_None;
-		gEnv->pConsole->ExecuteString("exec coop_settings.cfg");
-		string cmd;
-		cmd.Format("map multiplayer/tia/coop_%s s", level);
-		CoopRelay::RestartGame(cmd.c_str());
+		HostNew(level, name);
 	}
 
 	// coop_continue [campaign] [prev]
@@ -1013,12 +1045,7 @@ namespace
 	// campaign he plays; the friends join again by themselves
 	void CmdLoad(IConsoleCmdArgs* pArgs)
 	{
-		if (s_campaign.empty())
-		{
-			CryLogAlways("coop_load: no campaign is being played (coop_continue picks one)");
-			return;
-		}
-		StartListing(false, false, s_campaign, pArgs->GetArgCount() > 1 && !stricmp(pArgs->GetArg(1), "prev"));
+		CoopSave::LoadCheckpoint(pArgs->GetArgCount() > 1 && !stricmp(pArgs->GetArg(1), "prev"));
 	}
 
 	void CmdCampaigns(IConsoleCmdArgs*)
@@ -1041,14 +1068,7 @@ namespace
 
 	void CmdSave(IConsoleCmdArgs*)
 	{
-		if (!gEnv->bServer || !CoopAI::IsCoopSession())
-		{
-			CryLogAlways("coop_save: only the host of a coop game can save");
-			return;
-		}
-		CoopSave::RequestCheckpoint("manual");
-		if (const char* why = CannotSave())
-			CryLogAlways("[CoopSave] the game will be saved as soon as possible (%s)", why);
+		CoopSave::SaveNow();
 	}
 }
 
@@ -1171,4 +1191,116 @@ void CoopSave::Update(float frameTime)
 	}
 	s_pending = false;
 	SaveCheckpoint(s_pendingName);
+}
+
+// ---------------------------------------------------------------------------
+// the co-op menu (CoopMenu) and the console commands share these
+
+void CoopSave::RequestCampaigns()
+{
+	if (s_contState == eCS_None)
+		StartListing(true, false, "", false, true);
+}
+
+bool CoopSave::CampaignsReady(std::vector<SCampaignInfo>& out)
+{
+	if (!s_menuListReady || s_contState == eCS_Listing)
+		return false;
+	out.clear();
+	for (size_t i = 0; i < s_contList.size(); ++i)
+	{
+		const SEntry& e = s_contList[i];
+		SCampaignInfo c;
+		c.id = e.campaign;
+		c.name = e.name;
+		c.level = e.level;
+		c.checkpoint = e.checkpoint;
+		c.host = e.host;
+		c.stamp = e.Stamp();
+		c.local = e.localStamp != 0;
+		c.cloud = e.cloudStamp != 0;
+		c.cloudNewer = e.cloudStamp > e.localStamp;
+		c.own = !e.cloudStamp || e.cloudOwn;
+		out.push_back(c);
+	}
+	return true;
+}
+
+bool CoopSave::IsBusy()
+{
+	return s_contState != eCS_None || s_loadState != eLS_None;
+}
+
+const char* CoopSave::MenuStatus()
+{
+	return s_menuStatus.c_str();
+}
+
+int CoopSave::LevelCount()
+{
+	return (int)(sizeof(LEVELS) / sizeof(LEVELS[0]));
+}
+
+const char* CoopSave::LevelName(int index)
+{
+	return index >= 0 && index < LevelCount() ? LEVELS[index] : "";
+}
+
+const char* CoopSave::LevelTitle(const char* level)
+{
+	static const char* titles[] = { "Contact", "Recovery", "Relic", "Assault", "Onslaught", "Awakening", "Core",
+		"Paradise Lost", "Exodus", "Ascension", "Reckoning" };
+	for (int i = 0; i < LevelCount(); ++i)
+		if (level && !stricmp(level, LEVELS[i]))
+			return titles[i];
+	return level ? level : "";
+}
+
+void CoopSave::NewCampaign(const char* level, const char* name)
+{
+	HostNew(level && level[0] ? level : LEVELS[0], name ? name : "");
+}
+
+void CoopSave::ContinueCampaign(const char* id, bool previous)
+{
+	StartListing(false, false, id ? id : "", previous);
+}
+
+void CoopSave::DeleteCampaign(const char* id)
+{
+	if (id && id[0])
+		StartListing(false, true, id, false);
+}
+
+void CoopSave::SaveNow()
+{
+	if (!gEnv->bServer || !CoopAI::IsCoopSession())
+	{
+		Status("Only the host of a co-op game can save");
+		return;
+	}
+	RequestCheckpoint("manual");
+	if (const char* why = CannotSave())
+	{
+		string text;
+		text.Format("The game will be saved as soon as possible (%s)", why);
+		Status(text.c_str());
+	}
+	else
+		s_menuStatus = "Saving...";
+}
+
+void CoopSave::LoadCheckpoint(bool previous)
+{
+	if (!gEnv->bServer || s_campaign.empty())
+	{
+		Status("No campaign is being played here (Continue picks one)");
+		return;
+	}
+	StartListing(false, false, s_campaign, previous);
+}
+
+const char* CoopSave::CurrentCampaign()
+{
+	return s_campaignName.c_str();
 }

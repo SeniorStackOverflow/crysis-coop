@@ -9,6 +9,8 @@
 // the friends join as usual.
 #pragma once
 
+#include <vector>
+
 namespace CoopSave
 {
 	void Init();                                  // console variables and commands
@@ -29,4 +31,33 @@ namespace CoopSave
 	bool IsCoopSaveName(const char* name);
 	// CryAction writes a savegame to this file (CGame::OnSaveGame)
 	void OnEngineSave(const char* file);
+
+	// ---- used by the co-op menu (CoopMenu) and the console commands
+	struct SCampaignInfo
+	{
+		string id, name, level, checkpoint, host;
+		unsigned int stamp;     // the newest checkpoint (unix time)
+		bool local;             // on this PC
+		bool cloud;             // on the server
+		bool cloudNewer;        // the server has a newer checkpoint than this PC
+		bool own;               // started by this player (else: a friend's he played in)
+	};
+	// the campaigns on this PC and in the cloud, newest first
+	void RequestCampaigns();
+	bool CampaignsReady(std::vector<SCampaignInfo>& out);   // false while asking the cloud
+	// something is under way (a list, a download, a level to load)
+	bool IsBusy();
+	// the last result for the player ("" none)
+	const char* MenuStatus();
+
+	int LevelCount();
+	const char* LevelName(int index);           // "island"
+	const char* LevelTitle(const char* level);  // "Contact"
+
+	void NewCampaign(const char* level, const char* name);
+	void ContinueCampaign(const char* id, bool previous);
+	void DeleteCampaign(const char* id);
+	void SaveNow();                     // host
+	void LoadCheckpoint(bool previous); // host: the campaign he plays
+	const char* CurrentCampaign();      // its name, "" none
 }

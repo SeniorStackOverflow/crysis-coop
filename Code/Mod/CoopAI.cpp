@@ -31,6 +31,7 @@
 #include "CoopAI.h"
 #include "CoopRelay.h"
 #include "CoopSave.h"
+#include "CoopMenu.h"
 #include "Game.h"
 #include "GameCVars.h"
 #include "GameRules.h"
@@ -1506,6 +1507,7 @@ void CoopAI::Init()
 	RegisterCommands();
 	CoopRelay::Init();
 	CoopSave::Init();
+	CoopMenu::Init();
 	if (gEnv->pConsole && !s_pTrace)
 	{
 		s_pTrace = gEnv->pConsole->RegisterInt("coop_trace", 1, 0, "Crysis Coop debugging: 1 = detailed trace to coop_trace_server.log / coop_trace_client.log");

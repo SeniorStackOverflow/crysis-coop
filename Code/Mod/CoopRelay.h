@@ -34,4 +34,16 @@ namespace CoopRelay
 	// friend joined through the relay: a lost connection to the host is
 	// handled here (rejoining, or the reason shown), not by the menu
 	bool HandlesDisconnect();
+
+	// ---- used by the co-op menu (CoopMenu) and the console commands
+	bool Join(int code);            // coop_join
+	void Leave();                   // coop_leave
+	int LastJoinCode();             // 0 none
+	bool IsHosting();
+	int HostCode();                 // 0: not (yet) registered at the relay
+	int FriendsConnected(int* pDirect = 0);
+	enum EJoinState { eJS_None, eJS_Connecting, eJS_Loading, eJS_InGame, eJS_WaitingForHost, eJS_Failed };
+	EJoinState GetJoinState(string* pError = 0, int* pCode = 0);
+	// friend: ms to the host (direct path, else through the relay)
+	int PingMs(bool* pDirect);
 }

@@ -23,8 +23,10 @@ run `install.bat`, or run this in PowerShell:
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/SeniorStackOverflow/crysis-coop/releases/latest/download/install.ps1 | iex"
 ```
 
-* Host: start the **Crysis Coop** shortcut, open the console (`~`) and type `coop_host` (a new game) or `coop_continue` (from the last checkpoint).
-* Friend: start **Crysis Coop** and type `coop_join <the code the host sees>`.
+* Host: start the **Crysis Coop** shortcut and click **CO-OP** (top right of the menu), then **New campaign** or **Continue**.
+* Friend: **CO-OP → Join a friend**, the code the host sees, **Join**.
+* In the game, Esc → **CO-OP**: the code, the players, saving and going back to a checkpoint, leaving.
+* Console commands (`coop_host`, `coop_continue`, `coop_join <code>`...) do the same without the menu.
 
 Needs Crysis 1.2.1 (GOG, Steam, EA; DVD + patches) on Windows 8 or later. Each player needs their own copy of the game.
 The player guide is in [Mod/README.md](Mod/README.md).
@@ -53,6 +55,8 @@ Crysis 1 has no co-op. The mod runs the single player levels as network maps.
     network play (player limit, clocks), and the friends join (`CoopSave.cpp`).
   * Checkpoints are also uploaded to the relay server (`CoopCloud.cpp`), so every player of the campaign may
     carry it on.
+* **Co-op menu.** A panel drawn with IUIDraw over the Flash main and in-game menus (`CoopMenu.cpp`). It takes the
+  menu's mouse and keys before the Flash menu does. The HUD shows the host's code for a while.
 * **Players and codes.** Every player has a random key made once. The relay keeps only its hash and gives each host
   a permanent code. The host tells the relay when his game restarts, and the friends' tunnels wait and reconnect
   their games (`CoopRelay.cpp`).
@@ -61,7 +65,7 @@ The files:
 
 | Path | |
 |---|---|
-| `Code/Mod/` | the game DLL (`Coop.dll`), based on the CryENGINE 2 Mod SDK game code. The coop work is mostly in `CoopAI.cpp`, `CoopRelay.cpp`, `CoopSave.cpp`, `CoopCloud.cpp`, `Nodes/CoopFlowNodes.cpp`, plus hooks in the stock files |
+| `Code/Mod/` | the game DLL (`Coop.dll`), based on the CryENGINE 2 Mod SDK game code. The coop work is mostly in `CoopAI.cpp`, `CoopRelay.cpp`, `CoopSave.cpp`, `CoopCloud.cpp`, `CoopMenu.cpp`, `Nodes/CoopFlowNodes.cpp`, plus hooks in the stock files |
 | `Code/CryEngine/` | engine interface headers from the SDK |
 | `Mod/` | the mod's Lua scripts and configs (copied to `Mods/Coop`) |
 | `Installer/` | `install.ps1`, `install.bat`, `uninstall.ps1` |

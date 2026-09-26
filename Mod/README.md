@@ -30,67 +30,58 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/SeniorStackOverflo
 
 ## How to play
 
-**Host:** start **Crysis Coop**, open the console (`~`) and type
+Everything is in the **CO-OP** button at the top right of the main menu and of
+the in-game menu (Esc).
 
-```
-coop_host
-```
+**Host:** start **Crysis Coop** and click **CO-OP**:
 
-A new campaign starts from the first level. To start from another level, give its name:
-`coop_host village`. The levels are island, village, rescue, harbor, tank, mine, core, ice, sphere, ascension and fleet (or `1`–`11`).
-A name for the campaign may follow: `coop_host island With Sasha`.
+* **Continue** carries on the newest campaign from its last checkpoint.
+* **New campaign** starts one on any of the 11 levels. A name is optional.
+* **All campaigns** lists your campaigns on this PC and in the cloud. From there
+  you can continue one, go back to the checkpoint before, or delete it.
 
-To carry on where you stopped last time, the host types instead
+When the level has loaded, the code appears on the screen and in the CO-OP menu,
+for example `Co-op code: 382615`. It is always the same code for the same host.
 
-```
-coop_continue
-```
+**Friend:** start **Crysis Coop**, click **CO-OP → Join a friend**, type the
+host's code and click **Join**. Next time the code is already filled in.
 
-When the level has loaded, a code appears on the screen, for example `Co-op code: 382615`. It is always the same code for the same host.
+The friend appears next to the host once the host has landed or finished the
+level's intro. At the end of a level, everybody goes on to the next one together.
 
-**Friend:** start **Crysis Coop**, open the console and type the host's code:
+**In the game** (Esc → CO-OP):
 
-```
-coop_join 382615
-```
-
-Next time `coop_join` alone joins the same host again. The friend appears next to the host once the host has landed or finished the level's intro. At the end of a level, everybody goes on to the next one together.
+* The host sees his code and who is connected, and has:
+  * **Save now**;
+  * **Back to the last checkpoint** and **The checkpoint before**;
+  * other campaigns or a new one.
+* A friend sees the connection and can **Leave the game**.
 
 ## Saving
 
 The host's game saves the progress by itself, like the single player
 campaign: at every level start and at the campaign's checkpoints ("Game
-saved" on everybody's screen). The host can also save at any moment with
-`coop_save`.
+saved" on everybody's screen).
 
-* `coop_continue` hosts the newest campaign from its last checkpoint: the level
-  with everything done in it so far, the host where he was. Friends get back the
-  weapons they had at that checkpoint.
-* `coop_load` goes back to the last checkpoint in the middle of the game.
-* When the host's game restarts (`coop_load`, `coop_continue`, a new game) or
-  his connection drops, the friends' games wait for him and join again by
-  themselves: "The host is loading the game".
-
-**Campaigns.** Every `coop_host` starts a campaign of its own; a new game never
-overwrites an old one.
-
-* `coop_campaigns` lists them (numbered, newest first).
-* `coop_continue 2` or `coop_continue With Sasha` picks one.
-* `prev` goes one checkpoint further back: `coop_continue prev`, `coop_load prev`.
-* `coop_campaign_delete 3` deletes one.
+* **Continue** loads the level with everything done in it so far, and the host
+  is where he was. Friends get back the weapons they had at that checkpoint.
+* When the host's game restarts (a checkpoint, another campaign) or his
+  connection drops, the friends' games wait for him and join again by
+  themselves ("The host is loading the game").
+* Every new campaign is separate; it never overwrites an old one.
 
 **Cloud.** Every checkpoint is also kept on the mod's server, for everybody who
-played in that campaign.
-
-* The campaign is not tied to one PC: any friend who played in it can
-  `coop_continue` it as the host (his game downloads the newest checkpoint). The
-  others join him as usual.
-* `coop_cloud 0` keeps your checkpoints on your PC only.
+played in that campaign. The campaign is not tied to one PC: any friend who
+played in it finds it in his **All campaigns** and can continue it as the host.
+The others join him as usual. The checkbox "Keep my checkpoints in the cloud" in
+the CO-OP menu turns it off.
 
 The progress lives in `Documents\My Games\Crysis\SaveGames`: the `coop` folder
 and the `coop_checkpoint_*` saves.
 
 ## Console commands
+
+The same without the menu (the console opens with `~`):
 
 | Command | |
 |---|---|

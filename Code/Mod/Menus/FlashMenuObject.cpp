@@ -13,6 +13,7 @@ History:
 
 *************************************************************************/
 #include "StdAfx.h"
+#include "CoopMenu.h"
 #include <StlUtils.h>
 
 #include <IVideoPlayer.h>
@@ -537,6 +538,10 @@ bool CFlashMenuObject::OnInputEvent(const SInputEvent &rInputEvent)
 	if(gEnv->pSystem->IsEditor() || gEnv->pSystem->IsDedicated() || rInputEvent.keyId == eKI_SYS_Commit)
 		return false;
 
+	// Crysis Coop: the open co-op menu takes the keyboard
+	if(m_bUpdate && CoopMenu::OnKey(rInputEvent))
+		return true;
+
 	if(rInputEvent.deviceId==eDI_Mouse || rInputEvent.deviceId==eDI_Keyboard)
 	{
 		if(rInputEvent.state==eIS_Pressed)
@@ -839,7 +844,7 @@ bool CFlashMenuObject::OnInputEvent(const SInputEvent &rInputEvent)
 //////////////////////////////////////////////////////////////////////////
 bool CFlashMenuObject::OnInputEventUI( const SInputEvent &rInputEvent )
 {
-	if(gEnv->pConsole->GetStatus())
+	if(gEnv->pConsole->GetStatus() || CoopMenu::IsOpen())
 	{
 		return false;
 	}
@@ -1627,6 +1632,10 @@ bool CFlashMenuObject::IsOnScreen(EMENUSCREEN screen)
 
 void CFlashMenuObject::OnHardwareMouseEvent(int iX,int iY,EHARDWAREMOUSEEVENT eHardwareMouseEvent)
 {
+	// Crysis Coop: the co-op menu first
+	if(m_bUpdate && CoopMenu::OnMouse(iX, iY, eHardwareMouseEvent))
+		return;
+
 	if(HARDWAREMOUSEEVENT_LBUTTONDOUBLECLICK == eHardwareMouseEvent)
 	{
 		if(m_pCurrentFlashMenuScreen && m_pCurrentFlashMenuScreen->GetFlashPlayer())
@@ -2681,7 +2690,8 @@ bool CFlashMenuObject::Load()
 
 	m_apFlashMenuScreens[MENUSCREEN_FRONTENDLOADING] = new CFlashMenuScreen;
 
-	if(g_pGameCVars->g_skipIntro==1)
+	// Crysis Coop: -coop_skipintro (the test instances start with no window focus)
+	if(g_pGameCVars->g_skipIntro==1 || gEnv->pSystem->GetICmdLine()->FindArg(eCLAT_Pre, "coop_skipintro"))
 	{
 		m_stateEntryMovies = eEMS_Stop;
 	}
@@ -2960,6 +2970,10 @@ void CFlashMenuObject::OnPostUpdate(float fDeltaTime)
 	if(gEnv->pSystem->IsEditor() || gEnv->pSystem->IsDedicated()) return;
 
 	fDeltaTime = gEnv->pTimer->GetFrameTime(ITimer::ETIMER_UI);
+
+	// Crysis Coop: the co-op menu goes with the Flash menu
+	if(!m_bUpdate)
+		CoopMenu::OnMenuClosed();
 
 	if (ICVar* requireinputdevice = gEnv->pConsole->GetCVar("sv_requireinputdevice"))
 	{
@@ -3276,6 +3290,9 @@ void CFlashMenuObject::OnPostUpdate(float fDeltaTime)
 		{
 			m_pCurrentFlashMenuScreen->GetFlashPlayer()->Advance(fDeltaTime);
 			m_pCurrentFlashMenuScreen->GetFlashPlayer()->Render();
+			// Crysis Coop: the CO-OP button and panel over the main and in-game menu
+			if(m_pCurrentFlashMenuScreen == m_apFlashMenuScreens[MENUSCREEN_FRONTENDSTART] || m_pCurrentFlashMenuScreen == m_apFlashMenuScreens[MENUSCREEN_FRONTENDINGAME])
+				CoopMenu::RenderMenu(m_pCurrentFlashMenuScreen == m_apFlashMenuScreens[MENUSCREEN_FRONTENDINGAME]);
 		}
 	}
 	else if (m_nBlackGraceFrames > 0)

@@ -1139,21 +1139,23 @@ namespace
 
 	// coop_join [code]: join a friend's coop game through the relay (no code:
 	// the game joined last time; a host keeps his code)
-	void CmdJoin(IConsoleCmdArgs* pArgs)
+	int s_joinedCode = 0;
+
+	bool JoinGame(int code)
 	{
 		LoadPlayer();
-		const int code = pArgs->GetArgCount() > 1 ? atoi(pArgs->GetArg(1)) : s_lastJoinCode;
 		if (code <= 0)
 		{
 			CryLogAlways("usage: coop_join <code>   (the code the host sees when he starts a coop game)");
-			return;
+			return false;
 		}
 		if (!s_haveKey)
 		{
 			CryLogAlways("[CoopRelay] no player key (%s could not be written): cannot join", PLAYER_FILE);
-			return;
+			return false;
 		}
 		StopJoin("left the last game");
+		s_joinedCode = code;
 		s_joinConnected = 0;
 		s_loggedJoinDirect = -1;
 		s_joinErrorShown = false;
@@ -1166,14 +1168,19 @@ namespace
 		}
 		s_joinAgent.Start(s_pRelay->GetString(), s_key, code, s_pDirect->GetIVal() != 0);
 		CryLogAlways("[CoopRelay] joining coop game %d through %s ...", code, s_pRelay->GetString());
+		return true;
+	}
+
+	void CmdJoin(IConsoleCmdArgs* pArgs)
+	{
+		LoadPlayer();
+		JoinGame(pArgs->GetArgCount() > 1 ? atoi(pArgs->GetArg(1)) : s_lastJoinCode);
 	}
 
 	// coop_leave: leave the joined game for good (no joining again)
 	void CmdLeave(IConsoleCmdArgs*)
 	{
-		ShowWaiting(false);
-		StopJoin("left the coop game");
-		gEnv->pConsole->ExecuteString("disconnect");
+		CoopRelay::Leave();
 	}
 
 	ICVar* s_pEnglishKeyboard = 0;
@@ -1479,4 +1486,69 @@ string CoopRelay::RandomHex(int bytes)
 	if (!SecureRandom(b, bytes))
 		RandomBytes(b, bytes);
 	return Hex(b, bytes);
+}
+
+// ---------------------------------------------------------------------------
+// the co-op menu (CoopMenu) and the console commands share these
+
+bool CoopRelay::Join(int code)
+{
+	return JoinGame(code);
+}
+
+void CoopRelay::Leave()
+{
+	const bool joined = s_joinAgent.Running();
+	ShowWaiting(false);
+	StopJoin("left the coop game");
+	if (joined || !gEnv->bServer)
+		gEnv->pConsole->ExecuteString("disconnect");
+}
+
+int CoopRelay::LastJoinCode()
+{
+	LoadPlayer();
+	return s_lastJoinCode;
+}
+
+int CoopRelay::HostCode()
+{
+	return s_hosting ? (int)s_hostCode : 0;
+}
+
+int CoopRelay::FriendsConnected(int* pDirect)
+{
+	if (pDirect)
+		*pDirect = s_hosting ? (int)s_hostDirect : 0;
+	return s_hosting ? (int)s_hostFriends : 0;
+}
+
+bool CoopRelay::IsHosting()
+{
+	return s_hosting;
+}
+
+CoopRelay::EJoinState CoopRelay::GetJoinState(string* pError, int* pCode)
+{
+	if (pCode)
+		*pCode = s_joinedCode;
+	if (pError)
+		*pError = s_joinError ? ErrorText(s_joinError) : "";
+	if (!s_joinAgent.Running())
+		return s_joinError ? eJS_Failed : eJS_None;
+	if (s_joinError)
+		return eJS_Failed;
+	if (s_waitingForHost)
+		return eJS_WaitingForHost;
+	if (!s_joinConnected)
+		return eJS_Connecting;
+	return gEnv->bClient && g_pGame->GetIGameFramework()->IsGameStarted() ? eJS_InGame : eJS_Loading;
+}
+
+int CoopRelay::PingMs(bool* pDirect)
+{
+	const int direct = s_joinDirectRtt;
+	if (pDirect)
+		*pDirect = direct >= 0;
+	return direct >= 0 ? direct : (int)s_relayRtt;
 }
