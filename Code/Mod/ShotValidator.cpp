@@ -229,6 +229,13 @@ bool CShotValidator::CanHit(const HitInfo &hit) const
 		|| m_pGameFramework->GetClientActorId()==hit.shooterId)
 		return true;
 
+	// Crysis Coop: shooters without a network channel are server-side AI.
+	// Their shots never come from a client, so there is nothing to validate;
+	// without this, ProcessHit dereferences the missing per-channel entry
+	// (crash) or parks the hit forever as "pending" (AI never hurts anyone).
+	if (m_pGameRules->GetChannelId(hit.shooterId) == 0)
+		return true;
+
 	return false;
 }
 

@@ -3,6 +3,7 @@
 // Copyright (C) Crytek GmbH, 2001-2008.
 // -------------------------------------------------------------------------
 #include "StdAfx.h"
+#include "CoopAI.h"
 #include "HUD.h"
 #include "HUDRadar.h"
 #include "HUDSilhouettes.h"
@@ -967,6 +968,7 @@ void CHUD::AddOnScreenMissionObjective(IEntity *pEntity, int friendly)
 
 void CHUD::ShowKillAreaWarning(bool active, int timer)
 {
+	CoopAI::TraceHUD("killarea", "active=%d timer=%d", (int)active, timer);
 	if(active && timer && !m_animKillAreaWarning.IsLoaded())
 	{
 		m_animDeathMessage.Unload();
@@ -1004,6 +1006,7 @@ void CHUD::ShowKillAreaWarning(bool active, int timer)
 
 void CHUD::ShowDeathFX(int type)
 {
+	CoopAI::TraceHUD("deathfx", "%d", type);
 	if(m_godMode || !g_pGame->GetIGameFramework()->IsGameStarted())
 		return;
 
@@ -1219,6 +1222,8 @@ void CHUD::ShowTargettingAI(EntityId id)
 
 void CHUD::FadeCinematicBars(int targetVal)
 {
+	CoopAI::TraceHUD("cinematic_bars", "%d", targetVal);
+	m_cineBarsTarget = targetVal;
 	m_animCinematicBar.Reload();
 
 	m_animCinematicBar.SetVisible(true);
@@ -1308,8 +1313,11 @@ bool CHUD::OnBeginCutScene(IAnimSequence* pSeq, bool bResetFX)
 
 			if(IAnimSequence::NO_PLAYER & flags)
 			{
+				// Crysis Coop: a player waiting to spawn stays in his spectator mode
+				// (watching the host); OnEndCutScene would reset it to none
 				if (SPlayerStats* pActorStats = static_cast<SPlayerStats*> (pPlayer->GetActorStats()))
-					pActorStats->spectatorMode = CActor::eASM_Cutscene;	// moved up to avoid conflict with the MP spectator modes
+					if (pActorStats->spectatorMode == CActor::eASM_None || !CoopAI::IsCoopSession())
+						pActorStats->spectatorMode = CActor::eASM_Cutscene;	// moved up to avoid conflict with the MP spectator modes
 				pPlayer->Draw(false);
 				if (pPlayer->GetPlayerInput())
 					pPlayer->GetPlayerInput()->Reset();
@@ -1376,7 +1384,8 @@ bool CHUD::OnEndCutScene(IAnimSequence* pSeq)
 			if (CPlayer* pPlayer = static_cast<CPlayer*> (pPlayerActor))
 			{
 				if (SPlayerStats* pActorStats = static_cast<SPlayerStats*> (pPlayer->GetActorStats()))
-					pActorStats->spectatorMode = CActor::eASM_None;
+					if (pActorStats->spectatorMode == CActor::eASM_Cutscene || !CoopAI::IsCoopSession())
+						pActorStats->spectatorMode = CActor::eASM_None;
 				pPlayer->Draw(true);
 				if(COffHand* pOffHand = static_cast<COffHand*>(pPlayer->GetItemByClass(CItem::sOffHandClass)))
 					pOffHand->OnEndCutScene();
@@ -1449,6 +1458,7 @@ void CHUD::SetSubtitleMode(HUDSubtitleMode mode)
 
 void CHUD::ShowProgress(int progress, bool init /* = false */, int posX /* = 0 */, int posY /* = 0 */, const char *text, bool topText, bool lockingBar)
 {
+	CoopAI::TraceHUD("progress", "%d init=%d text=%s", progress, (int)init, text ? text : "");
 	CGameFlashAnimation *pAnim = &m_animProgress;
 	if(m_bProgressLocking)
 		pAnim = &m_animProgressLocking;
@@ -1613,6 +1623,7 @@ void CHUD::FakeDeath(bool revive)
 
 void CHUD::ShowDataUpload(bool active)
 {
+	CoopAI::TraceHUD("data_upload", "%d", (int)active);
 	if(active)
 	{
 		if(!m_animDataUpload.IsLoaded())

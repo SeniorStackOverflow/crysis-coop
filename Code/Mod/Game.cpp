@@ -14,6 +14,8 @@
 #include "StdAfx.h"
 #include "Game.h"
 #include "GameCVars.h"
+#include "CoopAI.h"
+#include "CoopRelay.h"
 #include "GameActions.h"
 #include "Menus/FlashMenuObject.h"
 #include "Menus/OptionsManager.h"
@@ -120,6 +122,7 @@ CGame::CGame()
 
 CGame::~CGame()
 {
+  CoopRelay::Shutdown();
   m_pFramework->EndGameContext();
   m_pFramework->UnregisterListener(this);
   ReleaseScriptBinds();
@@ -155,6 +158,7 @@ bool CGame::Init(IGameFramework *pFramework)
 
 	RegisterConsoleVars();
 	RegisterConsoleCommands();
+	CoopAI::Init();
 	RegisterGameObjectEvents();
 
 	// Initialize static item strings
@@ -369,12 +373,17 @@ bool CGame::Init(IGameFramework *pFramework)
 	return true;
 }
 
+void CoopCaptureOriginalFlowNodes(IFlowSystem* pFlow); // Nodes/CoopFlowNodes.cpp
+
 bool CGame::CompleteInit()
 {
 	// Initialize Game02 flow nodes
 
 	if (IFlowSystem *pFlow = m_pFramework->GetIFlowSystem())
 	{
+		// before the coop nodes replace CryAction's ones of the same name
+		CoopCaptureOriginalFlowNodes(pFlow);
+
 		CG2AutoRegFlowNodeBase *pFactory = CG2AutoRegFlowNodeBase::m_pFirst;
 
 		while (pFactory)
@@ -401,6 +410,8 @@ int CGame::Update(bool haveFocus, unsigned int updateFlags)
 
 		m_pBulletTime->Update();
 		m_pSoundMoods->Update();
+
+		CoopAI::Update(frameTime);
 	}
 
 	m_pFramework->PostUpdate( true, updateFlags );
@@ -631,6 +642,10 @@ void CGame::OnActionEvent(const SActionEvent& event)
   case  eAE_channelDestroyed:
     GameChannelDestroyed(event.m_value == 1);
     break;
+  case eAE_disconnected:
+    CoopAI::OnGameEnded();
+    CoopRelay::OnDisconnected();
+    break;
 	case eAE_serverIp:
 		if(gEnv->bServer && GetServerSynchedStorage())
 		{
@@ -795,7 +810,7 @@ void CGame::CheckReloadLevel()
 	if(!m_bReload)
 		return;
 
-	if(GetISystem()->IsEditor() || gEnv->bMultiplayer)
+	if(GetISystem()->IsEditor() || CoopAI::IsNetGame())
 	{
 		if(m_bReload)
 			m_bReload = false;

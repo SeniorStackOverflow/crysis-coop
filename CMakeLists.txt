@@ -2,10 +2,10 @@ cmake_minimum_required(VERSION 3.15)
 
 ################################################################################
 
-project(MyMod
-	VERSION 1.0.0.0
-	DESCRIPTION "Crysis Mod SDK"
-	HOMEPAGE_URL "https://github.com/ccomrade/c1-mod-sdk"
+project(Coop
+	VERSION 0.2.0.0
+	DESCRIPTION "Crysis co-op campaign"
+	HOMEPAGE_URL "https://github.com/SeniorStackOverflow/crysis-coop"
 	LANGUAGES CXX RC
 )
 
@@ -51,6 +51,8 @@ add_library(${CMAKE_PROJECT_NAME} MODULE
 	Code/Mod/Charge.cpp
 	Code/Mod/Claymore.cpp
 	Code/Mod/ClientSynchedStorage.cpp
+	Code/Mod/CoopAI.cpp
+	Code/Mod/CoopRelay.cpp
 	Code/Mod/CompatibilityAlienMovementController.cpp
 	Code/Mod/DebugGun.cpp
 	Code/Mod/Detonate.cpp
@@ -140,6 +142,7 @@ add_library(${CMAKE_PROJECT_NAME} MODULE
 	Code/Mod/NetInputChainDebug.cpp
 	Code/Mod/NetPlayerInput.cpp
 	Code/Mod/Nodes/FlowActorSensor.cpp
+	Code/Mod/Nodes/CoopFlowNodes.cpp
 	Code/Mod/Nodes/FlowFadeNode.cpp
 	Code/Mod/Nodes/FlowHitInfoNode.cpp
 	Code/Mod/Nodes/FlowNanoSuitNodes.cpp
@@ -246,3 +249,6 @@ target_include_directories(${CMAKE_PROJECT_NAME}
 		Code/Mod
 		${PROJECT_BINARY_DIR}
 )
+
+# Crysis Coop: linker map for symbolizing C1-Launcher crash reports
+target_link_options(${CMAKE_PROJECT_NAME} PRIVATE "/MAP:${PROJECT_BINARY_DIR}/Coop.map")

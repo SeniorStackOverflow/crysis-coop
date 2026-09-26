@@ -11,6 +11,7 @@ History:
 
 *************************************************************************/
 #include "StdAfx.h"
+#include "CoopAI.h"
 #include "Game.h"
 #include "GameCVars.h"
 #include "GameActions.h"
@@ -286,7 +287,12 @@ void CPlayer::PostInit( IGameObject * pGameObject )
 
 void CPlayer::InitClient(int channelId )
 {
-	GetGameObject()->InvokeRMI(CActor::ClSetSpectatorMode(), CActor::SetSpectatorModeParams(GetSpectatorMode(), 0), eRMI_ToClientChannel|eRMI_NoLocalCalls, channelId);
+	// Crysis Coop: "watching a cutscene" is a local state of the host, not a
+	// spectator mode other players should see (they would never see him again)
+	uint8 mode = GetSpectatorMode();
+	if (mode == CActor::eASM_Cutscene)
+		mode = CActor::eASM_None;
+	GetGameObject()->InvokeRMI(CActor::ClSetSpectatorMode(), CActor::SetSpectatorModeParams(mode, 0), eRMI_ToClientChannel|eRMI_NoLocalCalls, channelId);
 	
 	CActor::InitClient(channelId);
 }
@@ -798,7 +804,7 @@ void CPlayer::Update(SEntityUpdateContext& ctx, int updateSlot)
 	EAutoDisablePhysicsMode adpm = eADPM_Never;
 	if (m_stats.isRagDoll)
 		adpm = eADPM_Never;
-	else if (client || (gEnv->bMultiplayer && gEnv->bServer))
+	else if (client || (CoopAI::IsNetGame() && gEnv->bServer))
 		adpm = eADPM_Never;
 	else if (IsPlayer())
 		adpm = eADPM_WhenInvisibleAndFarAway;
@@ -954,6 +960,10 @@ void CPlayer::Update(SEntityUpdateContext& ctx, int updateSlot)
 				m_pPlayerInput = std::make_unique<CNetPlayerInput>(this);
 		} else if (IsDemoPlayback())
 			m_pPlayerInput = std::make_unique<CNetPlayerInput>(this);
+		// Crysis Coop: AI soldiers seen by a client are driven like remote
+		// players, from the movement the server writes into their input aspect
+		else if (!gEnv->bServer && gEnv->bMultiplayer && !IsPlayer() && GetHealth() > 0)
+			m_pPlayerInput = std::make_unique<CNetPlayerInput>(this);
 
 		if (m_pPlayerInput)
 			GetGameObject()->EnablePostUpdates(this);
@@ -966,7 +976,7 @@ void CPlayer::Update(SEntityUpdateContext& ctx, int updateSlot)
 	}
 
 	// small workaround for ded server: fake a view update
-	if (gEnv->bMultiplayer && gEnv->bServer && !IsClient())
+	if (CoopAI::IsNetGame() && gEnv->bServer && !IsClient())
 	{
 		SViewParams viewParams;
 		UpdateView(viewParams);
@@ -975,7 +985,7 @@ void CPlayer::Update(SEntityUpdateContext& ctx, int updateSlot)
 	UpdateWeaponRaising();
 
 	// if spectating, send health of the spectator target to our client when it changes
-	if(gEnv->bServer && gEnv->bMultiplayer && g_pGame->GetGameRules() && m_stats.spectatorMode == CActor::eASM_Follow)
+	if(gEnv->bServer && CoopAI::IsNetGame() && g_pGame->GetGameRules() && m_stats.spectatorMode == CActor::eASM_Follow)
 	{
 		IActor* pActor = g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(m_stats.spectatorTarget);
 		if (pActor)
@@ -1299,7 +1309,9 @@ void CPlayer::PrePhysicsUpdate()
 				IActorMovementController::SStats stats;
 				if (m_pMovementController->GetStats(stats) && stats.idle == true)
 				{
-					if (GetGameObject()->IsProbablyVisible()==false && GetGameObject()->IsProbablyDistant() )
+					// Crysis Coop: not for soldiers near a joined player - the host's
+					// camera does not see them, but they have to aim and fire
+					if (GetGameObject()->IsProbablyVisible()==false && GetGameObject()->IsProbablyDistant() && !CoopAI::KeepFullUpdate(GetEntity()))
 					{
 						CPlayerMovementController* pMC = static_cast<CPlayerMovementController*> (m_pMovementController);
 						float frameTime = gEnv->pTimer->GetFrameTime();
@@ -2333,14 +2345,19 @@ void CPlayer::UpdateUWBreathing(float frameTime, Vec3 worldBreathPos)
 
 				m_drownEffectDelay = drownEffectDelay; // delay until effect is retriggered (sound and screen flashing).
 
-				PlaySound(ESound_Drowning, true);
+				// Crysis Coop: the drowning sound and screen effect belong to the
+				// drowning player's own machine, not to everyone who sees him
+				if (IsClient())
+				{
+					PlaySound(ESound_Drowning, true);
 
-				IMaterialEffects* pMaterialEffects = gEnv->pGame->GetIGameFramework()->GetIMaterialEffects();
-				SMFXRunTimeEffectParams params;
-				params.pos = GetEntity()->GetWorldPos();
-				params.soundSemantic = eSoundSemantic_HUD;
-				TMFXEffectId id = pMaterialEffects->GetEffectIdByName("player_fx", "player_damage_armormode");
-				pMaterialEffects->ExecuteEffect(id, params);
+					IMaterialEffects* pMaterialEffects = gEnv->pGame->GetIGameFramework()->GetIMaterialEffects();
+					SMFXRunTimeEffectParams params;
+					params.pos = GetEntity()->GetWorldPos();
+					params.soundSemantic = eSoundSemantic_HUD;
+					TMFXEffectId id = pMaterialEffects->GetEffectIdByName("player_fx", "player_damage_armormode");
+					pMaterialEffects->ExecuteEffect(id, params);
+				}
 			}
 		}
 	}
@@ -3281,6 +3298,43 @@ void CPlayer::Kill()
 	if (CNanoSuit *pSuit=GetNanoSuit())
 		pSuit->Death();
 
+	// Crysis Coop: a client's copy of an AI soldier is moved by the aim and
+	// look the server sent last (CoopApplyAIInput) and a vehicle gun keeps
+	// posing its user (hands on the grips, aim pose). The server's AI and seat
+	// code let go of both on death; a client does it here, else the soldier
+	// keeps standing at the gun, alive-looking, in his death state.
+	if (!gEnv->bServer && !IsPlayer() && CoopAI::IsCoopSession())
+	{
+		m_pPlayerInput.reset();
+		if (IMovementController* pMC = GetMovementController())
+		{
+			CMovementRequest request;
+			request.ClearLookTarget();
+			request.ClearAimTarget();
+			request.ClearFireTarget();
+			request.SetDesiredSpeed(0.0f);
+			pMC->RequestMovement(request);
+		}
+		if (IVehicle* pVehicle = GetLinkedVehicle())
+		{
+			IItemSystem* pItemSystem = g_pGame->GetIGameFramework()->GetIItemSystem();
+			for (int i = 0; i < pVehicle->GetWeaponCount(); ++i)
+			{
+				CItem* pItem = static_cast<CItem*>(pItemSystem->GetItem(pVehicle->GetWeaponId(i)));
+				if (pItem && pItem->GetOwnerId() == GetEntityId())
+				{
+					pItem->StopUse(GetEntityId());
+					CoopAI::Trace("KILL< %s lets go of %s", GetEntity()->GetName(), pItem->GetEntity()->GetName());
+				}
+			}
+		}
+		if (ICharacterInstance* pCharacter = GetEntity()->GetCharacter(0))
+		{
+			pCharacter->GetISkeletonPose()->SetAimIK(false, ZERO);
+			pCharacter->GetISkeletonPose()->SetLookIK(false, 0, ZERO);
+		}
+	}
+
 	// notify any claymores/mines that this player has died
 	//	(they will be removed 30s later)
 	RemoveAllExplosives(EXPLOSIVE_REMOVAL_TIME);
@@ -3347,6 +3401,16 @@ void CPlayer::RagDollize( bool fallAndPlay )
 	{
 		if(!IsPlayer() && !fallAndPlay)
 			DropAttachedItems();
+		return;
+	}
+
+	// a passenger stays in his seat (CActor::RagDollize does nothing for
+	// him): stopping his animations here only froze the death animation his
+	// seat plays, a dead gunner kept standing at his gun (coop clients get
+	// the ragdoll profile of a soldier killed in a vehicle)
+	if (GetLinkedVehicle())
+	{
+		CoopAI::Trace("RAGDOLL %s: in a vehicle, animations kept (fallAndPlay=%d)", GetEntity()->GetName(), (int)fallAndPlay);
 		return;
 	}
 
@@ -3542,6 +3606,8 @@ void CPlayer::CameraShake(float angle,float shift,float duration,float frequency
 void CPlayer::ResetAnimations()
 {
 	ICharacterInstance *pCharacter = GetEntity()->GetCharacter(0);
+	if (!IsPlayer() && GetHealth() <= 0 && GetLinkedVehicle())
+		CoopAI::Trace("RESETANIMS %s (dead, in a vehicle)", GetEntity()->GetName());
 
 	if (pCharacter)
 	{
@@ -3571,6 +3637,10 @@ void CPlayer::SetHealth(int health )
 {
 	if(m_stats.isGrabbed)
 		health -=1;  //Trigger automatic thrown
+
+	// coop_god: players never lose health (single player and coop)
+	if (health < m_health && m_health > 0 && IsPlayer() && CoopAI::GodMode())
+		health = (int)m_health;
 
 	float oldHealth = m_health;
 	CActor::SetHealth(health);
@@ -4045,8 +4115,16 @@ bool CPlayer::SetAspectProfile(EEntityAspects aspect, uint8 profile )
 
 bool CPlayer::NetSerialize( TSerialize ser, EEntityAspects aspect, uint8 profile, int flags )
 {
+	CoopNetSerTrace(GetEntity(), (int)aspect, (int)profile, ser.IsReading());
+	if (CoopAI::DebugFlags() & 64)
+	{
+		int mark = 0x5A;
+		ser.Value("coopMarkA", mark);
+		if (ser.IsReading() && mark != 0x5A)
+			CoopNetSerFail(GetEntity(), (int)aspect, (int)profile, true, 1000 + mark);
+	}
 	if (!CActor::NetSerialize(ser, aspect, profile, flags))
-		return false;
+		{ CoopNetSerFail(GetEntity(), (int)aspect, (int)profile, ser.IsReading(), __LINE__); return false; }
 
 	if (aspect == ASPECT_HEALTH)
 	{
@@ -4069,14 +4147,36 @@ bool CPlayer::NetSerialize( TSerialize ser, EEntityAspects aspect, uint8 profile
 			ser.FlagPartialRead();
 	}
 
-	if(m_pNanoSuit)													// nanosuit needs to be serialized before input
-		m_pNanoSuit->Serialize(ser, aspect);	// because jumping/punching/sprinting energy consumption will vary with suit settings
+	// Crysis Coop: whether an actor has a nanosuit is not the same on every
+	// machine (the local player always gets one, AI soldiers get one from
+	// their scripts on the server), so the stream says whether suit data
+	// follows; a machine that has no suit yet creates it
+	{
+		bool hasSuit = m_pNanoSuit != 0;
+		ser.Value("hasSuit", hasSuit, 'bool');
+		if (ser.IsReading() && hasSuit && !m_pNanoSuit)
+		{
+			m_pNanoSuit = new CNanoSuit();
+			m_pNanoSuit->Reset(this);
+		}
+		if (hasSuit && m_pNanoSuit)						// nanosuit needs to be serialized before input
+			m_pNanoSuit->Serialize(ser, aspect);	// because jumping/punching/sprinting energy consumption will vary with suit settings
+	}
+	if (CoopAI::DebugFlags() & 64)
+	{
+		int mark = 0x5B;
+		ser.Value("coopMarkB", mark);
+		if (ser.IsReading() && mark != 0x5B)
+			CoopNetSerFail(GetEntity(), (int)aspect, (int)profile, true, 2000 + mark);
+	}
 
 	if (aspect == IPlayerInput::INPUT_ASPECT)
 	{
 		SSerializedPlayerInput serializedInput;
 		if (m_pPlayerInput && ser.IsWriting())
 			m_pPlayerInput->GetState(serializedInput);
+		else if (ser.IsWriting() && gEnv->bServer && !IsPlayer())
+			GetAIInputState(serializedInput);
 
 		serializedInput.Serialize(ser);
 
@@ -4086,6 +4186,13 @@ bool CPlayer::NetSerialize( TSerialize ser, EEntityAspects aspect, uint8 profile
 		}
 
 		ser.Value("VehicleViewRotation", m_vehicleViewDir, 'dir0');
+	}
+	if (CoopAI::DebugFlags() & 64)
+	{
+		int mark = 0x5C;
+		ser.Value("coopMarkC", mark);
+		if (ser.IsReading() && mark != 0x5C)
+			CoopNetSerFail(GetEntity(), (int)aspect, (int)profile, true, 3000 + mark);
 	}
 	return true;
 }
@@ -6697,4 +6804,49 @@ void CPlayer::SetPainEffect(float progress /* = 0.0f */)
 		pEngine->SetPostEffectParam("ScreenCondensation_CenterAmount", 1.0f);
 	}
 
+}
+
+
+//------------------------------------------------------------------------
+// Crysis Coop: what an AI soldier is doing, in the form of player input, so
+// clients can move and animate it like a remote player
+void CPlayer::GetAIInputState(SSerializedPlayerInput& input)
+{
+	SMovementState state;
+	if (GetMovementController())
+		GetMovementController()->GetMovementState(state);
+	input.stance = (uint8)GetStance();
+	Vec3 dir = state.aimDirection;
+	if (dir.IsZero())
+		dir = GetEntity()->GetWorldRotation().GetColumn1();
+	input.lookDirection = dir.GetNormalizedSafe(FORWARD_DIRECTION);
+	input.bodyDirection = GetEntity()->GetWorldRotation().GetColumn1();
+	Vec3 v = m_stats.velocity;
+	v.z = 0.0f;
+	const float maxSpeed = max(0.1f, GetStanceMaxSpeed(GetStance()));
+	float len = v.GetLength() / maxSpeed;
+	input.sprint = len > 1.05f;
+	if (len > 1.0f)
+		len = 1.0f;
+	input.deltaMovement = (len > 0.05f) ? v.GetNormalizedSafe(ZERO) * len : Vec3(ZERO);
+	input.leanl = input.leanr = false;
+}
+
+//------------------------------------------------------------------------
+// Crysis Coop (client): an AI soldier's movement received from the server
+void CPlayer::CoopApplyAIInput(uint8 stance, const Vec3& move, const Vec3& look, bool sprint)
+{
+	if (gEnv->bServer || IsPlayer() || GetHealth() <= 0)
+		return;
+	if (!m_pPlayerInput)
+	{
+		m_pPlayerInput = std::make_unique<CNetPlayerInput>(this);
+		GetGameObject()->EnablePostUpdates(this);
+	}
+	SSerializedPlayerInput input;
+	input.stance = stance;
+	input.deltaMovement = move;
+	input.lookDirection = look.GetNormalizedSafe(FORWARD_DIRECTION);
+	input.sprint = sprint;
+	m_pPlayerInput->SetState(input);
 }

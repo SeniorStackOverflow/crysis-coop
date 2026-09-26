@@ -11,6 +11,7 @@ History:
 
 *************************************************************************/
 #include "StdAfx.h"
+#include "CoopAI.h"
 #include "Game.h"
 #include "GameCVars.h"
 #include <IEntitySystem.h>
@@ -527,8 +528,9 @@ void CWeapon::Release()
 //------------------------------------------------------------------------
 bool CWeapon::NetSerialize( TSerialize ser, EEntityAspects aspect, uint8 profile, int flags )
 {
+	CoopNetSerTrace(GetEntity(), (int)aspect, (int)profile, ser.IsReading());
 	if (!CItem::NetSerialize(ser, aspect, profile, flags))
-		return false;
+		{ CoopNetSerFail(GetEntity(), (int)aspect, (int)profile, ser.IsReading(), __LINE__); return false; }
 
 	if (aspect == ASPECT_FIREMODE) // only the current firemode id, and the current firemode are serialized
 	{

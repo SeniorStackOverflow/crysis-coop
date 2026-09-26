@@ -59,7 +59,10 @@ private:
 
 	void DisplayBinoculars(CPlayer* pPlayerActor);
 	void DisplayScope(CPlayer* pPlayerActor);
-	void SetSilhouette(IActor *pActor,IAIObject *pAIObject);
+	void SetSilhouette(IActor *pActor,int iAlertnessState);
+	// an enemy soldier to highlight, with his alertness (on a coop client the
+	// AI state comes from the server)
+	bool GetEnemyAlertness(IEntity *pEntity,IAIObject *pAIPlayer,int &iAlertnessState);
 
 	//the main HUD
 	CHUD			*g_pHUD;

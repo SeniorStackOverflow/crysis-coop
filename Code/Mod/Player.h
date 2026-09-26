@@ -572,6 +572,8 @@ public:
 
 	virtual void FullSerialize( TSerialize ser );
 	virtual bool NetSerialize( TSerialize ser, EEntityAspects aspect, uint8 profile, int flags );
+	void GetAIInputState(struct SSerializedPlayerInput& input);
+	void CoopApplyAIInput(uint8 stance, const Vec3& move, const Vec3& look, bool sprint);
 	virtual void PostSerialize();
 	//set/get actor params
 	virtual void SetHealth( int health );

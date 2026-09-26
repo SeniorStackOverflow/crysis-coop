@@ -12,6 +12,7 @@
 
 *************************************************************************/
 #include "StdAfx.h"
+#include "CoopAI.h"
 #include <StringUtils.h>
 #include "Game.h"
 #include "GameCVars.h"
@@ -1038,9 +1039,28 @@ IEntity *CActor::LinkToVehicle(EntityId vehicleId)
 	bool changed=((m_linkStats.linkID!=vehicleId)||gEnv->pSystem->IsSerializingFile())?true:false;
 
 	m_linkStats = SLinkStats(vehicleId,LINKED_VEHICLE);
-	
+
 	IVehicle *pVehicle = m_linkStats.GetLinkedVehicle();
 	IEntity *pLinked = pVehicle?pVehicle->GetEntity():NULL;
+
+	// Crysis Coop diagnostics: who ends up in which vehicle seat on the server
+	if (gEnv->bServer && changed)
+	{
+		IVehicleSeat *pSeat = pVehicle ? pVehicle->GetSeatForPassenger(GetEntityId()) : NULL;
+		CryLogAlways("[CoopVeh] %s %s vehicle %s seat %s (driver=%d)",
+			GetEntity()->GetName(), pLinked ? "entered" : "left",
+			pLinked ? pLinked->GetName() : "-",
+			pSeat ? pSeat->GetSeatName() : "-",
+			pSeat ? (int)pSeat->IsDriver() : 0);
+	}
+	if (changed && !pLinked && gEnv->bServer && !IsPlayer())
+		CoopAI::OnAIExitedVehicle(GetEntityId());
+	if (changed && CoopAI::TraceOn())
+	{
+		IVehicleSeat *pSeat = pVehicle ? pVehicle->GetSeatForPassenger(GetEntityId()) : NULL;
+		CoopAI::Trace("LINK %s %s vehicle %s seat %s hp=%d", GetEntity()->GetName(), pLinked ? "entered" : "left",
+			pLinked ? pLinked->GetName() : "-", pSeat ? pSeat->GetSeatName() : "-", (int)GetHealth());
+	}
   
 	if (m_pAnimatedCharacter)
 	{
@@ -1062,7 +1082,7 @@ IEntity *CActor::LinkToVehicle(EntityId vehicleId)
 		{
 			if(enabled)
 			{
-				if (changed)
+				if (changed && !((CoopAI::DebugFlags() & 2) && !IsPlayer()))
 					GetGameObject()->SetAspectProfile(eEA_Physics, eAP_Linked);
 			}
 			else if(IPhysicalEntity *pPhys = GetEntity()->GetPhysics())
@@ -1778,6 +1798,7 @@ void CActor::SetMaxHealth( int maxHealth )
 
 void CActor::Kill()
 {
+	CoopAI::OnActorKilling(GetEntity());
 	if (m_pAnimatedCharacter)
 		m_pAnimatedCharacter->SetParams( m_pAnimatedCharacter->GetParams().ModifyFlags(0,eACF_EnableMovementProcessing));
 
@@ -1793,6 +1814,14 @@ void CActor::Kill()
 	}
 
 	RequestFacialExpression( NULL );
+
+	// Crysis Coop: the clients learn of an AI soldier's death only from his
+	// health and his ragdoll physics; one sitting in a vehicle has no physics
+	// of his own and stayed in his seat looking alive there (the seat never
+	// heard of his death). They get the kill itself, as players do.
+	if (gEnv->bServer && gEnv->bMultiplayer && !IsPlayer() && CoopAI::IsCoopSession() && CoopAI::IsNetBound(GetEntityId()))
+		GetGameObject()->InvokeRMI(ClSimpleKill(), NoParams(), eRMI_ToRemoteClients);
+	CoopAI::OnActorKilled(GetEntity(), GetLinkedVehicle() != 0);
 }
 
 void CActor::SetParams(SmartScriptTable &rTable,bool resetFirst)
@@ -2015,6 +2044,7 @@ bool CActor::SetAspectProfile( EEntityAspects aspect, uint8 profile )
 		m_currentPhysProfile = profile;
 	}
 
+	if (!res && aspect == eEA_Physics) CoopNetSerFail(GetEntity(), (int)aspect, (int)profile, true, -1);
 	return res;
 }
 
@@ -2034,6 +2064,7 @@ void CActor::ProfileChanged( uint8 newProfile )
 
 bool CActor::NetSerialize( TSerialize ser, EEntityAspects aspect, uint8 profile, int pflags )
 {
+	CoopNetSerTrace(GetEntity(), (int)aspect, (int)profile, ser.IsReading());
 	if (aspect == eEA_Physics)
 	{
 		uint8 currentProfile = 255;
@@ -2063,7 +2094,7 @@ bool CActor::NetSerialize( TSerialize ser, EEntityAspects aspect, uint8 profile,
 			return true;
 			break;
 		default:
-			return false;
+			{ CoopNetSerFail(GetEntity(), (int)aspect, (int)profile, ser.IsReading(), __LINE__); return false; }
 		}
 
 		// TODO: remove this when craig fixes it in the network system
@@ -2094,9 +2125,14 @@ bool CActor::NetSerialize( TSerialize ser, EEntityAspects aspect, uint8 profile,
 				return true;
 			}
 		}
-		else if (!pEPP)
+		else if (!pEPP || !pEPP->GetPhysicalEntity() || pEPP->GetPhysicalEntity()->GetType() != type)
 		{
-			return false;
+			// Crysis Coop: the local physics may not match the server's yet
+			// (not physicalized, ragdoll, sleeping...); consume the snapshot
+			// exactly as the writer produced it instead of desynchronising
+			// the rest of the packet
+			gEnv->pPhysicalWorld->SerializeGarbageTypedSnapshot( ser, type, 0 );
+			return true;
 		}
 
 		pEPP->SerializeTyped( ser, type, pflags );

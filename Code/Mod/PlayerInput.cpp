@@ -16,6 +16,7 @@
 #include "Fists.h"
 #include "HUD/HUD.h"
 #include "GameRules.h"
+#include "CoopAI.h"
 
 #include <IWorldQuery.h>
 #include <IInteractor.h>
@@ -143,6 +144,8 @@ void CPlayerInput::ApplyMovement(Vec3 delta)
 void CPlayerInput::OnAction( const ActionId& actionId, int activationMode, float value )
 {
 	FUNCTION_PROFILER(GetISystem(), PROFILE_GAME);
+
+	CoopAI::TraceInput(actionId.c_str(), activationMode, value);
 
 	m_pPlayer->GetGameObject()->ChangedNetworkState( INPUT_ASPECT );
 

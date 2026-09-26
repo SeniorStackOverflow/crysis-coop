@@ -19,6 +19,7 @@ History:
 
 *************************************************************************/
 #include "StdAfx.h"
+#include "CoopAI.h"
 #include <StlUtils.h>
 #include <ctype.h>
 
@@ -261,6 +262,7 @@ CHUD::CHUD()
 	m_bSubtitlesNeedUpdate = false;
 	m_hudSubTitleMode = eHSM_Off;
 	m_cineState = eHCS_None;
+	m_cineBarsTarget = 0;
 	m_cineHideHUD = false;
 	m_bCutscenePlaying = false;
 	m_bStopCutsceneNextUpdate = false;
@@ -1065,6 +1067,7 @@ void CHUD::ResetPostSerElements()
 	DisplayBigOverlayFlashMessage(m_bigOverlayText, duration, m_bigOverlayTextX, m_bigOverlayTextY, m_bigOverlayTextColor);
 	m_cineHideHUD = false;
 	m_cineState = eHCS_None;
+	m_cineBarsTarget = 0;
 
 	ShowDeathFX(-1); //stops running deathFX
 }
@@ -2298,7 +2301,8 @@ bool CHUD::OnAction(const ActionId& action, int activationMode, float value)
 	}
 	else if(action == rGameActions.hud_show_multiplayer_scoreboard && activationMode == eIS_Pressed)
 	{
-		if(gEnv->bMultiplayer)
+		// coop: Tab shows the objectives, as in the campaign
+		if(gEnv->bMultiplayer && !CoopAI::IsCoopSession())
 		{
 			if(m_animScoreBoard.IsLoaded() && m_pHUDScore && !m_pHUDScore->m_bShow && GetModalHUD() != &m_animWarningMessages)
 			{
@@ -2334,7 +2338,7 @@ bool CHUD::OnAction(const ActionId& action, int activationMode, float value)
 						((action == rGameActions.hud_show_multiplayer_scoreboard && activationMode == eIS_Released)||
 						action == rGameActions.hud_hide_multiplayer_scoreboard))
 	{
-		if(gEnv->bMultiplayer)
+		if(gEnv->bMultiplayer && !CoopAI::IsCoopSession())
 		{
 			if(m_animScoreBoard.IsLoaded() && m_pHUDScore && m_pHUDScore->m_bShow)
 			{
@@ -2593,6 +2597,7 @@ bool CHUD::OnAction(const ActionId& action, int activationMode, float value)
 
 void CHUD::ShowObjectives(bool bShow)
 {
+	CoopAI::TraceHUD("objectives_screen", "%d", (int)bShow);
 	if (gEnv->pGame->GetIGameFramework()->GetIViewSystem()->IsPlayingCutScene())
 		return;
 
@@ -2616,6 +2621,7 @@ void CHUD::ShowObjectives(bool bShow)
 
 void CHUD::ShowReviveCycle(bool show)
 {
+	CoopAI::TraceHUD("revive_cycle", "%d", (int)show);
 	if(show)
 	{
 		if (!m_animSpawnCycle.IsLoaded())
@@ -2767,7 +2773,7 @@ bool CHUD::ShowPDA(bool show, bool buyMenu)
 		}
 
 		SetFlashColor(anim);
-		anim->Invoke("showPDA", gEnv->bMultiplayer);
+		anim->Invoke("showPDA", gEnv->bMultiplayer && !CoopAI::IsCoopSession());
 		if(buyMenu)
 		{
 			anim->GetFlashPlayer()->Advance(0.1f);
@@ -2804,6 +2810,9 @@ bool CHUD::ShowPDA(bool show, bool buyMenu)
 			m_pHUDRadar->SetRenderMapOverlay(false);
 			m_pHUDRadar->SetDrag(false);
 			m_bMiniMapZooming = false;
+			// coop: the objectives opened with the map close with it
+			if (CoopAI::IsCoopSession())
+				ShowObjectives(false);
 		}
 
 		if(m_pHUDPowerStruggle)
@@ -3719,6 +3728,7 @@ void CHUD::OnActionEvent(const SActionEvent& event)
 
 void CHUD::BreakHUD(int state)
 {
+	CoopAI::TraceHUD("break", "%d", state);
 	m_iBreakHUD = state;
 	m_pHUDCrosshair->Break(state?true:false);
 
@@ -4262,7 +4272,7 @@ void CHUD::ActorDeath(IActor* pActor)
 		if(m_pModalHUD == &m_animQuickMenu)
 			OnAction(g_pGame->Actions().hud_suit_menu, eIS_Released, 1);
 
-		if(m_currentGameRules == EHUD_SINGLEPLAYER)
+		if(m_currentGameRules == EHUD_SINGLEPLAYER && !CoopAI::IsNetGame())
     {
 			ShowPDA(false);
 			ShowBuyMenu(false);
@@ -4430,7 +4440,7 @@ void CHUD::UpdateObjective(CHUDMissionObjective *pObjective)
 		m_pHUDRadar->UpdateMissionObjective(pObjective->GetTrackedEntity(), active, pObjective->GetMapLabel(), pObjective->IsSecondary());
 	}
 
-	if(!gEnv->bMultiplayer || m_currentGameRules == EHUD_POWERSTRUGGLE) //in multiplayer the objectives are set in the miniMap only
+	if(!gEnv->bMultiplayer || m_currentGameRules == EHUD_POWERSTRUGGLE || CoopAI::IsCoopSession()) //in multiplayer the objectives are set in the miniMap only
 	{
 		m_animObjectivesTab.Invoke("resetObjectives");
 		THUDObjectiveList::iterator it = m_hudObjectivesList.begin();
@@ -4447,6 +4457,7 @@ void CHUD::UpdateObjective(CHUDMissionObjective *pObjective)
 
 void CHUD::SetMainObjective(const char* objectiveKey, bool isGoal)
 {
+	CoopAI::TraceHUD("main_objective", "%s goal=%d", objectiveKey ? objectiveKey : "", (int)isGoal);
 	CHUDMissionObjective *pObjective = m_missionObjectiveSystem.GetMissionObjective(objectiveKey);
 	if(pObjective)
 	{
@@ -4474,6 +4485,7 @@ const char* CHUD::GetMainObjective()
 
 void CHUD::SetOnScreenObjective(EntityId pObjectiveID)
 {
+	{ IEntity* pE = gEnv->pEntitySystem->GetEntity(pObjectiveID); CoopAI::TraceHUD("onscreen_objective", "%u(%s)", pObjectiveID, pE ? pE->GetName() : "-"); }
 	if(m_iOnScreenObjective && m_iOnScreenObjective!=pObjectiveID)
 		m_pHUDRadar->UpdateMissionObjective(m_iOnScreenObjective, false, " ", false);
 
@@ -4579,6 +4591,7 @@ void CHUD::ShowSoundOnRadar(const Vec3& pos, float intensity) const
 
 void CHUD::SetRadarScanningEffect(bool show)
 {
+	CoopAI::TraceHUD("radar_scanning", "%d", (int)show);
 	if(!m_animRadarCompassStealth.IsLoaded()) return;
 	if(show)
 	{

@@ -8,6 +8,11 @@
 #include "PlayerInput.h"
 #include "PlayerMovementController.h"
 #include "Nodes/G2FlowBaseNode.h"
+#include "GameRules.h"
+
+// the player a level graph means (Nodes/CoopFlowNodes.cpp): the local player,
+// on the coop server the player that graph's Game:LocalPlayer chose
+CActor* CoopGraphPlayer(IFlowGraph* pGraph);
 
 class CFlowPlayerStagingNode : public CFlowBaseNode
 {
@@ -78,7 +83,7 @@ public:
 				const bool localSpace = GetPortBool(pActInfo, EIP_LocalSpace);
 				const float rangeH = GetPortFloat(pActInfo, EIP_LimitYaw);
 				const float rangeV = GetPortFloat(pActInfo, EIP_LimitPitch);
-				CActor *pPlayerActor = static_cast<CActor *>(gEnv->pGame->GetIGameFramework()->GetClientActor());
+				CActor *pPlayerActor = CoopGraphPlayer(pActInfo->pGraph);
 				if (pPlayerActor)
 				{
 					CPlayer::SStagingParams stagingParams;
@@ -223,7 +228,7 @@ public:
 				IEntity* pEntity = gEnv->pEntitySystem->GetEntity(GetPortEntityId(pActInfo, EIP_Target));
 				if (pEntity)
 				{
-					CActor *pPlayerActor = static_cast<CActor*>(gEnv->pGame->GetIGameFramework()->GetClientActor());
+					CActor *pPlayerActor = CoopGraphPlayer(pActInfo->pGraph);
 					if (pPlayerActor)
 					{
 						SActorStats* pActorStats = pPlayerActor->GetActorStats();
@@ -241,7 +246,7 @@ public:
 			}
 			if (IsPortActive(pActInfo, EIP_Unlink))
 			{
-				CActor *pPlayerActor = static_cast<CActor*>(gEnv->pGame->GetIGameFramework()->GetClientActor());
+				CActor *pPlayerActor = CoopGraphPlayer(pActInfo->pGraph);
 				if (pPlayerActor)
 				{
 					SActorStats* pActorStats = pPlayerActor->GetActorStats();
@@ -253,6 +258,13 @@ public:
 							pActorStats->isHidden = false;
 					}
 					pPlayerActor->LinkToEntity(0, GetPortBool(pActInfo, EIP_KeepTransform));
+					// a joined player: his own machine puts him where the link left him
+					if (gEnv->bServer && pPlayerActor->GetChannelId() && pPlayerActor != gEnv->pGame->GetIGameFramework()->GetClientActor())
+						if (CGameRules* pRules = g_pGame->GetGameRules())
+						{
+							IEntity* pPlayerEntity = pPlayerActor->GetEntity();
+							pRules->MovePlayer(pPlayerActor, pPlayerEntity->GetWorldPos(), Ang3(pPlayerEntity->GetWorldRotation()));
+						}
 					ActivateOutput(pActInfo, EOP_Unlinked, true);
 				}
 			}

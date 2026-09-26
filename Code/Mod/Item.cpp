@@ -11,6 +11,7 @@
 
 *************************************************************************/
 #include "StdAfx.h"
+#include "CoopAI.h"
 #include "Item.h"
 #include "ItemSharedParams.h"
 #include "Game.h"
@@ -439,6 +440,7 @@ bool CItem::SetAspectProfile( EEntityAspects aspect, uint8 profile )
 		}
 	}
 
+	if (aspect == eEA_Physics) CoopNetSerFail(GetEntity(), (int)aspect, (int)profile, true, -2);
 	return false;
 }
 
@@ -598,6 +600,7 @@ void CItem::ProcessEvent(SEntityEvent &event)
 //------------------------------------------------------------------------
 bool CItem::NetSerialize( TSerialize ser, EEntityAspects aspect, uint8 profile, int pflags )
 {
+	CoopNetSerTrace(GetEntity(), (int)aspect, (int)profile, ser.IsReading());
 	if (aspect == eEA_Physics)
 	{
 		pe_type type = PE_NONE;
@@ -613,7 +616,7 @@ bool CItem::NetSerialize( TSerialize ser, EEntityAspects aspect, uint8 profile, 
 			type = PE_NONE;
 			break;
 		default:
-			return false;
+			{ CoopNetSerFail(GetEntity(), (int)aspect, (int)profile, ser.IsReading(), __LINE__); return false; }
 		}
 
 		if (type == PE_NONE)
@@ -628,9 +631,14 @@ bool CItem::NetSerialize( TSerialize ser, EEntityAspects aspect, uint8 profile, 
 				return true;
 			}
 		}
-		else if (!pEPP)
+		else if (!pEPP || !pEPP->GetPhysicalEntity() || pEPP->GetPhysicalEntity()->GetType() != type)
 		{
-			return false;
+			// Crysis Coop: the local physics may not match the server's yet
+			// (not physicalized, ragdoll, sleeping...); consume the snapshot
+			// exactly as the writer produced it instead of desynchronising
+			// the rest of the packet
+			gEnv->pPhysicalWorld->SerializeGarbageTypedSnapshot( ser, type, 0 );
+			return true;
 		}
 
 		pEPP->SerializeTyped( ser, type, pflags );
@@ -1653,7 +1661,8 @@ void CItem::PickUp(EntityId pickerId, bool sound, bool select, bool keepHistory)
 	if (IsServer())
 	{
 		GetGameObject()->SetNetworkParent(pickerId);
-		if ((GetEntity()->GetFlags()&(ENTITY_FLAG_CLIENT_ONLY|ENTITY_FLAG_SERVER_ONLY)) == 0)
+		if ((GetEntity()->GetFlags()&(ENTITY_FLAG_CLIENT_ONLY|ENTITY_FLAG_SERVER_ONLY)) == 0 &&
+			CoopAI::IsNetBound(pickerId, GetEntityId()))
 		{
 			bool remoteSelect = m_stats.selected;
 			if(m_params.select_on_pickup)
@@ -1665,6 +1674,8 @@ void CItem::PickUp(EntityId pickerId, bool sound, bool select, bool keepHistory)
 			if (pActor->IsClient() && sound && g_pGame->GetHUD() && displayName && displayName[0])
 				g_pGame->GetHUD()->BattleLogEvent(eBLE_Information, "@mp_BLYouPickedup", displayName);
 		}
+		else if ((GetEntity()->GetFlags()&(ENTITY_FLAG_CLIENT_ONLY|ENTITY_FLAG_SERVER_ONLY)) == 0)
+			CoopAI::QueuePickup(pickerId, GetEntityId());
 	}
 }
 

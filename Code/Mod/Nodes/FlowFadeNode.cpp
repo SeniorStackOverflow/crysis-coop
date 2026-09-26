@@ -3,6 +3,7 @@
 // Copyright (C) Crytek GmbH, 2001-2008.
 // -------------------------------------------------------------------------
 #include "StdAfx.h"
+#include "CoopAI.h"
 #include "Game.h"
 #include "GameCVars.h"
 #include "Item.h"
@@ -189,7 +190,25 @@ public:
 	CMasterFader() : CHUDObject()
 	{
 		m_bRegistered = false;
+		m_lastAdvance = 0;
 		memset(m_pHUDFader, 0, sizeof(m_pHUDFader));
+	}
+
+	// Crysis Coop: the faders' time runs once a frame, from the HUD or, when
+	// the HUD does not update (menu open or window in the background in a
+	// network game, where the game goes on), from the fade flow node: the
+	// level's graphs wait for "faded" before they fade back (a white screen
+	// after a cutscene stayed for good)
+	void Advance()
+	{
+		const int64 now = gEnv->pTimer->GetFrameStartTime().GetValue();
+		if (now == m_lastAdvance)
+			return;
+		m_lastAdvance = now;
+		const float fDeltaTime = gEnv->pTimer->GetFrameTime();
+		for (int i=0; i<NUM_FADERS; ++i)
+			if (m_pHUDFader[i])
+				m_pHUDFader[i]->Update(fDeltaTime);
 	}
 
 	~CMasterFader()
@@ -215,11 +234,11 @@ public:
 	{
 		const bool bInTimeDemo = g_pGame->GetIGameFramework()->IsInTimeDemo();
 		int nActive = 0;
+		Advance();
 		for (int i=0; i<NUM_FADERS; ++i)
 		{
 			if (m_pHUDFader[i])
 			{
-				m_pHUDFader[i]->Update(fDeltaTime);
 				const bool bMFX = (i>= MFX_FADER_OFFSET && i <= MFX_FADER_END);
 				const bool bSkipDraw = bInTimeDemo && !bMFX;
 				if (!bSkipDraw) // in TimeDemo we don't draw
@@ -306,6 +325,7 @@ public:
 
 
 	bool m_bRegistered;
+	int64 m_lastAdvance;
 	CHUDFader* m_pHUDFader[NUM_FADERS];
 };
 
@@ -479,6 +499,10 @@ public:
 			break;
 		case eFE_Activate:
 			{
+				if (CoopAI::TraceOn() && (IsPortActive(pActInfo, EIP_FadeIn) || IsPortActive(pActInfo, EIP_FadeOut)))
+					CoopAI::Trace("FADER %s %s group %d time %.1f", pActInfo->pGraph->GetNodeName(pActInfo->myID),
+						IsPortActive(pActInfo, EIP_FadeIn) ? "FadeIn" : "FadeOut", GetPortInt(pActInfo, EIP_FadeGroup) + m_nFaderOffset,
+						GetPortFloat(pActInfo, IsPortActive(pActInfo, EIP_FadeIn) ? EIP_InTime : EIP_OutTime));
 				if (IsPortActive(pActInfo, EIP_FadeIn))
 				{
 					StopFader(pActInfo);
@@ -511,6 +535,8 @@ public:
 					return;
 				}
 
+				if (g_pMasterFader)
+					g_pMasterFader->Advance();
 				CHUDFader* pFader = GetFader(pActInfo);
 				if (pFader == 0 || m_bPlaying == false)
 				{
@@ -525,6 +551,8 @@ public:
 				ActivateOutput(pActInfo, EOP_FadeColor, vCol);
 				if (pFader->IsPlaying(m_ticket) == false)
 				{
+					if (CoopAI::TraceOn())
+						CoopAI::Trace("FADER %s %s", pActInfo->pGraph->GetNodeName(pActInfo->myID), m_direction < 0 ? "FadedIn" : "FadedOut");
 					if (m_direction < 0.0f)
 					{
 						ActivateOutput(pActInfo, EOP_FadedIn, true);

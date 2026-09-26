@@ -28,6 +28,8 @@ History:
 #include "Weapon.h"
 #include "WeaponSystem.h"
 #include "Single.h"
+#include "CoopAI.h"
+#include "HUD/HUD.h"
 
 #include <IViewSystem.h>
 #include <IItemSystem.h>
@@ -235,7 +237,13 @@ void CPlayerView::ViewPreProcess(const CPlayer &rPlayer,SViewParams &viewParams,
 //--------------------------------------------------------------------------
 void CPlayerView::ViewProcess(SViewParams &viewParams)
 {
-	if(m_in.stats_spectatorMode == 0 && m_in.stats_spectatorTarget && gEnv->bMultiplayer && m_in.health <= 0 && g_pGameCVars->g_deathCam != 0)
+	// Crysis Coop: a player waiting to spawn (or dead) sees through his
+	// target's eyes (ViewSpectatorTarget), not the death cam over his head
+	if(m_in.stats_spectatorTarget && m_in.health <= 0 && CoopAI::IsCoopSession())
+	{
+		ViewSpectatorTarget(viewParams);
+	}
+	else if(m_in.stats_spectatorMode == 0 && m_in.stats_spectatorTarget && gEnv->bMultiplayer && m_in.health <= 0 && g_pGameCVars->g_deathCam != 0)
 	{
 			ViewFirstThirdSharedPre(viewParams);
 			ViewDeathCamTarget(viewParams);
@@ -868,6 +876,38 @@ void CPlayerView::ViewSpectatorTarget(SViewParams &viewParams)
 	CActor* pTarget = (CActor*)g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(m_in.stats_spectatorTarget);
 	if(!pTarget)
 		return;
+
+	// Crysis Coop: a player waiting to spawn (the host is still in his intro)
+	// sees through the host's eyes. The orbit camera hung over his head
+	// looking straight down while the host lay in a scripted wake-up (a
+	// cutscene played from the host's own eyes, without a camera of its own).
+	if (CoopAI::IsCoopSession() && pTarget->IsPlayer() && !pTarget->GetLinkedVehicle())
+	{
+		CoopAI::OnEyeView(pTarget->GetEntityId());
+		viewParams.viewID = 3;
+		viewParams.nearplane = 0.1f;
+		const Matrix34& tm = pTarget->GetEntity()->GetWorldTM();
+		ICharacterInstance* pChar = pTarget->GetEntity()->GetCharacter(0);
+		ISkeletonPose* pPose = pChar ? pChar->GetISkeletonPose() : 0;
+		const int16 head = pPose ? pPose->GetJointIDByName("Bip01 Head") : -1;
+		CHUD* pHUD = g_pGame->GetHUD();
+		SMovementState state;
+		if (IMovementController* pMC = pTarget->GetMovementController())
+			pMC->GetMovementState(state);
+		if (head >= 0 && pHUD && pHUD->IsCutscenePlaying())
+		{
+			// scripted: the head the animation moves (as the host's own view)
+			const QuatT& joint = pPose->GetAbsJointByID(head);
+			viewParams.rotation = Quat(Matrix33(tm) * Matrix33(joint.q.GetNormalized()) * Matrix33::CreateRotationY(gf_PI * 0.5f));
+			viewParams.position = tm * joint.t + viewParams.rotation.GetColumn1() * 0.15f;
+		}
+		else
+		{
+			viewParams.position = state.eyePosition;
+			viewParams.rotation = Quat::CreateRotationVDir(state.eyeDirection.GetNormalizedSafe(tm.GetColumn1()));
+		}
+		return;
+	}
 
 	IVehicle* pVehicle = pTarget->GetLinkedVehicle();
 

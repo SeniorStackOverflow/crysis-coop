@@ -22,6 +22,7 @@ History:
 #include "IWorldQuery.h"
 #include "GameRules.h"
 #include "GameCVars.h"
+#include "CoopAI.h"
 #include "Weapon.h"
 
 //-----------------------------------------------------------------------------------------------------
@@ -77,10 +78,26 @@ void CHUDScopes::LoadFlashFiles(bool force)
 
 //-----------------------------------------------------------------------------------------------------
 
-void CHUDScopes::SetSilhouette(IActor *pActor,IAIObject *pAIObject)
+bool CHUDScopes::GetEnemyAlertness(IEntity *pEntity,IAIObject *pAIPlayer,int &iAlertnessState)
 {
-	IUnknownProxy *pUnknownProxy = pAIObject ? pAIObject->GetProxy() : NULL;
-	int iAlertnessState = pUnknownProxy ? pUnknownProxy->GetAlertnessState() : 0;
+	iAlertnessState = 0;
+	IAIObject *pAIObject = pEntity->GetAI();
+	if(pAIObject)
+	{
+		// Display only enemies
+		if(!pAIObject->IsHostile(pAIPlayer,false) || !pAIObject->IsEnabled())
+			return false;
+		IUnknownProxy *pUnknownProxy = pAIObject->GetProxy();
+		iAlertnessState = pUnknownProxy ? pUnknownProxy->GetAlertnessState() : 0;
+		return true;
+	}
+	bool hostile = false;
+	bool enabled = false;
+	return CoopAI::GetMirroredAI(pEntity->GetId(), hostile, iAlertnessState, &enabled) && hostile && enabled;
+}
+
+void CHUDScopes::SetSilhouette(IActor *pActor,int iAlertnessState)
+{
 	if(0 == iAlertnessState)
 	{
 		float r = ((unsigned char) ((g_pGameCVars->hud_colorLine >> 16)	& 0xFF)) / 255.0f;
@@ -206,18 +223,11 @@ void CHUDScopes::DisplayBinoculars(CPlayer* pPlayerActor)
 			if(!pActor)
 				continue;
 
-			IAIObject *pAIObject = pEntity->GetAI();
-			if(!pAIObject)
+			int iAlertnessState = 0;
+			if(!GetEnemyAlertness(pEntity,pAIPlayer,iAlertnessState))
 				continue;
 
-			// Display only enemies
-			if(!pAIObject->IsHostile(pAIPlayer,false))
-				continue;
-
-			if(!pAIObject->IsEnabled())
-				continue;
-
-			SetSilhouette(pActor,pAIObject);
+			SetSilhouette(pActor,iAlertnessState);
 
 			drawnEntities[uiEntityId] = true;
 		}
@@ -239,20 +249,13 @@ void CHUDScopes::DisplayBinoculars(CPlayer* pPlayerActor)
 				if(stl::find_in_map(drawnEntities, uiEntityId, false))
 					continue;
 
-				if(!gEnv->bMultiplayer)
+				if(!gEnv->bMultiplayer || CoopAI::IsCoopSession())
 				{
-					IAIObject *pAIObject = pEntity->GetAI();
-					if(!pAIObject)
+					int iAlertnessState = 0;
+					if(!GetEnemyAlertness(pEntity,pAIPlayer,iAlertnessState))
 						continue;
 
-					// Display only enemies
-					if(!pAIObject->IsHostile(pAIPlayer,false))
-						continue;
-
-					if(!pAIObject->IsEnabled())
-						continue;
-
-					SetSilhouette(pActor,pAIObject);
+					SetSilhouette(pActor,iAlertnessState);
 				}
 				else
 				{

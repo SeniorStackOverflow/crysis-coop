@@ -5,13 +5,23 @@
 #include "StdAfx.h"
 #include "ISerialize.h"
 #include "Game.h"
+#include "GameRules.h"
 #include "HUD.h"
 #include "HUDRadar.h"
+#include "CoopAI.h"
 
 void CHUDMissionObjective::SetStatus(HUDMissionStatus status)
 {
 	if (status == m_eStatus)
 		return;
+	{
+		static const char* names[] = { "deactivated", "completed", "failed", "activated" };
+		IEntity* pTracked = m_trackedEntity ? gEnv->pEntitySystem->GetEntity(m_trackedEntity) : 0;
+		CoopAI::Trace("HUD objective %s status %d->%d (%s) %s silent=%d target=%s text=\"%s\"", GetID(), (int)m_eStatus, (int)status,
+			(unsigned)status < 4 ? names[status] : "?", m_secondary ? "secondary" : "primary", (int)m_silent,
+			pTracked ? pTracked->GetName() : "-", m_shortMessage.c_str());
+		CryLogAlways("[CoopObjective] %s -> %s (%s)", GetID(), (unsigned)status < 4 ? names[status] : "?", m_shortMessage.c_str());
+	}
 
 	m_eStatus = status;
 
@@ -20,6 +30,9 @@ void CHUDMissionObjective::SetStatus(HUDMissionStatus status)
 	SAFE_HUD_FUNC(UpdateObjective(this));
 
 	m_lastTimeChanged = gEnv->pTimer->GetFrameStartTime().GetSeconds();
+
+	if (gEnv->bServer && CoopAI::IsCoopSession() && g_pGame->GetGameRules())
+		g_pGame->GetGameRules()->CoopBroadcastObjective(m_id.c_str(), (int)m_eStatus, m_trackedEntity);
 }
 
 int CHUDMissionObjective::GetColorStatus() const
@@ -71,7 +84,7 @@ void CHUDMissionObjectiveSystem::LoadLevelObjectives(bool forceReloading)
 		CryFixedStringT<32> filename;
 
 		filename = "Libs/UI/Objectives_new.xml";
-		if(gEnv->bMultiplayer)
+		if(gEnv->bMultiplayer && !CoopAI::IsCoopSession())
 			filename = "Libs/UI/MP_Objectives.xml";
 		LoadLevelObjectives(filename.c_str());
 
@@ -205,9 +218,26 @@ void CHUDMissionObjectiveSystem::GetMemoryStatistics(ICrySizer * s)
 }
 
 void CHUDMissionObjective::SetTrackedEntity(EntityId entityID)
-{	
+{
+	// Crysis Coop: the same entity again (the objectives the server sends a
+	// client again) must not take the marker off the radar: the status that
+	// follows is unchanged and would not put it back
+	if (entityID == m_trackedEntity)
+		return;
+	{
+		IEntity* pTracked = entityID ? gEnv->pEntitySystem->GetEntity(entityID) : 0;
+		CoopAI::Trace("HUD objective_target %s -> %s", GetID(), pTracked ? pTracked->GetName() : "-");
+	}
 	if(m_trackedEntity)
 		SAFE_HUD_FUNC(GetRadar()->UpdateMissionObjective(m_trackedEntity, false, 0, false));
 
+	const bool changed = m_trackedEntity != entityID;
 	m_trackedEntity = entityID;
+
+	// an active objective that gets its marker later: put it on the map now
+	if (changed && entityID && m_eStatus == ACTIVATED && !gEnv->bServer)
+		SAFE_HUD_FUNC(UpdateObjective(this));
+
+	if (gEnv->bServer && CoopAI::IsCoopSession() && g_pGame->GetGameRules())
+		g_pGame->GetGameRules()->CoopBroadcastObjective(m_id.c_str(), (int)m_eStatus, m_trackedEntity);
 }

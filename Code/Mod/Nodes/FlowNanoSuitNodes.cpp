@@ -3,6 +3,7 @@
 // Copyright (C) Crytek GmbH, 2001-2008.
 // -------------------------------------------------------------------------
 #include "StdAfx.h"
+#include "CoopAI.h"
 #include "Game.h"
 #include "Player.h"
 #include "NanoSuit.h"
@@ -389,11 +390,8 @@ public:
 				{
 					static const int PortInt2ModeMapping[]= { NANOMODE_SPEED, NANOMODE_DEFENSE, NANOMODE_STRENGTH, NANOMODE_CLOAK };
 
-					CPlayer* pPlayer = GetPlayer(pActInfo->pEntity->GetId());
-					if (pPlayer == 0)
-						return;
-					CNanoSuit *pSuit = pPlayer->GetNanoSuit();
-					if(!pSuit)
+					CPlayer* pTarget = GetPlayer(pActInfo->pEntity->GetId());
+					if (pTarget == 0)
 						return;
 					int mode = GetPortInt(pActInfo, EIP_Mode);
 					if (mode < 0 || mode >= sizeof(PortInt2ModeMapping)/sizeof(PortInt2ModeMapping[0]))
@@ -401,14 +399,34 @@ public:
 						GameWarning("[flow] CFlowNanoSuitControlNode: Illegal mode %d", mode);
 						return;
 					}
-					if (bAdd)
-						pSuit->ActivateMode((ENanoMode)PortInt2ModeMapping[mode], true);
-					else if (bRemove)
-						pSuit->ActivateMode((ENanoMode)PortInt2ModeMapping[mode], false);
-					if (bDefect)
-						pSuit->SetModeDefect((ENanoMode)PortInt2ModeMapping[mode], true);
-					else if (bRepair)
-						pSuit->SetModeDefect((ENanoMode)PortInt2ModeMapping[mode], false);
+					// coop: the suit modes the campaign unlocks are unlocked for every player
+					std::vector<CPlayer*> players;
+					players.push_back(pTarget);
+					if (pTarget->IsPlayer() && gEnv->bServer && CoopAI::IsCoopSession())
+					{
+						IActorIteratorPtr pIt = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+						while (IActor* pActor = pIt->Next())
+							if (pActor->IsPlayer() && pActor != pTarget)
+								if (CPlayer* pOther = GetPlayer(pActor->GetEntityId()))
+									players.push_back(pOther);
+					}
+					if (pTarget->IsPlayer())
+						CoopAI::OnSuitModeControl(mode, bAdd, bRemove, bDefect, bRepair);
+					for (size_t i = 0; i < players.size(); ++i)
+					{
+						CNanoSuit *pSuit = players[i]->GetNanoSuit();
+						if(!pSuit)
+							continue;
+						if (bAdd)
+							pSuit->ActivateMode((ENanoMode)PortInt2ModeMapping[mode], true);
+						else if (bRemove)
+							pSuit->ActivateMode((ENanoMode)PortInt2ModeMapping[mode], false);
+						if (bDefect)
+							pSuit->SetModeDefect((ENanoMode)PortInt2ModeMapping[mode], true);
+						else if (bRepair)
+							pSuit->SetModeDefect((ENanoMode)PortInt2ModeMapping[mode], false);
+						CoopAI::Trace("SUIT %s mode %d add=%d remove=%d defect=%d repair=%d", players[i]->GetEntity()->GetName(), mode, (int)bAdd, (int)bRemove, (int)bDefect, (int)bRepair);
+					}
 				}
 			}
 			break;

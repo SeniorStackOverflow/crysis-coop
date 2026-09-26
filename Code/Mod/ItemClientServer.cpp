@@ -11,6 +11,7 @@ History:
 
 *************************************************************************/
 #include "StdAfx.h"
+#include "CoopAI.h"
 #include "Item.h"
 #include "ItemSharedParams.h"
 #include "Actor.h"
@@ -52,6 +53,15 @@ void CItem::InitClient(int channelId)
 	IActor *pOwner=GetOwnerActor();
 	if (!pOwner)
 		return;
+
+	// Crysis Coop: RMIs addressed to an actor that is not bound to the
+	// network cannot be delivered and make the client drop
+	if (!CoopAI::IsNetBound(pOwner->GetEntityId()) || !CoopAI::IsNetBound(GetEntityId()))
+	{
+		CoopAI::LogUnbound("InitClient ClPickUp", pOwner->GetEntityId(), GetEntityId());
+		CoopAI::QueuePickup(pOwner->GetEntityId(), GetEntityId());
+		return;
+	}
 
 	// only send the pickup message if the player is connecting
 	// for items spawned during gameplay, CItem::PickUp is already sending the pickup message

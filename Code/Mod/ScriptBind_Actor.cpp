@@ -11,6 +11,7 @@
 
 *************************************************************************/
 #include "StdAfx.h"
+#include "CoopAI.h"
 #include "ScriptBind_Actor.h"
 #include "Actor.h"
 #include "IMovementController.h"
@@ -1632,6 +1633,9 @@ int CScriptBind_Actor::ActivateNanoSuit(IFunctionHandler *pH, int on)
 		return pH->EndFunction();
 
 	if(pActor->GetActorClass() != CPlayer::GetActorClassType())
+		return pH->EndFunction();
+
+	if ((CoopAI::DebugFlags() & 32) && gEnv->bMultiplayer && !pActor->IsPlayer())
 		return pH->EndFunction();
 
 	((CPlayer*)pActor)->ActivateNanosuit((on)?true:false);

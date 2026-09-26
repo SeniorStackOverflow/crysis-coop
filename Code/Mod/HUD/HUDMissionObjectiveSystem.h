@@ -104,6 +104,8 @@ public:
 		return m_shortMessage.c_str();
 	}
 
+	ILINE float GetLastTimeChanged() const { return m_lastTimeChanged; }
+
 	ILINE const char* GetID() const
 	{
 		return m_id.c_str();

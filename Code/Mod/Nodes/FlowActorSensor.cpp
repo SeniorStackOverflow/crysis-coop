@@ -9,6 +9,7 @@
 #include "Nodes/G2FlowBaseNode.h"
 #include "Player.h"
 #include "GameCVars.h"
+#include "CoopAI.h"
 
 #include <IVehicleSystem.h>
 #include <StringUtils.h>
@@ -136,6 +137,10 @@ public:
 			break;
 		case eFE_SetEntityId:
 			break;
+		case eFE_Update:
+			if (m_entityId && gEnv->bServer && CoopAI::IsCoopSession())
+				RegisterOtherPlayers();
+			break;
 		case eFE_Activate:
 			if (IsPortActive(pActInfo, 1))
 				UnRegisterActor();
@@ -159,9 +164,39 @@ public:
 		if (pPlayer != 0)
 		{
 			pPlayer->RegisterPlayerEventListener(this);
+			// coop: a sensor on a player listens to every player
+			if (pPlayer->IsPlayer() && gEnv->bServer && CoopAI::IsCoopSession())
+			{
+				RegisterOtherPlayers();
+				m_actInfo.pGraph->SetRegularlyUpdated(m_actInfo.myID, true);
+			}
 			return;
 		}
 		m_entityId = 0;
+	}
+
+	// players that joined after the sensor was enabled are added on update
+	void RegisterOtherPlayers()
+	{
+		IActorIteratorPtr pIt = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+		while (IActor* pActor = pIt->Next())
+		{
+			if (!pActor->IsPlayer() || pActor->GetEntityId() == m_entityId)
+				continue;
+			if (std::find(m_others.begin(), m_others.end(), pActor->GetEntityId()) != m_others.end())
+				continue;
+			if (CPlayer* pOther = GetPlayer(pActor->GetEntityId()))
+			{
+				pOther->RegisterPlayerEventListener(this);
+				m_others.push_back(pActor->GetEntityId());
+			}
+		}
+	}
+
+	bool IsSensed(IActor* pActor) const
+	{
+		return pActor->GetEntityId() == m_entityId
+			|| std::find(m_others.begin(), m_others.end(), pActor->GetEntityId()) != m_others.end();
 	}
 
 	void UnRegisterActor()
@@ -173,6 +208,10 @@ public:
 		if (pPlayer != 0)
 			pPlayer->UnregisterPlayerEventListener(this);
 		m_entityId = 0;
+		for (size_t i = 0; i < m_others.size(); ++i)
+			if (CPlayer* pOther = GetPlayer(m_others[i]))
+				pOther->UnregisterPlayerEventListener(this);
+		m_others.clear();
 
 		IVehicle* pVehicle = GetVehicle(m_vehicleId);
 		if (pVehicle != 0)
@@ -183,8 +222,10 @@ public:
 	// IPlayerEventListener
 	virtual void OnEnterVehicle(IActor *pActor,const char *strVehicleClassName,const char *strSeatName,bool bThirdPerson)
 	{
-		if (pActor->GetEntityId() != m_entityId)
+		if (!IsSensed(pActor))
 			return;
+		if (pActor->GetEntityId() != m_entityId)
+			CoopAI::Trace("SENSOR %s entered a vehicle (sensor of %u)", pActor->GetEntity()->GetName(), m_entityId);
 		CPlayer* pPlayer = static_cast<CPlayer*> (pActor);
 		if(m_vehicleId)
 		{
@@ -197,14 +238,14 @@ public:
 		pVehicle->RegisterVehicleEventListener(this, "CFlowNode_ActorSensor");
 		m_vehicleId = pVehicle->GetEntityId();
 		ActivateOutput(&m_actInfo, EOP_ENTER, m_vehicleId);
-		IVehicleSeat* pSeat = pVehicle->GetSeatForPassenger(m_entityId);
+		IVehicleSeat* pSeat = pVehicle->GetSeatForPassenger(pActor->GetEntityId());
 		if (pSeat)
 			ActivateOutput(&m_actInfo, EOP_SEAT, pSeat->GetSeatId());
 	}
 
 	virtual void OnExitVehicle(IActor *pActor)
 	{
-		if (pActor->GetEntityId() != m_entityId)
+		if (!IsSensed(pActor))
 			return;
 		CPlayer* pPlayer = static_cast<CPlayer*> (pActor);
 
@@ -273,7 +314,7 @@ public:
 		}
 		else if (event == eVE_PassengerChangeSeat)
 		{
-			if (params.entityId == m_entityId)
+			if (params.entityId == m_entityId || std::find(m_others.begin(), m_others.end(), params.entityId) != m_others.end())
 			{
 				ActivateOutput(&m_actInfo, EOP_SEAT, params.iParam); // seat id
 			}
@@ -287,6 +328,7 @@ public:
 	}
 
 protected:
+	std::vector<EntityId> m_others;
 	EntityId m_entityId;
 	EntityId m_vehicleId;
 	SActivationInfo m_actInfo;

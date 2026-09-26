@@ -11,6 +11,7 @@
 
 *************************************************************************/
 #include "StdAfx.h"
+#include "CoopAI.h"
 #include "ScriptBind_GameRules.h"
 #include "GameRules.h"
 #include "Game.h"
@@ -87,10 +88,15 @@ CGameRules::~CGameRules()
 	}
 
 	g_pGame->GetWeaponSystem()->GetTracerManager().Reset();
-	m_pGameFramework->GetIGameRulesSystem()->SetCurrentGameRules(0);
-	if(m_pGameFramework->GetIViewSystem())
-		m_pGameFramework->GetIViewSystem()->RemoveListener(this);
-	GetGameObject()->ReleaseActions(this);
+	// Init may have failed before it set the framework (not bound to the
+	// network): nothing was registered then
+	if (m_pGameFramework)
+	{
+		m_pGameFramework->GetIGameRulesSystem()->SetCurrentGameRules(0);
+		if(m_pGameFramework->GetIViewSystem())
+			m_pGameFramework->GetIViewSystem()->RemoveListener(this);
+		GetGameObject()->ReleaseActions(this);
+	}
 
 	delete m_pShotValidator;
 	delete m_pRadio;
@@ -592,6 +598,11 @@ bool CGameRules::OnClientConnect(int channelId, bool isReset)
 //------------------------------------------------------------------------
 void CGameRules::OnClientDisconnect(int channelId, EDisconnectionCause cause, const char *desc, bool keepClient)
 {
+	// coop debugging: which network object is which (compare with the
+	// client's dump when it was dropped for a bad object update)
+	if (CoopAI::DebugFlags() & 8)
+		gEnv->pConsole->ExecuteString("net_dump_object_state");
+
 	if (m_pShotValidator)
 		m_pShotValidator->Disconnected(channelId);
 
@@ -651,6 +662,16 @@ bool CGameRules::OnClientEnteredGame(int channelId, bool isReset)
 	IScriptTable *pPlayer=pActor->GetEntity()->GetScriptTable();
 	int loadingSaveGame=m_pGameFramework->IsLoadingSaveGame()?1:0;
 	CallScript(m_serverStateScript, "OnClientEnteredGame", channelId, pPlayer, isReset, loadingSaveGame);
+
+	if (CoopAI::IsCoopSession())
+	{
+		// the replayed presentation flow (HUD resets of the level start...)
+		// first, the current state after it, and again a little later: the
+		// client's own level start resets objectives and radar too
+		CoopAI::SendFlowHistory(channelId);
+		CoopSendObjectives(channelId);
+		CoopAI::QueueObjectiveResend(channelId);
+	}
 
 	// don't do this on reset - have already been added to correct team!
 	if(!isReset || GetTeamCount() < 2)
@@ -1648,6 +1669,114 @@ void CGameRules::AddObjective(int teamId, const char *objective, int status, Ent
 		if (pObjectives->find(CONST_TEMP_STRING(objective))==pObjectives->end())
 			pObjectives->insert(TObjectiveMap::value_type(objective, TObjective(status, entityId)));
 	}
+}
+
+//------------------------------------------------------------------------
+void CGameRules::CoopBroadcastObjective(const char* id, int status, EntityId trackedId)
+{
+	if (!gEnv->bServer || !id)
+		return;
+	GetGameObject()->InvokeRMI(ClSetObjective(), SetObjectiveParams(id, status, trackedId), eRMI_ToRemoteClients);
+	CryLogAlways("[CoopObj] broadcast %s -> %d", id, status);
+}
+
+//------------------------------------------------------------------------
+void CGameRules::CoopSendAIMove(EntityId id, uint8 stance, const Vec3& move, const Vec3& look, bool sprint)
+{
+	CoopAIMoveParams params;
+	params.id = id;
+	params.stance = stance;
+	params.move = move;
+	params.look = look;
+	params.sprint = sprint;
+	GetGameObject()->InvokeRMI(ClCoopAIMove(), params, eRMI_ToRemoteClients);
+}
+
+//------------------------------------------------------------------------
+void CGameRules::CoopSendFlow(const char* type, uint32 key, uint32 node, uint32 port, uint32 entity, const char* values, int channelId)
+{
+	CoopFlowParams params;
+	params.type = type;
+	params.key = key;
+	params.node = node;
+	params.port = port;
+	params.entity = entity;
+	params.values = values;
+	if (channelId)
+		GetGameObject()->InvokeRMI(ClCoopFlow(), params, eRMI_ToClientChannel, channelId);
+	else
+		GetGameObject()->InvokeRMI(ClCoopFlow(), params, eRMI_ToRemoteClients);
+}
+
+//------------------------------------------------------------------------
+void CGameRules::CoopSendVoice(const char* name, const Vec3& pos, uint32 flags)
+{
+	CoopVoiceParams params;
+	params.name = name;
+	params.pos = pos;
+	params.flags = flags;
+	GetGameObject()->InvokeRMI(ClCoopVoice(), params, eRMI_ToRemoteClients);
+}
+
+//------------------------------------------------------------------------
+static void CoopFillSync(CGameRules::CoopSyncParams& params, int kind, int op, EntityId entity, const char* name, const char* text, int type, float f)
+{
+	params.kind = (uint8)kind;
+	params.op = (uint8)op;
+	params.entity = entity;
+	params.name = name ? name : "";
+	params.text = text ? text : "";
+	params.type = type;
+	params.f = f;
+}
+
+void CGameRules::CoopSendSync(int kind, int op, EntityId entity, const char* name, const char* text, int type, float f, int channelId)
+{
+	CoopSyncParams params;
+	CoopFillSync(params, kind, op, entity, name, text, type, f);
+	if (channelId)
+		GetGameObject()->InvokeRMI(ClCoopSync(), params, eRMI_ToClientChannel, channelId);
+	else
+		GetGameObject()->InvokeRMI(ClCoopSync(), params, eRMI_ToRemoteClients);
+}
+
+void CGameRules::CoopSendSyncToServer(int kind, int op, EntityId entity, const char* name, const char* text, int type, float f)
+{
+	CoopSyncParams params;
+	CoopFillSync(params, kind, op, entity, name, text, type, f);
+	GetGameObject()->InvokeRMI(SvCoopSync(), params, eRMI_ToServer);
+}
+
+//------------------------------------------------------------------------
+void CGameRules::CoopSendShot(EntityId shooter, const char* weapon, const Vec3& pos, const Vec3& dir, EntityId mountedId, const char* mountedName)
+{
+	CoopShotParams params;
+	params.shooter = shooter;
+	params.weapon = weapon;
+	params.pos = pos;
+	params.dir = dir;
+	params.mountedId = mountedId;
+	params.mountedName = mountedName ? mountedName : "";
+	GetGameObject()->InvokeRMI(ClCoopShot(), params, eRMI_ToRemoteClients);
+}
+
+//------------------------------------------------------------------------
+void CGameRules::CoopSendObjectives(int channelId)
+{
+	CHUD* pHUD = g_pGame->GetHUD();
+	if (!gEnv->bServer || !pHUD)
+		return;
+	const std::vector<CHUDMissionObjective>& objectives = pHUD->GetMissionObjectiveSystem().GetObjectives();
+	int sent = 0;
+	for (size_t i = 0; i < objectives.size(); ++i)
+	{
+		const CHUDMissionObjective& o = objectives[i];
+		if (o.GetStatus() == CHUDMissionObjective::DEACTIVATED && !o.GetTrackedEntity())
+			continue;
+		GetGameObject()->InvokeRMI(ClSetObjective(), SetObjectiveParams(o.GetID(), (int)o.GetStatus(), o.GetTrackedEntity()), eRMI_ToClientChannel, channelId);
+		++sent;
+	}
+	CryLogAlways("[CoopObj] sent %d objectives to channel %d", sent, channelId);
 }
 
 //------------------------------------------------------------------------
@@ -3665,6 +3794,9 @@ bool CGameRules::HasEntityRespawnData(EntityId entityId) const
 //------------------------------------------------------------------------
 void CGameRules::ScheduleEntityRespawn(EntityId entityId, bool unique, float timer)
 {
+	// Crysis Coop: no fresh copies of the campaign's vehicles either
+	if (CoopAI::IsCoopSession() && m_pGameFramework->GetIVehicleSystem()->GetVehicle(entityId))
+		return;
 	if (!gEnv->bServer || m_pGameFramework->IsEditing())
 		return;
 
@@ -3830,6 +3962,15 @@ void CGameRules::AbortEntityRespawn(EntityId entityId, bool destroyData)
 //------------------------------------------------------------------------
 void CGameRules::ScheduleEntityRemoval(EntityId entityId, float timer, bool visibility)
 {
+	// Crysis Coop: a network game clears a destroyed vehicle away after a few
+	// seconds; the campaign leaves the wreck where it burned, as in single
+	// player (a pickup the joined player parked "vanished")
+	if (CoopAI::IsCoopSession() && m_pGameFramework->GetIVehicleSystem()->GetVehicle(entityId))
+	{
+		IEntity *pVehicle = m_pEntitySystem->GetEntity(entityId);
+		CoopAI::Trace("WRECK %s stays (network removal in %.0f s skipped)", pVehicle ? pVehicle->GetName() : "?", timer);
+		return;
+	}
 	if (!gEnv->bServer || m_pGameFramework->IsEditing())
 		return;
 

@@ -11,6 +11,7 @@ History:
 
 *************************************************************************/
 #include "StdAfx.h"
+#include "CoopAI.h"
 #include "ScriptBind_GameRules.h"
 #include "GameRules.h"
 #include "Game.h"
@@ -1084,10 +1085,26 @@ IMPLEMENT_RMI(CGameRules, ClResetMinimap)
 IMPLEMENT_RMI(CGameRules, ClSetObjective)
 {
 	CHUDMissionObjective *pObjective = SAFE_HUD_FUNC_RET(GetMissionObjectiveSystem().GetMissionObjective(params.name.c_str()));
+	if (CoopAI::IsCoopSession())
+		CryLogAlways("[CoopObj] objective %s -> status %d (%s)", params.name.c_str(), params.status, pObjective ? "known" : "UNKNOWN");
 	if(pObjective)
 	{
+		// the marker entity: same id on both sides for level entities, the
+		// name when the id does not match
+		EntityId tracked = params.entityId;
+		if (!tracked && params.rawEntityId)
+		{
+			IEntity* pEntity = gEnv->pEntitySystem->GetEntity(params.rawEntityId);
+			if (!pEntity || (!params.entityName.empty() && params.entityName != pEntity->GetName()))
+				pEntity = params.entityName.empty() ? 0 : gEnv->pEntitySystem->FindEntityByName(params.entityName.c_str());
+			tracked = pEntity ? pEntity->GetId() : 0;
+			if (!tracked)
+				CryLogAlways("[CoopObj] marker entity %u (%s) of %s not found", params.rawEntityId, params.entityName.c_str(), params.name.c_str());
+		}
+		// marker first, then the status: the status change puts the marker
+		// on the map
+		pObjective->SetTrackedEntity(tracked);
 		pObjective->SetStatus((CHUDMissionObjective::HUDMissionStatus)params.status);
-		pObjective->SetTrackedEntity(params.entityId);
 	}
 
 	return true;
@@ -1197,5 +1214,49 @@ IMPLEMENT_RMI(CGameRules, ClEnteredGame)
 			m_pGameplayRecorder->Event(pActor->GetEntity(), GameplayEvent(eGE_Connected, 0, 0, (void*)status));
 		}
 	}
+	return true;
+}
+
+//------------------------------------------------------------------------
+IMPLEMENT_RMI(CGameRules, ClCoopAIMove)
+{
+	IActor* pActor = GetActorByEntityId(params.id);
+	if (pActor && !pActor->IsPlayer() && static_cast<CActor*>(pActor)->GetActorClass() == CPlayer::GetActorClassType())
+		static_cast<CPlayer*>(pActor)->CoopApplyAIInput(params.stance, params.move, params.look, params.sprint);
+	return true;
+}
+
+//------------------------------------------------------------------------
+IMPLEMENT_RMI(CGameRules, ClCoopShot)
+{
+	CoopAI::OnShotMirror(params.shooter, params.weapon.c_str(), params.pos, params.dir, params.mountedId, params.mountedName.c_str());
+	return true;
+}
+
+//------------------------------------------------------------------------
+IMPLEMENT_RMI(CGameRules, ClCoopSync)
+{
+	CoopAI::OnSyncMirror(params.kind, params.op, params.entity, params.name.c_str(), params.text.c_str(), params.type, params.f, false);
+	return true;
+}
+
+//------------------------------------------------------------------------
+IMPLEMENT_RMI(CGameRules, SvCoopSync)
+{
+	CoopAI::OnSyncMirror(params.kind, params.op, params.entity, params.name.c_str(), params.text.c_str(), params.type, params.f, true);
+	return true;
+}
+
+//------------------------------------------------------------------------
+IMPLEMENT_RMI(CGameRules, ClCoopVoice)
+{
+	CoopAI::OnVoiceMirror(params.name.c_str(), params.pos, params.flags);
+	return true;
+}
+
+//------------------------------------------------------------------------
+IMPLEMENT_RMI(CGameRules, ClCoopFlow)
+{
+	CoopAI::OnFlowMirror(params.type.c_str(), params.key, params.node, params.port, params.entity, params.values.c_str());
 	return true;
 }

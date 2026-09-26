@@ -21,6 +21,20 @@ History:
 #include "HUD.h"
 #include "HUDRadar.h"
 #include "HUDTagNames.h"
+#include "CoopAI.h"
+
+namespace
+{
+	// Crysis Coop: the enemies are the campaign's soldiers: no names over
+	// them, as in single player (coop_hud_enemy_names 1 shows them)
+	bool CoopHidesName(IActor *pActor)
+	{
+		if(!CoopAI::IsCoopSession() || (pActor && pActor->IsPlayer()))
+			return false;
+		ICVar *pNames = gEnv->pConsole->GetCVar("coop_hud_enemy_names");
+		return !pNames || 0 == pNames->GetIVal();
+	}
+}
 #include "IUIDraw.h"
 
 //-----------------------------------------------------------------------------------------------------
@@ -37,7 +51,8 @@ CHUDTagNames::CHUDTagNames()
 
 	m_pMPNamesFont = NULL;
 
-	if(gEnv->bMultiplayer)
+	// Crysis Coop: coop HUDs are created in single-player mode but show
+	// the other players' names as well
 	{
 		m_pMPNamesFont = gEnv->pCryFont->NewFont("MPNames");
 		m_pMPNamesFont->Load("fonts/hud.xml");
@@ -166,6 +181,17 @@ bool CHUDTagNames::IsFriendlyToClient(EntityId uiEntityId)
 
 void CHUDTagNames::AddEnemyTagName(EntityId uiEntityId)
 {
+	// Crysis Coop: not over a soldier that was shot (or shot you)
+	if(CoopAI::IsCoopSession())
+	{
+		IActor *pActor = g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(uiEntityId);
+		IEntity *pEntity = gEnv->pEntitySystem->GetEntity(uiEntityId);
+		const bool bHidden = CoopHidesName(pActor);
+		CoopAI::Trace("TAG %s over %s", bHidden ? "hidden" : "shown", pEntity ? pEntity->GetName() : "?");
+		if(bHidden)
+			return;
+	}
+
 	for(TEnemyTagNamesList::iterator iter=m_enemyTagNamesList.begin(); iter!=m_enemyTagNamesList.end(); ++iter)
 	{
 		SEnemyTagName *pActorTagName = &(*iter);
@@ -318,7 +344,7 @@ void CHUDTagNames::DrawTagName(IVehicle *pVehicle)
 				continue;
 
 			IActor *pActor = g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(pVehicleSeat->GetPassenger());
-			if(!pActor || (pActor == pClientActor && !bThirdPerson))
+			if(!pActor || (pActor == pClientActor && !bThirdPerson) || CoopHidesName(pActor))
 				continue;
 
 			DrawTagName(pActor,true);
@@ -364,7 +390,7 @@ void CHUDTagNames::DrawTagName(IVehicle *pVehicle)
 		EntityId uiEntityId = pVehicleSeat->GetPassenger();
 
 		IActor *pActor = g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(uiEntityId);
-		if(!pActor)
+		if(!pActor || CoopHidesName(pActor))
 			continue;
 
 		const char *szRank = GetPlayerRank(uiEntityId);
@@ -434,6 +460,10 @@ void CHUDTagNames::Update()
 		if(pActor == pClientActor)
 			continue;
 
+		// Crysis Coop: a spectating player would see every soldier's name
+		if(CoopHidesName(pActor))
+			continue;
+
 		// Skip enemies, they need to be added only when shot
 		// (except in spectator mode when we display everyone)
 		int iTeam = pGameRules->GetTeam(pActor->GetEntityId());
@@ -461,6 +491,20 @@ void CHUDTagNames::Update()
 		SVehicleStatus rVehicleStatus = pVehicle->GetStatus();
 		if(0 == rVehicleStatus.passengerCount)
 			continue;
+
+		// Crysis Coop: a vehicle's names only for the players in it
+		if(CoopHidesName(NULL))
+		{
+			bool bPlayerInside = false;
+			for(int iSeatId=1; iSeatId<=pVehicle->GetLastSeatId() && !bPlayerInside; iSeatId++)
+			{
+				IVehicleSeat *pVehicleSeat = pVehicle->GetSeatById(iSeatId);
+				IActor *pPassenger = pVehicleSeat ? g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(pVehicleSeat->GetPassenger()) : NULL;
+				bPlayerInside = pPassenger && pPassenger->IsPlayer();
+			}
+			if(!bPlayerInside)
+				continue;
+		}
 
 		// Skip enemy vehicles, they need to be added only when shot (except in spectator mode...)
 		bool bEnemyVehicle = true;
@@ -522,6 +566,8 @@ void CHUDTagNames::Update()
 
 void CHUDTagNames::DrawTagNames()
 {
+	if (!m_pMPNamesFont || !m_pUIDraw)
+		return;
 	int iTagName = 0;
 	for(TTagNamesVector::iterator iter=m_tagNamesVector.begin(); iter!=m_tagNamesVector.end(); ++iter,++iTagName)
 	{

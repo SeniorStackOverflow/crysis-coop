@@ -302,6 +302,15 @@ public:
 	// objectives
 	virtual void AddObjective(int teamId, const char *objective, int status, EntityId entityId);
 	virtual void SetObjectiveStatus(int teamId, const char *objective, int status);
+	// Crysis Coop: campaign objectives set on the server are mirrored to clients
+	void CoopBroadcastObjective(const char* id, int status, EntityId trackedId);
+	void CoopSendObjectives(int channelId);
+	void CoopSendFlow(const char* type, uint32 key, uint32 node, uint32 port, uint32 entity, const char* values, int channelId);
+	void CoopSendVoice(const char* name, const Vec3& pos, uint32 flags);
+	void CoopSendShot(EntityId shooter, const char* weapon, const Vec3& pos, const Vec3& dir, EntityId mountedId = 0, const char* mountedName = 0);
+	void CoopSendSync(int kind, int op, EntityId entity, const char* name, const char* text, int type, float f, int channelId);
+	void CoopSendSyncToServer(int kind, int op, EntityId entity, const char* name, const char* text, int type, float f);
+	void CoopSendAIMove(EntityId id, uint8 stance, const Vec3& move, const Vec3& look, bool sprint);
 	virtual void SetObjectiveEntity(int teamId, const char *objective, EntityId entityId);
 	virtual void RemoveObjective(int teamId, const char *objective);
 	virtual void ResetObjectives();
@@ -792,19 +801,133 @@ public:
 		}
 	};
 
+	// Crysis Coop: a presentation flow node (HUD, screen FX, dialog...) fired
+	// on the server, to be repeated on the clients
+	struct CoopFlowParams
+	{
+		CoopFlowParams(): key(0), node(0), port(0), entity(0) {}
+		string type;
+		uint32 key;
+		uint32 node;
+		uint32 port;
+		uint32 entity;
+		string values;
+		void SerializeWith(TSerialize ser)
+		{
+			ser.Value("t", type);
+			ser.Value("k", key);
+			ser.Value("n", node);
+			ser.Value("p", port);
+			ser.Value("e", entity);
+			ser.Value("v", values);
+		}
+	};
+
+	// Crysis Coop: map/radar markers (kind 1) and cutscenes (kind 2), server
+	// -> clients; a client's own binocular tags go client -> server
+	struct CoopSyncParams
+	{
+		CoopSyncParams(): kind(0), op(0), entity(0), type(0), f(0.0f) {}
+		uint8 kind;
+		uint8 op;
+		uint32 entity;
+		string name;
+		string text;
+		int32 type;
+		float f;
+		void SerializeWith(TSerialize ser)
+		{
+			ser.Value("k", kind);
+			ser.Value("o", op);
+			ser.Value("e", entity);
+			ser.Value("n", name);
+			ser.Value("t", text);
+			ser.Value("y", type);
+			ser.Value("f", f);
+		}
+	};
+
+	// Crysis Coop: an AI soldier fired (the clients have no AI weapons of
+	// their own: they show the shot with a local copy of the weapon)
+	struct CoopShotParams
+	{
+		CoopShotParams(): shooter(0), mountedId(0) { pos.zero(); dir.zero(); }
+		uint32 shooter;
+		string weapon;
+		Vec3 pos;
+		Vec3 dir;
+		// a mounted gun (vehicle weapon, emplacement): the gun itself fires
+		// on the clients, found by id or else by its (level unique) name
+		uint32 mountedId;
+		string mountedName;
+		void SerializeWith(TSerialize ser)
+		{
+			ser.Value("s", shooter);
+			ser.Value("w", weapon);
+			ser.Value("p", pos);
+			ser.Value("d", dir);
+			ser.Value("m", mountedId);
+			ser.Value("mn", mountedName);
+		}
+	};
+
+	// Crysis Coop: a voice sound (dialog line, AI bark) started on the server
+	struct CoopVoiceParams
+	{
+		CoopVoiceParams(): flags(0) { pos.zero(); }
+		string name;
+		Vec3 pos;
+		uint32 flags;
+		void SerializeWith(TSerialize ser)
+		{
+			ser.Value("n", name);
+			ser.Value("p", pos);
+			ser.Value("f", flags);
+		}
+	};
+
+	// Crysis Coop: movement of an AI soldier, server -> clients
+	struct CoopAIMoveParams
+	{
+		CoopAIMoveParams(): id(0), stance(0), sprint(false) { move.zero(); look.Set(0,1,0); }
+		EntityId id;
+		uint8 stance;
+		Vec3 move;
+		Vec3 look;
+		bool sprint;
+		void SerializeWith(TSerialize ser)
+		{
+			ser.Value("id", id, 'eid');
+			ser.Value("stance", stance, 'stnc');
+			ser.Value("move", move, 'pMov');
+			ser.Value("look", look, 'dir0');
+			ser.Value("sprint", sprint, 'bool');
+		}
+	};
+
 	struct SetObjectiveParams
 	{
-		SetObjectiveParams(): status(0), entityId(0) {};
-		SetObjectiveParams(const char *nm, int st, EntityId id): name(nm), status(st), entityId(id) {};
+		SetObjectiveParams(): status(0), entityId(0), rawEntityId(0) {};
+		SetObjectiveParams(const char *nm, int st, EntityId id): name(nm), status(st), entityId(id), rawEntityId(id)
+		{
+			// objective markers are level entities that are not bound to the
+			// network ('eid' would arrive as 0): id and name are sent as they are
+			IEntity* pEntity = id ? gEnv->pEntitySystem->GetEntity(id) : 0;
+			entityName = pEntity ? pEntity->GetName() : "";
+		};
 
 		EntityId entityId;
 		int status;
 		string name;
+		uint32 rawEntityId;
+		string entityName;
 		void SerializeWith(TSerialize ser)
 		{
 			ser.Value("name", name);
 			ser.Value("status", status, 'hSts');
 			ser.Value("entityId", entityId, 'eid');
+			ser.Value("rawEntityId", rawEntityId);
+			ser.Value("entityName", entityName);
 		}
 	};
 
@@ -939,6 +1062,12 @@ public:
 	DECLARE_CLIENT_RMI_NOATTACH_FAST(ClSetRoundTime, SetGameTimeParams, eNRT_ReliableUnordered);
 	DECLARE_CLIENT_RMI_NOATTACH_FAST(ClSetPreRoundTime, SetGameTimeParams, eNRT_ReliableUnordered);
 	DECLARE_CLIENT_RMI_NOATTACH_FAST(ClSetReviveCycleTime, SetGameTimeParams, eNRT_ReliableUnordered);
+	DECLARE_CLIENT_RMI_NOATTACH_FAST(ClCoopAIMove, CoopAIMoveParams, eNRT_UnreliableUnordered);
+	DECLARE_CLIENT_RMI_NOATTACH(ClCoopFlow, CoopFlowParams, eNRT_ReliableOrdered);
+	DECLARE_CLIENT_RMI_NOATTACH(ClCoopVoice, CoopVoiceParams, eNRT_ReliableUnordered);
+	DECLARE_CLIENT_RMI_NOATTACH(ClCoopSync, CoopSyncParams, eNRT_ReliableOrdered);
+	DECLARE_CLIENT_RMI_NOATTACH(ClCoopShot, CoopShotParams, eNRT_UnreliableUnordered);
+	DECLARE_SERVER_RMI_NOATTACH(SvCoopSync, CoopSyncParams, eNRT_ReliableOrdered);
 	DECLARE_CLIENT_RMI_NOATTACH_FAST(ClSetGameStartTimer, SetGameTimeParams, eNRT_ReliableUnordered);
 
 	DECLARE_SERVER_RMI_NOATTACH(SvVote, NoParams, eNRT_ReliableUnordered);

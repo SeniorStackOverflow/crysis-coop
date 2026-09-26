@@ -365,6 +365,9 @@ public:
 	void DeregisterHUDObject(CHUDObject* pObject);
 
 	void FadeCinematicBars(int targetVal);
+	// Crysis Coop: a cutscene joined late (its begin never reached this HUD)
+	bool IsCutscenePlaying() const { return m_bCutscenePlaying; }
+	int GetCinematicBarsTarget() const { return m_cineBarsTarget; }
 
 	//PowerStruggle
 	void OnPlayerVehicleBuilt(EntityId playerId, EntityId vehicleId);
@@ -810,6 +813,7 @@ private:
 	HUDCineState m_cineState;
 	bool m_cineHideHUD;
 	bool m_bCutscenePlaying;
+	int m_cineBarsTarget;
 	bool m_bStopCutsceneNextUpdate;
 	bool m_bCutsceneAbortPressed;
 	bool m_bCutsceneCanBeAborted;

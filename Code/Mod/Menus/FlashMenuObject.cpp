@@ -20,6 +20,7 @@ History:
 
 #include "FlashMenuObject.h"
 #include "FlashMenuScreen.h"
+#include "CoopAI.h"
 #include "IGameFramework.h"
 #include "IPlayerProfiles.h"
 #include "IUIDraw.h"
@@ -950,6 +951,8 @@ void CFlashMenuObject::MP_ResetProgress(int iProgress)
 
 void CFlashMenuObject::OnLoadingStart(ILevelInfo *pLevel)
 {
+	CoopAI::OnLoadingStart(pLevel ? pLevel->GetName() : "");
+
 	m_bInLoading = true;
 
 	SAFE_HUD_FUNC(OnLoadingStart(pLevel));
@@ -1116,13 +1119,15 @@ void CFlashMenuObject::OnLoadingStart(ILevelInfo *pLevel)
 
 bool CFlashMenuObject::ShouldIgnoreInGameEvent()
 {
-	return !gEnv->pSystem->IsEditor() && !gEnv->bMultiplayer && m_apFlashMenuScreens[MENUSCREEN_FRONTENDLOADING]->IsLoaded() && gEnv->pSystem->IsSerializingFile() != 1 && !g_pGame->IsReloading() && g_pGameCVars->hud_startPaused;
+	return !gEnv->pSystem->IsEditor() && !CoopAI::IsNetGame() && m_apFlashMenuScreens[MENUSCREEN_FRONTENDLOADING]->IsLoaded() && gEnv->pSystem->IsSerializingFile() != 1 && !g_pGame->IsReloading() && g_pGameCVars->hud_startPaused;
 }
 
 //-----------------------------------------------------------------------------------------------------
 
 void CFlashMenuObject::OnLoadingComplete(ILevel *pLevel)
 {
+	CoopAI::OnLoadingComplete();
+
 	SAFE_HUD_FUNC(OnLoadingComplete(pLevel));
 
 	if(gEnv->pSystem->IsEditor() || gEnv->pSystem->IsDedicated()) 
@@ -1140,7 +1145,7 @@ void CFlashMenuObject::OnLoadingComplete(ILevel *pLevel)
 
 	if (ShouldIgnoreInGameEvent())
 	{
-		if(!gEnv->bMultiplayer)
+		if(!CoopAI::IsNetGame())
 			g_pGame->GetIGameFramework()->PauseGame(true ,false);
 
 		m_bLoadingDone = true;
@@ -1285,7 +1290,7 @@ void CFlashMenuObject::ShowInGameMenu(bool bShow)
 			PlaySound(ESound_MenuAmbience);
 	}
 
-  if(!gEnv->bMultiplayer)
+  if(!CoopAI::IsNetGame())
 	  g_pGame->GetIGameFramework()->PauseGame(m_bUpdate,false);
 
 	// stop game music and trigger menu music *after* pausing the game
@@ -1327,7 +1332,7 @@ void CFlashMenuObject::HideInGameMenuNextFrame(bool bRestoreGameMusic)
 			PlaySound(ESound_MenuAmbience,false);
 		}
 
-		if(!gEnv->bMultiplayer)
+		if(!CoopAI::IsNetGame())
 			g_pGame->GetIGameFramework()->PauseGame(m_bUpdate,false);
 
 		SAFE_HUD_FUNC(SetInMenu(m_bUpdate));
@@ -2964,7 +2969,7 @@ void CFlashMenuObject::OnPostUpdate(float fDeltaTime)
 
 	if(m_bLoadingDone) //might be necessary to re-pause
 	{
-		if(!gEnv->bMultiplayer && !g_pGame->GetIGameFramework()->IsGamePaused())
+		if(!CoopAI::IsNetGame() && !g_pGame->GetIGameFramework()->IsGamePaused())
 			g_pGame->GetIGameFramework()->PauseGame(true ,false);
 	}
 
@@ -3783,7 +3788,7 @@ void CFlashMenuObject::OnActionEvent(const SActionEvent& event)
 		// we might have to re-pause the game here on early update so subsystem's don't get updated
 		if(gEnv->bEditor == false && m_bLoadingDone && g_pGameCVars->hud_startPaused)
 		{
-			if(!gEnv->bMultiplayer && !g_pGame->GetIGameFramework()->IsGamePaused())
+			if(!CoopAI::IsNetGame() && !g_pGame->GetIGameFramework()->IsGamePaused())
 				g_pGame->GetIGameFramework()->PauseGame(true ,false);
 		}
 		break;

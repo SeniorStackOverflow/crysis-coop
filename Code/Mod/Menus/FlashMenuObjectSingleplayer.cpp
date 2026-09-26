@@ -12,6 +12,7 @@ History:
 
 *************************************************************************/
 #include "StdAfx.h"
+#include "CoopAI.h"
 
 #include "FlashMenuObject.h"
 #include "FlashMenuScreen.h"
@@ -303,6 +304,9 @@ void CFlashMenuObject::UpdateSaveGames()
 
 void CFlashMenuObject::LoadGame(const char *fileName)
 {
+	// savegames cannot be loaded into a running coop session
+	if (CoopAI::IsNetGame())
+		return;
 	//overwrite the last savegame with the to be loaded one
 	m_sLastSaveGame = fileName;
 	gEnv->pGame->GetIGameFramework()->LoadGame(fileName, false, true);

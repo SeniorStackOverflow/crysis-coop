@@ -11,6 +11,7 @@
 
 *************************************************************************/
 #include "StdAfx.h"
+#include "CoopAI.h"
 #include "GameCVars.h"
 #include "GameRules.h"
 #include "ItemSharedParams.h"
@@ -1017,7 +1018,7 @@ void CGame::CmdTeam(IConsoleCmdArgs *pArgs)
 //------------------------------------------------------------------------
 void CGame::CmdLoadLastSave(IConsoleCmdArgs *pArgs)
 {
-	if (!gEnv->bClient || gEnv->bMultiplayer)
+	if (!gEnv->bClient || CoopAI::IsNetGame())
 		return;
 
 	if(g_pGame->GetMenu() && g_pGame->GetMenu()->IsActive())

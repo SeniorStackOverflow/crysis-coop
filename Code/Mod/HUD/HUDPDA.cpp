@@ -3,6 +3,7 @@
 // Copyright (C) Crytek GmbH, 2001-2008.
 // -------------------------------------------------------------------------
 #include "StdAfx.h"
+#include "CoopAI.h"
 #include <StlUtils.h>
 
 #include "HUD.h"
@@ -196,6 +197,7 @@ void CHUD::HandleFSCommandPDA(const char *strCommand,const char *strArgs)
 
 void CHUD::ActivateQuickMenuButton(EQuickMenuButtons button, bool active)
 {
+	CoopAI::Trace("HUD quickmenu_button %d active=%d", (int)button, (int)active);
 	if(active && !IsQuickMenuButtonActive(button)) //activate
 		m_activeButtons += 1<<button; 
 	else if(!active && IsQuickMenuButtonActive(button)) //deactivate
@@ -210,6 +212,7 @@ void CHUD::ActivateQuickMenuButton(EQuickMenuButtons button, bool active)
 
 void CHUD::SetQuickMenuButtonDefect(EQuickMenuButtons button, bool defect)
 {
+	CoopAI::Trace("HUD quickmenu_defect %d defect=%d", (int)button, (int)defect);
 	if(defect && !IsQuickMenuButtonDefect(button)) //activate
 		m_defectButtons += 1<<button; 
 	else if(!defect && IsQuickMenuButtonDefect(button)) //deactivate

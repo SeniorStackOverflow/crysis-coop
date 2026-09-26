@@ -12,6 +12,10 @@ History:
 
 *************************************************************************/
 #include "StdAfx.h"
+#include "CoopAI.h"
+
+// Crysis Coop: the coop campaign radar/map works like single player
+#define COOP_RADAR_MP (gEnv->bMultiplayer && !CoopAI::IsCoopSession())
 #include "IUIDraw.h"
 #include "Actor.h"
 #include "Weapon.h"
@@ -32,6 +36,32 @@ History:
 #include "HUD/HUDScopes.h"
 
 #define RANDOM() ((((float)cry_rand()/(float)RAND_MAX)*2.0f)-1.0f)
+
+// Crysis Coop: a client has no AI objects; the server tells whether a soldier
+// is an enemy and how alerted he is (CoopAI::GetMirroredAI). A vehicle counts
+// as its driver, like the single player code does.
+// trace: enemies drawn on the radar this frame
+static int s_coopRadarEnemies = 0;
+static int s_coopRadarObjectives = 0;
+
+static bool CoopClientAI()
+{
+	return !gEnv->bServer && CoopAI::IsCoopSession();
+}
+
+static bool CoopMirroredAI(IVehicleSystem* pVehicleSystem, EntityId id, bool& hostile, int& alertness, bool& isVehicle)
+{
+	isVehicle = false;
+	if (IVehicle* pVehicle = pVehicleSystem->GetVehicle(id))
+	{
+		isVehicle = true;
+		IActor* pDriver = pVehicle->GetDriver();
+		if (!pDriver)
+			return false;
+		id = pDriver->GetEntityId();
+	}
+	return CoopAI::GetMirroredAI(id, hostile, alertness);
+}
 
 const static float fRadarSizeOverTwo = 47.0f;
 const static float fEntitySize = 4.0f;
@@ -151,6 +181,7 @@ CHUDRadar::~CHUDRadar()
 
 void CHUDRadar::AddTaggedEntity(EntityId iEntityId)
 {
+	CoopAI::OnRadarOp(1, iEntityId, 0, 0.0f, 0);
 	m_taggedEntities[m_taggedPointer] = iEntityId;
 	m_taggedPointer ++;
 	if(m_taggedPointer > NUM_TAGGED_ENTITIES)
@@ -159,6 +190,7 @@ void CHUDRadar::AddTaggedEntity(EntityId iEntityId)
 
 void CHUDRadar::AddEntityToRadar(EntityId id)
 {
+	CoopAI::OnRadarOp(2, id, 0, 0.0f, 0);
 	if (!IsOnRadar(id, 0, m_entitiesOnRadar.size()-1))
 	{
 		AddToRadar(id);
@@ -168,6 +200,7 @@ void CHUDRadar::AddEntityToRadar(EntityId id)
 
 void CHUDRadar::AddEntityTemporarily(EntityId id, float time)
 {
+	CoopAI::OnRadarOp(3, id, 0, time, 0);
 	IEntity *pEntity = gEnv->pEntitySystem->GetEntity(id);
 	if(pEntity)
 		ShowEntityTemporarily(ChooseType(pEntity, true), id, time);
@@ -175,6 +208,7 @@ void CHUDRadar::AddEntityTemporarily(EntityId id, float time)
 
 void CHUDRadar::ShowEntityTemporarily(FlashRadarType type, EntityId id, float timeLimit)
 {
+	CoopAI::OnRadarOp(9, id, (int)type, timeLimit, 0);
 	if(IsOnRadar(id, 0, m_entitiesOnRadar.size()-1))	//already scanned ?
 		return;
 
@@ -188,6 +222,7 @@ void CHUDRadar::ShowEntityTemporarily(FlashRadarType type, EntityId id, float ti
 
 void CHUDRadar::AddStoryEntity(EntityId id, FlashRadarType type /* = EWayPoint */, const char* text /* = NULL */)
 {
+	CoopAI::OnRadarOp(4, id, (int)type, 0.0f, text);
 	IEntity *pEntity = gEnv->pEntitySystem->GetEntity(id);
 	if(pEntity)
 	{
@@ -203,6 +238,7 @@ void CHUDRadar::AddStoryEntity(EntityId id, FlashRadarType type /* = EWayPoint *
 
 void CHUDRadar::RemoveStoryEntity(EntityId id)
 {
+	CoopAI::OnRadarOp(5, id, 0, 0.0f, 0);
 	std::vector<TempRadarEntity>::iterator it = m_storyEntitiesOnRadar.begin();
 	std::vector<TempRadarEntity>::iterator end = m_storyEntitiesOnRadar.end();
 	for(; it != end; ++it)
@@ -229,6 +265,7 @@ void CHUDRadar::ShowSoundOnRadar(Vec3 pos, float intensity)
 
 void CHUDRadar::RemoveFromRadar(EntityId id)
 {
+	CoopAI::OnRadarOp(6, id, 0, 0.0f, 0);
 	{
 		std::deque<RadarEntity>::iterator it = m_entitiesOnRadar.begin();
 		std::deque<RadarEntity>::iterator end = m_entitiesOnRadar.end();
@@ -324,7 +361,7 @@ void CHUDRadar::Update(float fDeltaTime)
 		return;
 	if(pActor->GetHealth() <= 0)
 	{
-		if(gEnv->bMultiplayer)
+		if(COOP_RADAR_MP)
 		{
 			//render the mini map
 			if(m_renderMiniMap)
@@ -382,6 +419,8 @@ void CHUDRadar::Update(float fDeltaTime)
 	}
 	
 	//*********************************MAIN ENTITY UPDATE*************************
+	s_coopRadarEnemies = 0;
+	s_coopRadarObjectives = 0;
 	UpdateRadarEntities(pActor, fRadius, playerViewMtxInverted, numOfValues, &entityValues);
 	//****************************************************************************
 
@@ -437,6 +476,7 @@ void CHUDRadar::Update(float fDeltaTime)
 			float dimX = (m_fX + fRadarSizeOverTwo) - lowerBoundX;
 			float dimY = (m_fY + fRadarSizeOverTwo) - lowerBoundY;
 			numOfValues += ::FillUpDoubleArray(&entityValues, pEntity->GetId(), 5 /* MO */, (fX - lowerBoundX) / dimX, (fY - lowerBoundY) / dimY, 180+RAD2DEG(fAngle), faction, 75.0f, fAlpha*100.0f);
+			++s_coopRadarObjectives;
 		}
 	}
 
@@ -491,7 +531,7 @@ void CHUDRadar::Update(float fDeltaTime)
 			int playerTeam = g_pGame->GetGameRules()->GetTeam(pActor->GetEntityId());
 
 			numOfValues += ::FillUpDoubleArray(&entityValues, temp.m_id, temp.m_type, (fX - lowerBoundX) / dimX, (fY - lowerBoundY) / dimY,
-				180.0f+RAD2DEG(fAngle), FriendOrFoe(gEnv->bMultiplayer, playerTeam, pEntity,
+				180.0f+RAD2DEG(fAngle), FriendOrFoe(COOP_RADAR_MP, playerTeam, pEntity,
 				g_pGame->GetGameRules()), sizeScale*25.0f, fAlpha*100.0f);
 		}
 	}
@@ -577,6 +617,13 @@ void CHUDRadar::Update(float fDeltaTime)
 	if(m_renderMiniMap)
 		RenderMapOverlay();
 
+	if (CoopAI::TraceOn())
+	{
+		// rounded, so a count that flickers in combat is written once
+		CoopAI::TraceHUD("radar_markers", "enemies=%d objectives=%d temp=%d tagged_list=%d", (s_coopRadarEnemies + 1) / 2 * 2,
+			s_coopRadarObjectives, (int)m_tempEntitiesOnRadar.size(), (int)m_entitiesOnRadar.size());
+	}
+
 	entityValues.Flush();
 	float playerX = 0.5f;
 	float playerY = 0.5f;
@@ -611,7 +658,7 @@ void CHUDRadar::UpdateRadarEntities(CActor *pActor, float &fRadius, Matrix34 &pl
 	//we get the player's team mates for team-based MP
 	CGameRules *pGameRules = static_cast<CGameRules*>(gEnv->pGame->GetIGameFramework()->GetIGameRulesSystem()->GetCurrentGameRules());
 	int clientTeam = pGameRules->GetTeam(pActor->GetEntityId());
-	if(gEnv->bMultiplayer)
+	if(COOP_RADAR_MP)
 	{
 		m_teamMates.clear();
 		pGameRules->GetTeamPlayers(clientTeam, m_teamMates);
@@ -699,10 +746,20 @@ void CHUDRadar::UpdateRadarEntities(CActor *pActor, float &fRadius, Matrix34 &pl
 					isOnRadar = true;
 					unknownEnemyObject = true;
 				}
-				else if(tempActor && gEnv->bMultiplayer)	//not teammate, not AI -> enemy!?
+				else if(tempActor && COOP_RADAR_MP)	//not teammate, not AI -> enemy!?
 				{
 					isOnRadar = true;
 					unknownEnemyActor = true;
+				}
+				else if(!pTemp && tempActor && CoopClientAI())
+				{
+					bool hostile = false;
+					int alertness = 0;
+					if (CoopAI::GetMirroredAI(id, hostile, alertness) && hostile)
+					{
+						isOnRadar = true;
+						unknownEnemyObject = true;
+					}
 				}
 			}
 
@@ -814,7 +871,7 @@ void CHUDRadar::UpdateRadarEntities(CActor *pActor, float &fRadius, Matrix34 &pl
 					else
 						continue;
 				}
-				else if(gEnv->bMultiplayer)
+				else if(COOP_RADAR_MP)
 				{
 					if(mate)
 						friendly = EFriend;
@@ -829,7 +886,44 @@ void CHUDRadar::UpdateRadarEntities(CActor *pActor, float &fRadius, Matrix34 &pl
 						friendly = ENeutral;
 				}
 			}
-			else if(gEnv->bMultiplayer)	//treats factions in multiplayer
+			else if(CoopClientAI())
+			{
+				// the same rules as above, with the server's AI state
+				bool hostile = false;
+				int alertness = 0;
+				bool isVehicle = false;
+				const bool known = CoopMirroredAI(m_pVehicleSystem, id, hostile, alertness, isVehicle);
+				if(known && hostile)
+				{
+					friendly = EEnemy;
+					if(unknownEnemyObject)
+					{
+						if(alertness < 1)
+							continue;
+						if(distSq > 225.0f)
+							continue;
+						else if(distSq > 25.0f)
+							fAlpha -= 0.5f - ((225.0f - distSq) * 0.0025f);
+						if(tempActor && g_pGameCVars->g_difficultyLevel < 4)
+							AddToRadar(id);
+					}
+					if(1 == alertness)
+					{
+						fAlpha = 0.65f + fCos * 0.35f;
+						friendly = EAggressor;
+					}
+					else if(2 == alertness)
+					{
+						fAlpha = 0.65f + fCos * 0.35f;
+						friendly = ESelf;
+					}
+				}
+				else if(known || isVehicle || mate)
+					friendly = (mate || (known && isVehicle)) ? EFriend : ENeutral;
+				else
+					continue;
+			}
+			else if(COOP_RADAR_MP)	//treats factions in multiplayer
 			{
 				if(tempActor)
 				{
@@ -892,6 +986,8 @@ void CHUDRadar::UpdateRadarEntities(CActor *pActor, float &fRadius, Matrix34 &pl
 			float dimX = (m_fX + fRadarSizeOverTwo) - lowerBoundX;
 			float dimY = (m_fY + fRadarSizeOverTwo) - lowerBoundY;
 			numOfValues += ::FillUpDoubleArray(entityValues, pEntity->GetId(), ChooseType(pEntity, true), (fX - lowerBoundX) / dimX, (fY - lowerBoundY) / dimY, 180.0f+RAD2DEG(fAngle), friendly, sizeScale*25.0f, fAlpha*100.0f);
+			if(friendly == EEnemy || friendly == EAggressor || friendly == ESelf)
+				++s_coopRadarEnemies;
 		}
 	}
 }
@@ -984,7 +1080,7 @@ void CHUDRadar::UpdateCompassStealth(CActor *pActor, float fDeltaTime)
 		m_fLastFov = fFov;
 	}
 
-	if(gEnv->bMultiplayer)	//shows the player coordinates in MP
+	if(COOP_RADAR_MP)	//shows the player coordinates in MP
 	{
 		float fX, fY;
 		fX = fY = -1;
@@ -1162,7 +1258,7 @@ bool CHUDRadar::ScanObject(EntityId id)
 		}
 	}
 	
-	if(gEnv->bMultiplayer && !CheckObjectMultiplayer(id))
+	if(COOP_RADAR_MP && !CheckObjectMultiplayer(id))
 	{
 		return false;
 	}
@@ -1200,7 +1296,7 @@ void CHUDRadar::UpdateScanner(float frameTime)
 				if(m_pActorSystem->GetActor(m_scannerObjectID) ||
 					m_pVehicleSystem->GetVehicle(m_scannerObjectID))
 				{
-					if(!gEnv->bMultiplayer || CheckObjectMultiplayer(m_scannerObjectID))
+					if(!COOP_RADAR_MP || CheckObjectMultiplayer(m_scannerObjectID))
 					{
 						EntityId clientId = g_pGame->GetIGameFramework()->GetClientActor()->GetEntityId();
 						g_pGame->GetGameRules()->ClientSimpleHit(SimpleHitInfo(clientId, m_scannerObjectID, 0, 0));
@@ -1510,7 +1606,7 @@ void CHUDRadar::ReloadMiniMap()
 void CHUDRadar::LoadMiniMap(const char* mapPath)
 {
 	//get the factories (and other buildings)
-	if(gEnv->bMultiplayer)
+	if(COOP_RADAR_MP)
 	{
 		IEntityClass *factoryClass = gEnv->pEntitySystem->GetClassRegistry()->FindClass( "Factory" );
 		IEntityClass *hqClass = gEnv->pEntitySystem->GetClassRegistry()->FindClass( "HQ" );
@@ -1719,7 +1815,7 @@ void CHUDRadar::RenderMapOverlay()
 		}
 	}
 	
-	bool isMultiplayer = gEnv->bMultiplayer;
+	bool isMultiplayer = COOP_RADAR_MP;
 
 	int team = pGameRules->GetTeam(pActor->GetEntityId());
 
@@ -1932,7 +2028,7 @@ void CHUDRadar::RenderMapOverlay()
 						GetPosOnMap(pTempActor->GetEntity(), fX, fY);
 						numOfValues += FillUpDoubleArray(&entityValues, pTempActor->GetEntity()->GetId(), EPlayer, fX, fY, 270.0f-RAD2DEG(pTempActor->GetEntity()->GetWorldAngles().z), EFriend, 100, 100, iOnScreenObjective==pTempActor->GetEntity()->GetId(), iCurrentSpawnPoint==pTempActor->GetEntity()->GetId());
 						//draw teammate name if selected
-						if(gEnv->bMultiplayer)
+						if(COOP_RADAR_MP)
 						{
 							EntityId id = pTempActor->GetEntityId();
 							for(int i = 0; i < m_selectedTeamMates.size(); ++i)
@@ -2082,7 +2178,7 @@ void CHUDRadar::RenderMapOverlay()
 	}
 
 	//.. and mission objectives
-	if(!gEnv->bMultiplayer)
+	if(!COOP_RADAR_MP)
 	{
 		std::map<EntityId, RadarObjective>::const_iterator it = m_missionObjectives.begin();
 		std::map<EntityId, RadarObjective>::const_iterator end = m_missionObjectives.end();
@@ -2411,8 +2507,14 @@ void CHUDRadar::UpdateMissionObjective(EntityId id, bool active, const char* des
 		return;
 
 	std::map<EntityId, RadarObjective>::iterator iter = m_missionObjectives.find(id);
+	if (CoopAI::TraceOn())
+	{
+		IEntity* pEntity = gEnv->pEntitySystem->GetEntity(id);
+		CoopAI::Trace("MAP objective marker %s %s (hidden=%d, %d markers before)", active ? "on" : "off", pEntity ? pEntity->GetName() : "?",
+			pEntity ? (int)pEntity->IsHidden() : -1, (int)m_missionObjectives.size());
+	}
 	if (iter != m_missionObjectives.end() && !active)
-		m_missionObjectives.erase(iter);	
+		m_missionObjectives.erase(iter);
 	else if (active)
 		m_missionObjectives.insert(std::map<EntityId, RadarObjective>::value_type (id, RadarObjective(description,secondary)));
 }
@@ -2538,6 +2640,14 @@ FlashRadarFaction CHUDRadar::FriendOrFoe(bool multiplayer, int playerTeam, IEnti
 				friendly = EEnemy;
 		}
 		val = (FlashRadarFaction)friendly;
+	}
+	else if(!entity->GetAI() && CoopClientAI())
+	{
+		bool hostile = false;
+		int alertness = 0;
+		bool isVehicle = false;
+		if(CoopMirroredAI(m_pVehicleSystem, entity->GetId(), hostile, alertness, isVehicle))
+			val = hostile ? EEnemy : EFriend;
 	}
 	else if(entity->GetAI())
 	{
@@ -2666,6 +2776,7 @@ void CHUDRadar::GetMemoryStatistics(ICrySizer * s)
 
 void CHUDRadar::SetTeamMate(EntityId id, bool active)
 {
+	CoopAI::OnRadarOp(7, id, active ? 1 : 0, 0.0f, 0);
 	bool found = false;
 
 	std::vector<EntityId>::iterator it = m_teamMates.begin();
@@ -2795,6 +2906,7 @@ bool CHUDRadar::IsEntityTagged(const EntityId &id) const
 
 void CHUDRadar::SetJammer(EntityId id, float radius)
 {
+	CoopAI::OnRadarOp(8, id, 0, radius, 0);
 	m_jammerID = id;
 	m_jammerRadius = radius;
 
@@ -2951,7 +3063,7 @@ void CHUDRadar::UpdateBinoculars(CActor *pActor, float fDeltaTime)
 				{
 					m_lookAtTimer=0.0f;
 
-					if(gEnv->bMultiplayer)
+					if(COOP_RADAR_MP)
 					{
 						bool add = CheckObjectMultiplayer(lookAtObjectID);
 						
@@ -2977,7 +3089,7 @@ void CHUDRadar::UpdateBinoculars(CActor *pActor, float fDeltaTime)
 
 bool CHUDRadar::CheckObjectMultiplayer(EntityId id)
 {
-	if(!gEnv->bMultiplayer)
+	if(!COOP_RADAR_MP)
 		return true;
 
 	// MP binoculars only add entities temporarily. Don't add if they are already there.

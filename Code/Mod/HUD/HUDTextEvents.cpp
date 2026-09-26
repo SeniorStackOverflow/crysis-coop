@@ -3,6 +3,7 @@
 // Copyright (C) Crytek GmbH, 2001-2008.
 // -------------------------------------------------------------------------
 #include "StdAfx.h"
+#include "CoopAI.h"
 #include "HUD.h"
 #include "GameFlashAnimation.h"
 #include "GameFlashLogic.h"
@@ -276,6 +277,7 @@ CHUD::LocalizeWithParams(const char* label, bool bAdjustActions, const char* par
 
 void CHUD::DisplayFlashMessage(const char* label, int pos /* = 1 */, const ColorF &col /* = Col_White */, bool formatWStringWithParams /* = false */, const char* paramLabel1 /* = 0 */, const char* paramLabel2 /* = 0 */, const char* paramLabel3 /* = 0 */, const char* paramLabel4 /* = 0 */)
 {
+	CoopAI::TraceHUD("message", "%s pos=%d params=%s|%s|%s|%s", label ? label : "", pos, paramLabel1 ? paramLabel1 : "", paramLabel2 ? paramLabel2 : "", paramLabel3 ? paramLabel3 : "", paramLabel4 ? paramLabel4 : "");
 	if(!label || m_quietMode)
 		return;
 
@@ -304,6 +306,7 @@ void CHUD::DisplayFlashMessage(const char* label, int pos /* = 1 */, const Color
 
 void CHUD::DisplayOverlayFlashMessage(const char* label, const ColorF &col /* = Col_White */, bool formatWStringWithParams /* = false */, const char* paramLabel1 /* = 0 */, const char* paramLabel2 /* = 0 */, const char* paramLabel3 /* = 0 */, const char* paramLabel4 /* = 0 */)
 {
+	CoopAI::TraceHUD("overlay", "%s params=%s|%s", label ? label : "", paramLabel1 ? paramLabel1 : "", paramLabel2 ? paramLabel2 : "");
 	if(!label)
 		return;
 
@@ -339,6 +342,7 @@ void CHUD::FadeOutBigOverlayFlashMessage()
 
 void CHUD::DisplayBigOverlayFlashMessage(const char* label, float duration, int posX, int posY, ColorF col)
 {
+	CoopAI::TraceHUD("bigoverlay", "%s duration=%.1f", label ? label : "", duration);
 	if(!label)
 		return;
 
@@ -421,6 +425,7 @@ void CHUD::DisplayBigOverlayFlashMessage(const char* label, float duration, int 
 
 void CHUD::DisplayTempFlashText(const char* label, float seconds, const ColorF &col)
 {
+	CoopAI::TraceHUD("temptext", "%s seconds=%.1f", label ? label : "", seconds);
 	if(seconds > 60.0f)
 		seconds = 60.0f;
 	m_fMiddleTextLineTimeout = gEnv->pTimer->GetFrameStartTime().GetSeconds() + seconds;
@@ -715,6 +720,7 @@ void CHUD::SubtitleAppendCharacterName(const CHUD::SSubtitleEntry& entry, CryFix
 
 void CHUD::InternalShowSubtitle(const char* subtitleLabel, ISound* pSound, bool bShow)
 {
+	CoopAI::TraceHUD("subtitle", "%s show=%d", subtitleLabel ? subtitleLabel : "", (int)bShow);
 	ILocalizationManager* pLocMgr = gEnv->pSystem->GetLocalizationManager();
 	if (bShow)
 	{
@@ -1005,6 +1011,7 @@ void CHUD::ObituaryMessage(EntityId targetId, EntityId shooterId, const char *we
 
 void CHUD::ShowWarningMessage(EWarningMessages message, const char* optionalText)
 {
+	CoopAI::TraceHUD("warning", "%d %s", (int)message, optionalText ? optionalText : "");
 	switch(message)
 	{
 	case EHUD_SPECTATOR:
@@ -1275,6 +1282,7 @@ void CHUD::UpdateSubtitlesManualRender(float frameTime)
 
 void CHUD::ShowTutorialText(const wchar_t* text, int pos)
 {
+	{ char narrow[256] = ""; for (int i = 0; text && text[i] && i < 255; ++i) { narrow[i] = text[i] < 128 ? (char)text[i] : '?'; narrow[i+1] = 0; } CoopAI::TraceHUD("tutorial", "%s pos=%d", narrow, pos); }
 	// NB: text is displayed as passed - fetch the localised string before calling this.
 	if(text != NULL)
 	{

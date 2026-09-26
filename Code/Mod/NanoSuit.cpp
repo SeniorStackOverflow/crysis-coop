@@ -18,6 +18,7 @@
 #include "GameUtils.h"
 #include "HUD/HUD.h"
 #include "GameRules.h"
+#include "CoopAI.h"
 #include "NetInputChainDebug.h"
 #include "BulletTime.h"
 #include "SoundMoods.h"
@@ -1486,6 +1487,10 @@ void CNanoSuit::ActivateMode(ENanoMode mode, bool active)
 			m_featureMask |= 1<<mode;
 			pHUD->ActivateQuickMenuButton(EQuickMenuButtons(GetButtonFromMode(mode)), true);
 		}
+		// coop: another player's suit (the server's copy of a joined player's)
+		// gets the mode back too, otherwise the server refuses it for good
+		else if (!m_pOwner->IsClient() && m_pOwner->IsPlayer() && CoopAI::IsCoopSession())
+			m_featureMask |= 1<<mode;
 	}
 	else
 	{

@@ -13,6 +13,7 @@ History:
 *************************************************************************/
 
 #include "StdAfx.h"
+#include "CoopAI.h"
 #include "HUDCrosshair.h"
 #include "IWorldQuery.h"
 #include "GameCVars.h"
@@ -204,6 +205,7 @@ void CHUDCrosshair::Update(float fDeltaTime)
 
 void CHUDCrosshair::SetUsability(int usable, const char* actionLabel, const char* paramA, const char* paramB)
 {
+	CoopAI::TraceHUD("usability", "%d %s", usable, actionLabel ? actionLabel : "");
 	m_bUsable = (usable>0)?true:false;
 	m_animCrossHair.Invoke("setUsable", usable);
 	if(actionLabel)

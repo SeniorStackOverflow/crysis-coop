@@ -11,6 +11,7 @@ History:
 
 *************************************************************************/
 #include "StdAfx.h"
+#include "CoopAI.h"
 #include "Game.h"
 #include "Weapon.h"
 #include "Player.h"
@@ -45,6 +46,9 @@ bool CWeapon::m_listenerCacheInUse = false;
 //------------------------------------------------------------------------
 void CWeapon::OnShoot(EntityId shooterId, EntityId ammoId, IEntityClass* pAmmoType, const Vec3 &pos, const Vec3 &dir, const Vec3&vel)
 {
+	if (gEnv->bServer && gEnv->bMultiplayer)
+		CoopAI::OnAIShot(shooterId, GetEntity(), IsMounted(), pos, dir);
+
 	BROADCAST_WEAPON_EVENT(OnShoot, (this, shooterId, ammoId, pAmmoType, pos, dir, vel));
 
 	//FIXME:quick temporary solution

@@ -12,6 +12,7 @@
 
 *************************************************************************/
 #include "StdAfx.h"
+#include "CoopAI.h"
 #include "ScriptBind_HUD.h"
 #include "HUD.h"
 #include "IGameObject.h"
@@ -67,6 +68,8 @@ void CScriptBind_HUD::RegisterMethods()
 	SCRIPT_REG_TEMPLFUNC(SetObjectiveEntity,"objective,entity");
 	SCRIPT_REG_TEMPLFUNC(DrawStatusText, "text");
 	SCRIPT_REG_TEMPLFUNC(SetUsability, "objId, message");
+	SCRIPT_REG_TEMPLFUNC(CoopIsVehicleCrewHostile, "vehicleId");
+	SCRIPT_REG_TEMPLFUNC(CoopIsAirborne, "playerId");
 	SCRIPT_REG_FUNC(ReloadLevel);
 	SCRIPT_REG_FUNC(ReloadLevelSavegame);
 	SCRIPT_REG_FUNC(TacWarning);
@@ -107,6 +110,7 @@ void CScriptBind_HUD::RegisterMethods()
 //------------------------------------------------------------------------
 int CScriptBind_HUD::SetObjectiveStatus(IFunctionHandler *pH,const char* pObjectiveID, int status, bool silent)
 {
+	CoopAI::TraceScriptCall("HUD.SetObjectiveStatus", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if (!pHUD)
 		return pH->EndFunction();
@@ -162,6 +166,7 @@ int CScriptBind_HUD::GetMainObjective(IFunctionHandler* pH)
 //------------------------------------------------------------------------
 int CScriptBind_HUD::SetObjectiveEntity(IFunctionHandler *pH,const char* pObjectiveID, ScriptHandle entityID)
 {
+	CoopAI::TraceScriptCall("HUD.SetObjectiveEntity", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if (!pHUD)
 		return pH->EndFunction();
@@ -173,8 +178,22 @@ int CScriptBind_HUD::SetObjectiveEntity(IFunctionHandler *pH,const char* pObject
 	return pH->EndFunction();  
 }
 
+// Crysis Coop: a client's "enemies inside?" for a vehicle (the vehicle's own
+// check needs AI objects, which only the server has). false elsewhere.
+int CScriptBind_HUD::CoopIsVehicleCrewHostile(IFunctionHandler *pH, ScriptHandle vehicleId)
+{
+	IVehicle* pVehicle = g_pGame->GetIGameFramework()->GetIVehicleSystem()->GetVehicle((EntityId)vehicleId.n);
+	return pH->EndFunction(CoopAI::IsVehicleCrewHostile(pVehicle));
+}
+
+int CScriptBind_HUD::CoopIsAirborne(IFunctionHandler *pH, ScriptHandle playerId)
+{
+	return pH->EndFunction(CoopAI::IsAirborne((EntityId)playerId.n));
+}
+
 int CScriptBind_HUD::SetUsability(IFunctionHandler *pH, int objId, const char *message)
 {
+	CoopAI::TraceScriptCall("HUD.SetUsability", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if (!pHUD)
 		return pH->EndFunction();
@@ -224,7 +243,10 @@ int CScriptBind_HUD::SetUsability(IFunctionHandler *pH, int objId, const char *m
 		}
 		else
 		{
-			if(gEnv->bMultiplayer && !gotMessage)
+			// Crysis Coop: level objects without a message of their own (the
+			// campaign's consoles, switches...) get the generic "use" prompt
+			// as in single player
+			if(gEnv->bMultiplayer && !gotMessage && !CoopAI::IsCoopSession())
 				usable = 0; 
 			else if(!gotMessage)
 				textLabel = "@pick_object";
@@ -239,6 +261,7 @@ int CScriptBind_HUD::SetUsability(IFunctionHandler *pH, int objId, const char *m
 
 int CScriptBind_HUD::DrawStatusText(IFunctionHandler *pH, const char* pText)
 {
+	CoopAI::TraceScriptCall("HUD.DrawStatusText", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if (!pHUD)
 		return pH->EndFunction();
@@ -251,6 +274,7 @@ int CScriptBind_HUD::DrawStatusText(IFunctionHandler *pH, const char* pText)
 //-------------------------------------------------------------------------------------------------
 int CScriptBind_HUD::ReloadLevel(IFunctionHandler *pH)
 {
+	CoopAI::TraceScriptCall("HUD.ReloadLevel", pH);
 	string command("map ");
 	command.append(gEnv->pGame->GetIGameFramework()->GetLevelName());
 	gEnv->pConsole->ExecuteString(command.c_str());
@@ -259,12 +283,14 @@ int CScriptBind_HUD::ReloadLevel(IFunctionHandler *pH)
 
 int CScriptBind_HUD::ReloadLevelSavegame(IFunctionHandler *pH)
 {
+	CoopAI::TraceScriptCall("HUD.ReloadLevelSavegame", pH);
 	gEnv->pGame->InitMapReloading();
 	return pH->EndFunction();
 }
 
 int CScriptBind_HUD::TacWarning(IFunctionHandler *pH)
 {
+	CoopAI::TraceScriptCall("HUD.TacWarning", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if (!pHUD)
 		return pH->EndFunction();
@@ -289,6 +315,7 @@ int CScriptBind_HUD::TacWarning(IFunctionHandler *pH)
 
 int CScriptBind_HUD::EnteredBuyZone(IFunctionHandler *pH, ScriptHandle zoneId, bool entered)
 {
+	CoopAI::TraceScriptCall("HUD.EnteredBuyZone", pH);
 	// call the hud, tell him we entered a buy zone
 	// the hud itself needs to keep track of which team owns the zone and enable/disable buying accordingly
 	CHUD *pHUD = g_pGame->GetHUD();
@@ -300,6 +327,7 @@ int CScriptBind_HUD::EnteredBuyZone(IFunctionHandler *pH, ScriptHandle zoneId, b
 
 int CScriptBind_HUD::EnteredServiceZone(IFunctionHandler *pH, ScriptHandle zoneId, bool entered)
 {
+	CoopAI::TraceScriptCall("HUD.EnteredServiceZone", pH);
 	// call the hud, tell him we entered a service zone
 	// the hud itself needs to keep track of which team owns the zone and enable/disable buying accordingly
 	CHUD *pHUD = g_pGame->GetHUD();
@@ -311,6 +339,7 @@ int CScriptBind_HUD::EnteredServiceZone(IFunctionHandler *pH, ScriptHandle zoneI
 
 int CScriptBind_HUD::UpdateBuyList(IFunctionHandler *pH)
 {
+	CoopAI::TraceScriptCall("HUD.UpdateBuyList", pH);
 	// something that might have changed item availability happened, so we better update our list
 	CHUD *pHUD = g_pGame->GetHUD();
 
@@ -327,6 +356,7 @@ int CScriptBind_HUD::UpdateBuyList(IFunctionHandler *pH)
 
 int CScriptBind_HUD::DamageIndicator(IFunctionHandler *pH, ScriptHandle weaponId, ScriptHandle shooterId, Vec3 direction, bool onVehicle)
 {
+	CoopAI::TraceScriptCall("HUD.DamageIndicator", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if (pHUD)
 	{
@@ -338,6 +368,7 @@ int CScriptBind_HUD::DamageIndicator(IFunctionHandler *pH, ScriptHandle weaponId
 
 int CScriptBind_HUD::HitIndicator(IFunctionHandler *pH)
 {
+	CoopAI::TraceScriptCall("HUD.HitIndicator", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if (pHUD)
 		pHUD->IndicateHit();
@@ -346,6 +377,7 @@ int CScriptBind_HUD::HitIndicator(IFunctionHandler *pH)
 
 int CScriptBind_HUD::RadarShowVehicleReady(IFunctionHandler *pH, ScriptHandle vehicleId)
 {
+	CoopAI::TraceScriptCall("HUD.RadarShowVehicleReady", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if (pHUD)
 		pHUD->GetRadar()->ShowEntityTemporarily(EWayPoint, (EntityId)vehicleId.n);
@@ -355,6 +387,7 @@ int CScriptBind_HUD::RadarShowVehicleReady(IFunctionHandler *pH, ScriptHandle ve
 
 int CScriptBind_HUD::AddEntityToRadar(IFunctionHandler *pH, ScriptHandle entityId)
 {
+	CoopAI::TraceScriptCall("HUD.AddEntityToRadar", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if (pHUD)
 		pHUD->GetRadar()->AddEntityToRadar((EntityId)entityId.n);
@@ -364,6 +397,7 @@ int CScriptBind_HUD::AddEntityToRadar(IFunctionHandler *pH, ScriptHandle entityI
 
 int CScriptBind_HUD::RemoveEntityFromRadar(IFunctionHandler *pH, ScriptHandle entityId)
 {
+	CoopAI::TraceScriptCall("HUD.RemoveEntityFromRadar", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if (pHUD)
 		pHUD->GetRadar()->RemoveFromRadar((EntityId)entityId.n);
@@ -373,6 +407,7 @@ int CScriptBind_HUD::RemoveEntityFromRadar(IFunctionHandler *pH, ScriptHandle en
 
 int CScriptBind_HUD::ShowKillZoneTime(IFunctionHandler *pH, bool active, int seconds)
 {
+	CoopAI::TraceScriptCall("HUD.ShowKillZoneTime", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if (pHUD)
 		pHUD->ShowKillAreaWarning(active, seconds);
@@ -381,6 +416,7 @@ int CScriptBind_HUD::ShowKillZoneTime(IFunctionHandler *pH, bool active, int sec
 
 int CScriptBind_HUD::StartPlayerFallAndPlay(IFunctionHandler *pH)
 {
+	CoopAI::TraceScriptCall("HUD.StartPlayerFallAndPlay", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if (pHUD)
 		pHUD->StartPlayerFallAndPlay();
@@ -389,6 +425,7 @@ int CScriptBind_HUD::StartPlayerFallAndPlay(IFunctionHandler *pH)
 
 int CScriptBind_HUD::OnPlayerVehicleBuilt(IFunctionHandler *pH, ScriptHandle playerId, ScriptHandle vehicleId)
 {
+	CoopAI::TraceScriptCall("HUD.OnPlayerVehicleBuilt", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if (pHUD)
 		pHUD->OnPlayerVehicleBuilt((EntityId)playerId.n, (EntityId)vehicleId.n);
@@ -397,6 +434,7 @@ int CScriptBind_HUD::OnPlayerVehicleBuilt(IFunctionHandler *pH, ScriptHandle pla
 
 int CScriptBind_HUD::ShowDeathFX(IFunctionHandler *pH, int type)
 {
+	CoopAI::TraceScriptCall("HUD.ShowDeathFX", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if (pHUD)
 		pHUD->ShowDeathFX(type);
@@ -405,6 +443,7 @@ int CScriptBind_HUD::ShowDeathFX(IFunctionHandler *pH, int type)
 
 int CScriptBind_HUD::OnItemBought(IFunctionHandler *pH, bool success, const char* itemName)
 {
+	CoopAI::TraceScriptCall("HUD.OnItemBought", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if(pHUD)
 		pHUD->PlaySound(success?ESound_BuyBeep:ESound_BuyError);
@@ -419,6 +458,7 @@ int CScriptBind_HUD::OnItemBought(IFunctionHandler *pH, bool success, const char
 
 int CScriptBind_HUD::BattleLogEvent(IFunctionHandler *pH, int type, const char *msg)
 {
+	CoopAI::TraceScriptCall("HUD.BattleLogEvent", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if(pHUD)
 	{
@@ -467,6 +507,7 @@ int CScriptBind_HUD::BattleLogEvent(IFunctionHandler *pH, int type, const char *
 
 int CScriptBind_HUD::ShowWarningMessage(IFunctionHandler *pH, int message, const char* text)
 {
+	CoopAI::TraceScriptCall("HUD.ShowWarningMessage", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if(pHUD)
 		pHUD->ShowWarningMessage(EWarningMessages(message), text);
@@ -488,6 +529,7 @@ int CScriptBind_HUD::GetMapGridCoord(IFunctionHandler *pH, float x, float y)
 
 int CScriptBind_HUD::OpenPDA(IFunctionHandler *pH, bool show, bool buyMenu)
 {
+	CoopAI::TraceScriptCall("HUD.OpenPDA", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if(!pHUD)
 		return pH->EndFunction();
@@ -499,6 +541,7 @@ int CScriptBind_HUD::OpenPDA(IFunctionHandler *pH, bool show, bool buyMenu)
 
 int CScriptBind_HUD::ShowCaptureProgress(IFunctionHandler *pH, bool show)
 {
+	CoopAI::TraceScriptCall("HUD.ShowCaptureProgress", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if(pHUD && pHUD->GetPowerStruggleHUD())
 		pHUD->GetPowerStruggleHUD()->ShowCaptureProgress(show);
@@ -508,6 +551,7 @@ int CScriptBind_HUD::ShowCaptureProgress(IFunctionHandler *pH, bool show)
 
 int CScriptBind_HUD::SetCaptureProgress(IFunctionHandler *pH, float progress)
 {
+	CoopAI::TraceScriptCall("HUD.SetCaptureProgress", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if(pHUD && pHUD->GetPowerStruggleHUD())
 		pHUD->GetPowerStruggleHUD()->SetCaptureProgress(progress);
@@ -518,6 +562,7 @@ int CScriptBind_HUD::SetCaptureProgress(IFunctionHandler *pH, float progress)
 
 int CScriptBind_HUD::SetCaptureContested(IFunctionHandler *pH, bool contested)
 {
+	CoopAI::TraceScriptCall("HUD.SetCaptureContested", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if(pHUD && pHUD->GetPowerStruggleHUD())
 		pHUD->GetPowerStruggleHUD()->SetCaptureContested(contested);
@@ -528,6 +573,7 @@ int CScriptBind_HUD::SetCaptureContested(IFunctionHandler *pH, bool contested)
 
 int CScriptBind_HUD::ShowConstructionProgress(IFunctionHandler *pH, bool show, bool queued, float constructionTime)
 {
+	CoopAI::TraceScriptCall("HUD.ShowConstructionProgress", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if(pHUD && pHUD->GetPowerStruggleHUD())
 		pHUD->GetPowerStruggleHUD()->ShowConstructionProgress(show, queued, constructionTime);
@@ -537,6 +583,7 @@ int CScriptBind_HUD::ShowConstructionProgress(IFunctionHandler *pH, bool show, b
 
 int CScriptBind_HUD::ShowReviveCycle(IFunctionHandler *pH, bool show)
 {
+	CoopAI::TraceScriptCall("HUD.ShowReviveCycle", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if(pHUD && pHUD->GetPowerStruggleHUD())
 		pHUD->ShowReviveCycle(show);
@@ -546,6 +593,7 @@ int CScriptBind_HUD::ShowReviveCycle(IFunctionHandler *pH, bool show)
 
 int CScriptBind_HUD::SpawnGroupInvalid(IFunctionHandler *pH)
 {
+	CoopAI::TraceScriptCall("HUD.SpawnGroupInvalid", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if(pHUD && pHUD->GetPowerStruggleHUD())
 		pHUD->SpawnPointInvalid();
@@ -556,6 +604,7 @@ int CScriptBind_HUD::SpawnGroupInvalid(IFunctionHandler *pH)
 
 int CScriptBind_HUD::FakeDeath(IFunctionHandler *pH)
 {
+	CoopAI::TraceScriptCall("HUD.FakeDeath", pH);
 	CHUD *pHUD = g_pGame->GetHUD();
 	if (pHUD && !pHUD->IsFakeDead())
 		pHUD->FakeDeath();
@@ -565,6 +614,7 @@ int CScriptBind_HUD::FakeDeath(IFunctionHandler *pH)
 
 int CScriptBind_HUD::SetProgressBar(IFunctionHandler *pH, bool show, int progress, const char *text)
 {
+	CoopAI::TraceScriptCall("HUD.SetProgressBar", pH);
 	if (CHUD *pHUD = g_pGame->GetHUD())
 	{
 		if (show)
@@ -578,6 +628,7 @@ int CScriptBind_HUD::SetProgressBar(IFunctionHandler *pH, bool show, int progres
 
 int CScriptBind_HUD::DisplayBigOverlayFlashMessage(IFunctionHandler *pH, const char *msg, float duration, int posX, int posY, Vec3 color)
 {
+	CoopAI::TraceScriptCall("HUD.DisplayBigOverlayFlashMessage", pH);
 	if (CHUD *pHUD = g_pGame->GetHUD())
 	{
 		pHUD->DisplayBigOverlayFlashMessage(msg, duration, posX, posY, color);
@@ -587,6 +638,7 @@ int CScriptBind_HUD::DisplayBigOverlayFlashMessage(IFunctionHandler *pH, const c
 
 int CScriptBind_HUD::FadeOutBigOverlayFlashMessage(IFunctionHandler *pH)
 {
+	CoopAI::TraceScriptCall("HUD.FadeOutBigOverlayFlashMessage", pH);
 	if (CHUD *pHUD = g_pGame->GetHUD())
 	{
 		pHUD->FadeOutBigOverlayFlashMessage();

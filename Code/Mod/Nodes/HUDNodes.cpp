@@ -13,6 +13,7 @@
 #include "HUD/HUDSilhouettes.h"
 #include "Nodes/G2FlowBaseNode.h"
 #include "Weapon.h"
+#include "CoopAI.h"
 
 #include <StringUtils.h>
 
@@ -1209,6 +1210,7 @@ public:
 		if (IsPortActive(pActInfo, EIP_Hide))
 		{
 			SAFE_HUD_FUNC(ShowProgress(-1)); // hide
+			CoopAI::OnProgressBar(0, -1, 0, 0, 0, false, false);
 			ActivateOutput(pActInfo, EOP_Hidden, true);
 		}
 		if (IsPortActive(pActInfo, EIP_Show))
@@ -1219,6 +1221,7 @@ public:
 			const int align = GetPortInt(pActInfo, EIP_Align);
 			const int lockAsset = GetPortInt(pActInfo, EIP_LockingAsset);
 			SAFE_HUD_FUNC(ShowProgress(0, true, (int)posX, (int)posY, text.c_str(), (align == 0)? false : true, (lockAsset==0)? false:true));
+			CoopAI::OnProgressBar(1, 0, (int)posX, (int)posY, text.c_str(), align != 0, lockAsset != 0);
 			ActivateOutput(pActInfo, EOP_Shown, true);
 			ActivateOutput(pActInfo, EOP_Progress, 0);
 		}
@@ -1226,6 +1229,7 @@ public:
 		{
 			const int progress = GetPortInt(pActInfo, EIP_Progress);
 			SAFE_HUD_FUNC(ShowProgress(progress));
+			CoopAI::OnProgressBar(2, progress, 0, 0, 0, false, false);
 			if (progress < 0)
 				ActivateOutput(pActInfo, EOP_Hidden, true);
 			else
