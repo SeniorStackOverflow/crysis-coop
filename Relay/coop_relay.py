@@ -312,6 +312,19 @@ class Store:
             pass
         self.campaigns.pop(campaign, None)
 
+    def drop_upload(self, campaign, tmp):
+        """An upload that did not become a checkpoint: its file goes, and the
+        folder too if the campaign has nothing stored."""
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        if campaign not in self.campaigns:
+            try:
+                os.rmdir(os.path.join(self.campaign_dir, campaign))
+            except OSError:
+                pass
+
     def expire_campaigns(self):
         now = time.time()
         for campaign, m in list(self.campaigns.items()):
@@ -620,7 +633,7 @@ class Relay:
                     upload[2] += len(msg) - 1
                     if upload[2] > upload[1]:
                         upload[3].close()
-                        os.remove(upload[4])
+                        self.store.drop_upload(upload[0], upload[4])
                         upload = None
                         await ws.send_all(bytes([7, E_BAD]))
                         continue
@@ -631,10 +644,7 @@ class Relay:
                     f.close()
                     err = self.store.store(campaign, hexid, tmp, got) if got == size else E_BAD
                     if err:
-                        try:
-                            os.remove(tmp)
-                        except OSError:
-                            pass
+                        self.store.drop_upload(campaign, tmp)
                         await ws.send_all(bytes([7, err]))
                     else:
                         log.info("campaign %s: checkpoint %s stored by %s (%d bytes)", campaign,
@@ -675,10 +685,7 @@ class Relay:
         finally:
             if upload is not None:
                 upload[3].close()
-                try:
-                    os.remove(upload[4])
-                except OSError:
-                    pass
+                self.store.drop_upload(upload[0], upload[4])
 
     # ---- one WebSocket: a host, a friend or a cloud client
     async def on_websocket(self, reader, writer):
