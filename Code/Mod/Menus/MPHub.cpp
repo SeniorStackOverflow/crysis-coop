@@ -14,6 +14,7 @@
 
 
 #include "Game.h"
+#include "CoopRelay.h"
 #include "IGameFramework.h"
 #include "IPlayerProfiles.h"
 #include "OptionsManager.h"
@@ -460,7 +461,11 @@ void CMPHub::OnUIEvent(const SUIEvent& event)
   switch(event.event)
   {
   case eUIE_disconnect:
-    if(int(eDC_NubDestroyed) == event.param)
+    // Crysis Coop: the host restarts his game (a checkpoint, a new game):
+    // this player joins again by himself, no error
+    if(CoopRelay::HandlesDisconnect())
+      ;
+    else if(int(eDC_NubDestroyed) == event.param)
     {
        if(!gEnv->bServer)
 				 ShowError("@ui_menu_disconnect_ServerQuit");

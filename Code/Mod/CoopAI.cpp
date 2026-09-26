@@ -458,6 +458,16 @@ namespace
 		return pEntity ? g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(pEntity->GetId()) : 0;
 	}
 
+	// what this player carries over (from the last level or the checkpoint
+	// the game goes on from): by his player key, else by his name
+	std::map<string, SInvSnapshot>::iterator FindCarry(IActor* pActor)
+	{
+		std::map<string, SInvSnapshot>::iterator it = s_invCarry.find(CoopAI::PlayerKey(pActor));
+		if (it == s_invCarry.end())
+			it = s_invCarry.find(string("name:") + pActor->GetEntity()->GetName());
+		return it;
+	}
+
 	// coop_inv_restore <player> [<from player>]: returns 1 in the log line if
 	// a snapshot was applied
 	void CmdInvRestore(IConsoleCmdArgs* pArgs)
@@ -469,14 +479,15 @@ namespace
 		if (!pTarget || !pFrom)
 			return;
 		std::map<EntityId, SInvSnapshot>::iterator it = s_invSnapshots.find(pFrom->GetEntityId());
-		std::map<string, SInvSnapshot>::iterator carried = s_invCarry.find(pTarget->GetEntity()->GetName());
+		std::map<string, SInvSnapshot>::iterator carried = FindCarry(pTarget);
 		SInvSnapshot snap;
 		const char* source = pFrom->GetEntity()->GetName();
 		if (it != s_invSnapshots.end() && !it->second.items.empty())
 			snap = it->second;
 		else if (pFrom == pTarget && carried != s_invCarry.end())
 		{
-			// first equipment on this level: what he had at the end of the last one
+			// first equipment on this level: what he had at the end of the last
+			// one, or at the checkpoint the game goes on from
 			snap = carried->second;
 			s_invCarry.erase(carried);
 			source = "the previous level";
@@ -487,21 +498,7 @@ namespace
 			gEnv->pConsole->GetCVar("coop_inv_result")->Set(0);
 			return;
 		}
-		IItemSystem* pItemSystem = g_pGame->GetIGameFramework()->GetIItemSystem();
-		IInventory* pInv = pTarget->GetInventory();
-		for (size_t i = 0; i < snap.items.size(); ++i)
-			if (pInv->GetCountOfClass(snap.items[i].c_str()) == 0)
-				pItemSystem->GiveItem(pTarget, snap.items[i].c_str(), false, false, false);
-		for (size_t i = 0; i < snap.ammo.size(); ++i)
-			if (IEntityClass* pAmmo = gEnv->pEntitySystem->GetClassRegistry()->FindClass(snap.ammo[i].first.c_str()))
-				pInv->SetAmmoCount(pAmmo, snap.ammo[i].second);
-		if (!snap.current.empty())
-			if (IScriptTable* pScript = pTarget->GetEntity()->GetScriptTable())
-			{
-				SmartScriptTable actorTable;
-				if (pScript->GetValue("actor", actorTable))
-					Script::CallMethod(actorTable, "SelectItemByName", snap.current.c_str());
-			}
+		CoopAI::GiveInventory(pTarget, snap, false);
 		CryLogAlways("[CoopInv] %s got %d items / %d ammo types (snapshot of %s)", pTarget->GetEntity()->GetName(),
 			(int)snap.items.size(), (int)snap.ammo.size(), source);
 		gEnv->pConsole->GetCVar("coop_inv_result")->Set(1);
@@ -1553,8 +1550,12 @@ void CoopAI::Init()
 		gEnv->pConsole->RegisterFloat("coop_debug_physquery_time", 30.0f, 0, "Crysis Coop debugging: see coop_debug_physquery");
 		gEnv->pConsole->RegisterString("coop_debug_physdump", "", 0, "Crysis Coop debugging: every 2 s the physics state of living soldiers whose name contains this is traced (on every machine that has it set)");
 		gEnv->pConsole->RegisterInt("coop_keep_vehicles", 1, 0, "Crysis Coop: 1 = vehicles the players leave stay (no network 'abandoned vehicle' destruction), as in single player");
-		gEnv->pConsole->RegisterString("coop_test_cmdfile", "", 0, "Crysis Coop testing: the lines of this file (relative to the game folder) are run as console commands, then the file is deleted");
-		gEnv->pConsole->RegisterInt("coop_test_free_cursor", 0, 0, "Crysis Coop testing: 1 keeps the system cursor free (as with a menu open): a test window never takes the mouse");
+		// per machine: not taken over from the server when joining (the engine
+		// sends a server's console variables to every client)
+		gEnv->pConsole->RegisterString("coop_test_cmdfile", "", 0, "Crysis Coop testing: the lines of this file (relative to the game folder) are run as console commands, then the file is deleted")
+			->SetFlags(VF_NOT_NET_SYNCED);
+		gEnv->pConsole->RegisterInt("coop_test_free_cursor", 0, 0, "Crysis Coop testing: 1 keeps the system cursor free (as with a menu open): a test window never takes the mouse")
+			->SetFlags(VF_NOT_NET_SYNCED);
 		gEnv->pConsole->RegisterString("coop_debug_flow", "", 0, "Crysis Coop debugging: \"<graph entity> <node> <output port index or name>\" is activated on the server coop_debug_flow_time s after the game started");
 		gEnv->pConsole->RegisterFloat("coop_debug_flow_time", 20.0f, 0, "Crysis Coop debugging: see coop_debug_flow");
 		gEnv->pConsole->RegisterFloat("coop_debug_menu_at", 0.0f, 0, "Crysis Coop debugging: the host opens the in-game menu this many s after coop_debug_flow fired (0: never)");
@@ -1879,14 +1880,58 @@ void CoopAI::CollectInventories(std::map<string, SInventory>& out, bool includeL
 				continue;
 			snap = it->second;
 		}
-		out[pActor->GetEntity()->GetName()] = snap;
+		snap.name = pActor->GetEntity()->GetName();
+		out[PlayerKey(pActor)] = snap;
 	}
 	// what the previous level left them and they did not get yet (not joined
 	// again, not equipped yet)
-	const char* localName = pLocal ? pLocal->GetEntity()->GetName() : "";
+	const string localKey = pLocal ? PlayerKey(pLocal) : string();
 	for (std::map<string, SInvSnapshot>::const_iterator it = s_invCarry.begin(); it != s_invCarry.end(); ++it)
-		if ((includeLocal || it->first != localName) && out.find(it->first) == out.end())
+		if ((includeLocal || it->first != localKey) && out.find(it->first) == out.end())
 			out[it->first] = it->second;
+}
+
+string CoopAI::PlayerKey(IActor* pActor)
+{
+	IGameFramework* pFramework = g_pGame->GetIGameFramework();
+	string id;
+	if (pActor == pFramework->GetClientActor())
+		id = CoopRelay::LocalPlayerId();
+	else if (INetChannel* pChannel = pActor->GetChannelId() ? pFramework->GetNetChannel(pActor->GetChannelId()) : 0)
+	{
+		// the host's end of the friend's tunnel: its local port says who he is
+		const char* name = pChannel->GetName();
+		const char* colon = name ? strrchr(name, ':') : 0;
+		if (colon)
+			id = CoopRelay::PlayerIdOfPort(atoi(colon + 1));
+	}
+	return id.empty() ? string("name:") + pActor->GetEntity()->GetName() : "id:" + id;
+}
+
+void CoopAI::GiveInventory(IActor* pTarget, const SInventory& inv, bool replace)
+{
+	IItemSystem* pItemSystem = g_pGame->GetIGameFramework()->GetIItemSystem();
+	IInventory* pInv = pTarget->GetInventory();
+	if (!pInv)
+		return;
+	if (replace)
+	{
+		pInv->Destroy();
+		pInv->ResetAmmo();
+	}
+	for (size_t i = 0; i < inv.items.size(); ++i)
+		if (pInv->GetCountOfClass(inv.items[i].c_str()) == 0)
+			pItemSystem->GiveItem(pTarget, inv.items[i].c_str(), false, false, false);
+	for (size_t i = 0; i < inv.ammo.size(); ++i)
+		if (IEntityClass* pAmmo = gEnv->pEntitySystem->GetClassRegistry()->FindClass(inv.ammo[i].first.c_str()))
+			pInv->SetAmmoCount(pAmmo, inv.ammo[i].second);
+	if (!inv.current.empty())
+		if (IScriptTable* pScript = pTarget->GetEntity()->GetScriptTable())
+		{
+			SmartScriptTable actorTable;
+			if (pScript->GetValue("actor", actorTable))
+				Script::CallMethod(actorTable, "SelectItemByName", inv.current.c_str());
+		}
 }
 
 void CoopAI::SetInventoryCarry(const char* level, const std::map<string, SInventory>& inventories)

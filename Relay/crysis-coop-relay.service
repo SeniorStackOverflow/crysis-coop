@@ -1,16 +1,17 @@
 [Unit]
-Description=Crysis Coop relay (WebSocket behind Caddy: connects coop hosts and their friends)
+Description=Crysis Coop relay (WebSocket behind Caddy: connects coop hosts and their friends, keeps campaign checkpoints)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 User=coop-relay
 Group=coop-relay
-ExecStart=/usr/bin/python3 /srv/crysis-coop-relay/coop_relay.py --control-port 64100 --first-port 64101 --last-port 64164
+ExecStart=/usr/bin/python3 /srv/crysis-coop-relay/coop_relay.py --data /srv/crysis-coop-relay/data
 Restart=always
 RestartSec=2
 NoNewPrivileges=true
 ProtectSystem=strict
+ReadWritePaths=/srv/crysis-coop-relay/data
 ProtectHome=true
 PrivateTmp=true
 MemoryMax=128M

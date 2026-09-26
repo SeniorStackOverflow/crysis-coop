@@ -574,6 +574,8 @@ void CGame::OnSaveGame(ISaveGame* pSaveGame)
 		pSaveGame->AddMetadata("ModVersion", info.m_version);
 	}
 
+	CoopSave::OnEngineSave(pSaveGame->GetFileName());
+
 	//write file to profile (a coop checkpoint is not the single player's last save)
 	if(m_pPlayerProfileManager && !CoopSave::IsCoopSaveName(pSaveGame->GetFileName()))
 	{
@@ -645,7 +647,7 @@ void CGame::OnActionEvent(const SActionEvent& event)
     break;
   case eAE_disconnected:
     CoopAI::OnGameEnded();
-    CoopRelay::OnDisconnected();
+    CoopRelay::OnDisconnected(event.m_value, event.m_description);
     break;
 	case eAE_serverIp:
 		if(gEnv->bServer && GetServerSynchedStorage())

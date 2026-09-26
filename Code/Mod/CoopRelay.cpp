@@ -8,20 +8,30 @@
 //  - friend: "coop_join <code>" opens a tunnel and a local UDP port; the
 //            game connects to 127.0.0.1:<that port>
 // The game itself still sends and receives plain UDP datagrams.
+//
+// The host keeps his code (it belongs to his player key). When his game
+// restarts (coop_continue, coop_load, a new game) or loses its connection,
+// the friends' tunnels stay open and wait; once the host's game is ready
+// again their games connect by themselves.
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
-#include <winhttp.h>
+#include <wincrypt.h>
 #pragma comment(lib, "ws2_32.lib")
-#pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "advapi32.lib")
 
 #include "StdAfx.h"
 #include "CoopRelay.h"
 #include "CoopAI.h"
+#include "CoopCloud.h"
 #include "CoopSave.h"
+#include "CoopWebSocket.h"
 #include "Game.h"
 #include "GameRules.h"
+#include "ICryPak.h"
+#include "Menus/FlashMenuObject.h"
+#include "Menus/MPHub.h"
 
 #include <algorithm>
 #include <atomic>
@@ -37,156 +47,126 @@ namespace
 	{
 		OP_REGISTER = 1, OP_REGISTERED, OP_PING, OP_TO_HOST, OP_FROM_HOST, OP_CLOSE, OP_ERROR,
 		OP_JOIN, OP_JOINED, OP_FRIEND_DATA, OP_TO_FRIEND,
-		OP_FRIEND_CANDIDATES, OP_CANDIDATES_FOR_HOST, OP_HOST_CANDIDATES, OP_CANDIDATES_FOR_FRIEND
+		OP_FRIEND_CANDIDATES, OP_CANDIDATES_FOR_HOST, OP_HOST_CANDIDATES, OP_CANDIDATES_FOR_FRIEND,
+		OP_HOST_STATE, OP_FRIEND_ID
 	};
-	const unsigned char PROTOCOL_VERSION = 1;
+	const unsigned char PROTOCOL_VERSION = 2;
+	// the host's game, as the relay tells the friends (OP_HOST_STATE)
+	enum { HS_NONE = 0, HS_RESTARTING = 1, HS_READY = 2, HS_GONE = 3, HS_CLOSED = 4 };
+
+	typedef CCoopWebSocket CWebSocket;
+	bool LoadWebSocketApi() { return CCoopWebSocket::Supported(); }
 
 	// --------------------------------------------------------------------
-	// WebSocket client on WinHTTP (Windows 8+; loaded at run time)
-	typedef HINTERNET (WINAPI *PFN_Upgrade)(HINTERNET, DWORD_PTR);
-	typedef DWORD (WINAPI *PFN_Send)(HINTERNET, int, PVOID, DWORD);
-	typedef DWORD (WINAPI *PFN_Receive)(HINTERNET, PVOID, DWORD, DWORD*, int*);
-	typedef DWORD (WINAPI *PFN_Close)(HINTERNET, USHORT, PVOID, DWORD);
-	PFN_Upgrade s_wsUpgrade = 0;
-	PFN_Send s_wsSend = 0;
-	PFN_Receive s_wsReceive = 0;
-	PFN_Close s_wsClose = 0;
-	enum { WS_BINARY_MESSAGE = 0, WS_BINARY_FRAGMENT = 1, WS_CLOSE = 4 };
-	const DWORD OPTION_UPGRADE_TO_WEB_SOCKET = 114;
+	// the player: a random secret key made once on this PC; the relay only
+	// keeps its public id (the first 8 bytes of its SHA-256). Kept in
+	// %USER%/coop_player.txt with the code of the game last joined.
+#ifndef PROV_RSA_AES
+#define PROV_RSA_AES 24
+#endif
+#ifndef CALG_SHA_256
+#define CALG_SHA_256 0x0000800c
+#endif
+	const char* const PLAYER_FILE = "%USER%/coop_player.txt";
+	unsigned char s_key[16];
+	unsigned char s_id[8];
+	bool s_haveKey = false;
+	int s_lastJoinCode = 0;
 
-	bool LoadWebSocketApi()
+	string UserPath(const char* path)
 	{
-		if (s_wsSend)
-			return true;
-		HMODULE h = LoadLibraryA("winhttp.dll");
-		if (!h)
-			return false;
-		s_wsUpgrade = (PFN_Upgrade)GetProcAddress(h, "WinHttpWebSocketCompleteUpgrade");
-		s_wsReceive = (PFN_Receive)GetProcAddress(h, "WinHttpWebSocketReceive");
-		s_wsClose = (PFN_Close)GetProcAddress(h, "WinHttpWebSocketClose");
-		s_wsSend = (PFN_Send)GetProcAddress(h, "WinHttpWebSocketSend");
-		if (!s_wsUpgrade || !s_wsReceive || !s_wsClose || !s_wsSend)
-		{
-			s_wsSend = 0;
-			return false;
-		}
-		return true;
+		char buf[ICryPak::g_nMaxPath];
+		const char* p = gEnv->pCryPak->AdjustFileName(path, buf, ICryPak::FLAGS_NO_MASTER_FOLDER_MAPPING | ICryPak::FLAGS_FOR_WRITING);
+		return p ? string(p) : string(path);
 	}
 
-	class CWebSocket
+	bool Sha256(const void* data, DWORD len, unsigned char out[32])
 	{
-	public:
-		CWebSocket() : m_session(0), m_connect(0), m_ws(0) {}
-		~CWebSocket() { Close(); }
-
-		bool Open(const char* url)
+		HCRYPTPROV prov = 0;
+		HCRYPTHASH hash = 0;
+		bool ok = false;
+		if (CryptAcquireContextA(&prov, 0, 0, PROV_RSA_AES, CRYPT_VERIFYCONTEXT))
 		{
-			if (!LoadWebSocketApi())
-				return false;
-			string u(url);
-			bool secure = true;
-			if (!strnicmp(u.c_str(), "wss://", 6))
-				u = u.substr(6);
-			else if (!strnicmp(u.c_str(), "ws://", 5))
+			if (CryptCreateHash(prov, CALG_SHA_256, 0, 0, &hash))
 			{
-				u = u.substr(5);
-				secure = false;
+				DWORD n = 32;
+				ok = CryptHashData(hash, (const BYTE*)data, len, 0) && CryptGetHashParam(hash, HP_HASHVAL, out, &n, 0);
+				CryptDestroyHash(hash);
 			}
-			string path = "/";
-			const size_t slash = u.find('/');
-			if (slash != string::npos)
-			{
-				path = u.substr(slash);
-				u = u.substr(0, slash);
-			}
-			INTERNET_PORT port = secure ? 443 : 80;
-			const size_t colon = u.find(':');
-			if (colon != string::npos)
-			{
-				port = (INTERNET_PORT)atoi(u.substr(colon + 1).c_str());
-				u = u.substr(0, colon);
-			}
-			std::wstring host(u.begin(), u.end()), wpath(path.begin(), path.end());
-			m_session = WinHttpOpen(L"CrysisCoop/1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-			if (!m_session)
-				return false;
-			WinHttpSetTimeouts(m_session, 10000, 10000, 10000, 10000);
-			m_connect = WinHttpConnect(m_session, host.c_str(), port, 0);
-			HINTERNET request = m_connect ? WinHttpOpenRequest(m_connect, L"GET", wpath.c_str(), 0, WINHTTP_NO_REFERER,
-				WINHTTP_DEFAULT_ACCEPT_TYPES, secure ? WINHTTP_FLAG_SECURE : 0) : 0;
-			if (!request)
-				return false;
-			bool ok = WinHttpSetOption(request, OPTION_UPGRADE_TO_WEB_SOCKET, 0, 0)
-				&& WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, 0, 0, 0, 0)
-				&& WinHttpReceiveResponse(request, 0);
-			if (ok)
-			{
-				DWORD status = 0, size = sizeof(status);
-				WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, 0, &status, &size, 0);
-				ok = status == 101;
-			}
-			if (ok)
-				m_ws = s_wsUpgrade(request, 0);
-			WinHttpCloseHandle(request);
-			if (m_ws)
-			{
-				// no timeout on a quiet tunnel: pings keep it alive
-				DWORD zero = 0;
-				WinHttpSetOption(m_ws, WINHTTP_OPTION_RECEIVE_TIMEOUT, &zero, sizeof(zero));
-			}
-			return m_ws != 0;
+			CryptReleaseContext(prov, 0);
 		}
+		return ok;
+	}
 
-		// from one thread at a time
-		bool Send(const void* data, int len)
+	bool SecureRandom(unsigned char* p, DWORD n)
+	{
+		HCRYPTPROV prov = 0;
+		bool ok = false;
+		if (CryptAcquireContextA(&prov, 0, 0, PROV_RSA_AES, CRYPT_VERIFYCONTEXT))
 		{
-			std::lock_guard<std::mutex> lock(m_sendLock);
-			return m_ws && s_wsSend(m_ws, WS_BINARY_MESSAGE, (PVOID)data, (DWORD)len) == NO_ERROR;
+			ok = CryptGenRandom(prov, n, p) != FALSE;
+			CryptReleaseContext(prov, 0);
 		}
+		return ok;
+	}
 
-		// blocking: one whole message, -1 when the connection ended
-		int Receive(std::vector<char>& buf)
+	string Hex(const unsigned char* p, int n)
+	{
+		string s;
+		for (int i = 0; i < n; ++i)
 		{
-			int total = 0;
-			for (;;)
+			char b[3];
+			_snprintf(b, sizeof(b), "%02x", p[i]);
+			b[2] = 0;
+			s += b;
+		}
+		return s;
+	}
+
+	void SavePlayer()
+	{
+		FILE* f = fopen(UserPath(PLAYER_FILE).c_str(), "wb");
+		if (!f)
+			return;
+		fprintf(f, "key=%s\nlast_code=%d\n", Hex(s_key, 16).c_str(), s_lastJoinCode);
+		fclose(f);
+	}
+
+	void LoadPlayer()
+	{
+		if (s_haveKey)
+			return;
+		if (FILE* f = fopen(UserPath(PLAYER_FILE).c_str(), "rb"))
+		{
+			char line[256];
+			while (fgets(line, sizeof(line), f))
 			{
-				if (!m_ws || total >= (int)buf.size())
-					return -1;
-				DWORD read = 0;
-				int type = 0;
-				if (s_wsReceive(m_ws, &buf[total], (DWORD)(buf.size() - total), &read, &type) != NO_ERROR || type == WS_CLOSE)
-					return -1;
-				total += (int)read;
-				if (type != WS_BINARY_FRAGMENT)
-					return total;
+				string s = string(line).Trim();
+				if (!strncmp(s.c_str(), "key=", 4) && s.length() == 36)
+				{
+					for (int i = 0; i < 16; ++i)
+						s_key[i] = (unsigned char)strtoul(s.substr(4 + i * 2, 2).c_str(), 0, 16);
+					s_haveKey = true;
+				}
+				else if (!strncmp(s.c_str(), "last_code=", 10))
+					s_lastJoinCode = atoi(s.c_str() + 10);
 			}
+			fclose(f);
 		}
-
-		void Close()
+		if (!s_haveKey)
 		{
-			Abort();
-			if (m_connect)
-				WinHttpCloseHandle(m_connect);
-			if (m_session)
-				WinHttpCloseHandle(m_session);
-			m_connect = m_session = 0;
+			if (!SecureRandom(s_key, 16))
+				return;
+			s_haveKey = true;
+			SavePlayer();
+			CryLogAlways("[CoopRelay] new player key made (%s)", PLAYER_FILE);
 		}
-
-		// ends a Receive blocked in another thread (closing the handle cancels it)
-		void Abort()
-		{
-			std::lock_guard<std::mutex> lock(m_sendLock);
-			if (m_ws)
-			{
-				WinHttpCloseHandle(m_ws);
-				m_ws = 0;
-			}
-		}
-
-	private:
-		HINTERNET m_session, m_connect, m_ws;
-		std::mutex m_sendLock;
-	};
+		unsigned char digest[32];
+		if (Sha256(s_key, 16, digest))
+			memcpy(s_id, digest, 8);
+		else
+			s_haveKey = false;
+	}
 
 	// --------------------------------------------------------------------
 	ICVar* s_pRelay = 0;        // WebSocket URL of the relay
@@ -206,6 +186,7 @@ namespace
 	std::atomic<bool> s_joinLost(false);
 	std::atomic<int> s_joinDirectRtt(-1);   // friend: ms on the direct path, -1 = no direct path
 	std::atomic<int> s_relayRtt(-1);        // ms through the relay (this machine's tunnel)
+	std::atomic<int> s_joinHostState(HS_NONE);  // friend: the host's game as the relay reports it
 
 	void Nap(DWORD ms, const std::atomic<bool>& stop)
 	{
@@ -497,14 +478,15 @@ namespace
 	class CHostAgent
 	{
 	public:
-		CHostAgent() : m_stop(false), m_code(0), m_gamePort(64087), m_useDirect(true), m_direct(INVALID_SOCKET)
+		CHostAgent() : m_stop(false), m_state(HS_RESTARTING), m_gamePort(64087), m_useDirect(true), m_direct(INVALID_SOCKET)
 		{
-			memset(m_secret, 0, sizeof(m_secret));
+			memset(m_key, 0, sizeof(m_key));
 		}
 
-		void Start(const string& url, int gamePort, bool useDirect)
+		void Start(const string& url, const unsigned char* key, int gamePort, bool useDirect)
 		{
 			m_url = url;
+			memcpy(m_key, key, sizeof(m_key));
 			m_gamePort = gamePort;
 			m_useDirect = useDirect;
 			m_stop = false;
@@ -521,8 +503,30 @@ namespace
 
 		bool Running() const { return m_thread.joinable(); }
 
+		// the host's game (HS_RESTARTING / HS_READY) for the friends; sent
+		// now, and again after every registration
+		void SetState(int state)
+		{
+			if (m_state.exchange(state) == state)
+				return;
+			const unsigned char msg[2] = { OP_HOST_STATE, (unsigned char)state };
+			m_ws.Send(msg, sizeof(msg));
+		}
+
+		string IdOfPort(int port)
+		{
+			std::lock_guard<std::mutex> lock(m_lock);
+			for (std::map<unsigned short, SFriend>::iterator it = m_friends.begin(); it != m_friends.end(); ++it)
+				if (it->second.port == port)
+				{
+					std::map<unsigned short, string>::iterator id = m_ids.find(it->first);
+					return id != m_ids.end() ? id->second : string();
+				}
+			return string();
+		}
+
 	private:
-		struct SFriend { SOCKET s; DWORD lastActive; SDirectPath direct; };
+		struct SFriend { SOCKET s; int port; DWORD lastActive; SDirectPath direct; };
 
 		void Run()
 		{
@@ -543,9 +547,8 @@ namespace
 					Nap(3000, m_stop);
 					continue;
 				}
-				unsigned char reg[12] = { OP_REGISTER, PROTOCOL_VERSION };
-				memcpy(reg + 2, &m_code, 2);
-				memcpy(reg + 4, m_secret, 8);
+				unsigned char reg[18] = { OP_REGISTER, PROTOCOL_VERSION };
+				memcpy(reg + 2, m_key, 16);
 				m_ws.Send(reg, sizeof(reg));
 				std::atomic<bool> lost(false);
 				std::thread reader(&CHostAgent::Read, this, std::ref(lost));
@@ -593,7 +596,7 @@ namespace
 				game.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 				game.sin_port = htons((u_short)m_gamePort);
 				SFriend f;
-				f.s = LocalUdpSocket();
+				f.s = LocalUdpSocket(&f.port);
 				f.lastActive = GetTickCount();
 				connect(f.s, (sockaddr*)&game, sizeof(game));
 				it = m_friends.insert(std::make_pair(cid, f)).first;
@@ -612,12 +615,21 @@ namespace
 				if (n < 1)
 					break;
 				const unsigned char op = (unsigned char)buf[0];
-				if (op == OP_REGISTERED && n >= 11)
+				if (op == OP_REGISTERED && n >= 13)
 				{
-					memcpy(&m_code, &buf[1], 2);
-					memcpy(m_secret, &buf[3], 8);
-					s_hostCode = m_code;
+					unsigned int code;
+					memcpy(&code, &buf[1], 4);
+					s_hostCode = (int)code;
 					s_hostError = 0;
+					const unsigned char state[2] = { OP_HOST_STATE, (unsigned char)m_state };
+					m_ws.Send(state, sizeof(state));
+				}
+				else if (op == OP_FRIEND_ID && n >= 11)
+				{
+					unsigned short cid;
+					memcpy(&cid, &buf[1], 2);
+					std::lock_guard<std::mutex> lock(m_lock);
+					m_ids[cid] = Hex((const unsigned char*)&buf[3], 8);
 				}
 				else if (op == OP_PING)
 					OnPong(buf, n);
@@ -682,6 +694,8 @@ namespace
 					if (closing || now - it->second.lastActive > 90000)
 					{
 						closesocket(it->second.s);
+						if (closing)
+							m_ids.erase(it->first);
 						m_friends.erase(it++);
 						continue;
 					}
@@ -766,8 +780,9 @@ namespace
 		std::vector<unsigned short> m_closing;
 		std::vector<SCandidate> m_candidates;
 		string m_url;
-		unsigned short m_code;
-		unsigned char m_secret[8];
+		std::map<unsigned short, string> m_ids;     // client -> player id
+		unsigned char m_key[16];
+		std::atomic<int> m_state;
 		int m_gamePort;
 		bool m_useDirect;
 		SOCKET m_direct;
@@ -778,12 +793,17 @@ namespace
 	class CJoinAgent
 	{
 	public:
-		CJoinAgent() : m_stop(false), m_code(0), m_useDirect(true), m_direct(INVALID_SOCKET), m_haveGame(false) {}
+		CJoinAgent() : m_stop(false), m_code(0), m_useDirect(true), m_direct(INVALID_SOCKET), m_haveGame(false)
+		{
+			memset(m_key, 0, sizeof(m_key));
+		}
 
-		void Start(const string& url, int code, bool useDirect)
+		void Start(const string& url, const unsigned char* key, int code, bool useDirect)
 		{
 			m_url = url;
-			m_code = code;
+			memcpy(m_key, key, sizeof(m_key));
+			m_code = (unsigned int)code;
+			s_joinHostState = HS_NONE;
 			m_useDirect = useDirect;
 			m_stop = false;
 			s_joinPort = 0;
@@ -830,9 +850,10 @@ namespace
 					continue;
 				}
 				// the token brings this machine back as the same client after a lost connection
-				unsigned char join[12] = { OP_JOIN, PROTOCOL_VERSION };
-				memcpy(join + 2, &m_code, 2);
-				memcpy(join + 4, m_path.token, 8);
+				unsigned char join[30] = { OP_JOIN, PROTOCOL_VERSION };
+				memcpy(join + 2, &m_code, 4);
+				memcpy(join + 6, m_path.token, 8);
+				memcpy(join + 14, m_key, 16);
 				m_ws.Send(join, sizeof(join));
 				const int n = m_ws.Receive(buf);
 				if (n < 1 || (unsigned char)buf[0] != OP_JOINED)
@@ -841,6 +862,7 @@ namespace
 					m_ws.Close();
 					break;
 				}
+				s_joinHostState = n >= 2 ? (unsigned char)buf[1] : HS_READY;
 				if (local == INVALID_SOCKET)
 				{
 					int port = 0;
@@ -960,6 +982,8 @@ namespace
 				const unsigned char op = (unsigned char)buf[0];
 				if (op == OP_PING)
 					OnPong(buf, n);
+				else if (op == OP_HOST_STATE && n >= 2)
+					s_joinHostState = (unsigned char)buf[1];
 				else if (op == OP_CANDIDATES_FOR_FRIEND)
 				{
 					std::lock_guard<std::mutex> lock(m_lock);
@@ -983,7 +1007,8 @@ namespace
 		bool m_haveGame;
 		SDirectPath m_path;
 		string m_url;
-		unsigned short m_code;
+		unsigned char m_key[16];
+		unsigned int m_code;
 		bool m_useDirect;
 		SOCKET m_direct;
 	};
@@ -996,6 +1021,28 @@ namespace
 	int s_loggedFriends = 0, s_loggedHostDirect = 0, s_loggedHostError = 0, s_loggedReconnects = 0, s_joinConnected = 0;
 	int s_loggedJoinDirect = -1;
 	bool s_joinErrorShown = false;
+
+	// friend: the game lost the host. Whether the host restarts (then the
+	// tunnel stays and the game rejoins once he is ready) or the player left
+	// is known from the relay's host state.
+	bool s_gameDropped = false;
+	float s_droppedAt = 0.0f;
+	bool s_waitingForHost = false;
+	float s_waitSince = 0.0f;
+	int s_loggedHostState = HS_NONE;
+	float s_rejoinedAt = -100.0f;
+	int s_rejoinTries = 0;
+	int s_dropCause = 0;
+	string s_dropText;
+	const float HOST_WAIT = 600.0f;
+	// host: the map command of a restart, run once the friends were told
+	string s_restartCommand;
+	float s_restartAt = 0.0f;
+
+	float Now()
+	{
+		return gEnv->pTimer->GetAsyncCurTime();
+	}
 
 	void StopHost()
 	{
@@ -1015,10 +1062,65 @@ namespace
 		ICVar* pPort = gEnv->pConsole->GetCVar("sv_port");
 		const int gamePort = pPort ? pPort->GetIVal() : 64087;
 		s_relayRtt = -1;
-		s_hostAgent.Start(s_pRelay->GetString(), gamePort, s_pDirect->GetIVal() != 0);
+		s_hostAgent.Start(s_pRelay->GetString(), s_key, gamePort, s_pDirect->GetIVal() != 0);
 		s_hosting = true;
 		s_serverGoneFor = 0.0f;
 		CryLogAlways("[CoopRelay] hosting through the relay %s (game port %d)", s_pRelay->GetString(), gamePort);
+	}
+
+	void StopJoin(const char* why)
+	{
+		if (!s_joinAgent.Running())
+			return;
+		s_joinAgent.Stop();
+		s_joinConnected = 0;
+		s_gameDropped = false;
+		s_waitingForHost = false;
+		CryLogAlways("[CoopRelay] %s, tunnel closed", why);
+	}
+
+	// the friend's menu while he waits for the host: the message box the
+	// menu shows a lost connection in (it comes up once the menu is there)
+	bool s_waitMessageDue = false;
+	void ShowWaiting(bool show)
+	{
+		s_waitMessageDue = show;
+	}
+
+	void UpdateWaitingMessage(float now)
+	{
+		if (!s_waitMessageDue)
+			return;
+		CFlashMenuObject* pMenu = g_pGame ? g_pGame->GetMenu() : 0;
+		if (CMPHub* pHub = pMenu ? pMenu->GetMPHub() : 0)
+		{
+			s_waitMessageDue = false;
+			pHub->ShowError("The host is loading the game. You will join again by yourself.", false);
+		}
+	}
+
+	// the friend's menu: why he is out of the game
+	void ShowReason(const char* text)
+	{
+		CFlashMenuObject* pMenu = g_pGame ? g_pGame->GetMenu() : 0;
+		if (CMPHub* pHub = pMenu ? pMenu->GetMPHub() : 0)
+		{
+			pHub->CloseLoadingDlg();
+			if (text)
+				pHub->ShowError(text, false);
+			else
+				pHub->DisconnectError((EDisconnectionCause)s_dropCause, false, s_dropText.c_str());
+		}
+	}
+
+	void Rejoin()
+	{
+		string cmd;
+		cmd.Format("connect 127.0.0.1 %d", (int)s_joinPort);
+		CryLogAlways("[CoopRelay] the host is ready again: %s", cmd.c_str());
+		ShowWaiting(false);
+		s_rejoinedAt = Now();
+		gEnv->pConsole->ExecuteString(cmd.c_str());
 	}
 
 	const char* ErrorText(int e)
@@ -1026,7 +1128,7 @@ namespace
 		switch (e)
 		{
 		case 1: return "the relay is full, try again later";
-		case 2: return "the relay runs another version of the mod";
+		case 2: return "the relay runs another version of the mod (update the mod)";
 		case 3: return "no coop game with this code (check the code; the host must be in the game)";
 		case 4: return "that coop game is full";
 		case 5: return "cannot reach the relay (internet connection?)";
@@ -1035,46 +1137,43 @@ namespace
 		return "unknown error";
 	}
 
-	// coop_join <code>: join a friend's coop game through the relay
+	// coop_join [code]: join a friend's coop game through the relay (no code:
+	// the game joined last time; a host keeps his code)
 	void CmdJoin(IConsoleCmdArgs* pArgs)
 	{
-		if (pArgs->GetArgCount() < 2 || atoi(pArgs->GetArg(1)) <= 0)
+		LoadPlayer();
+		const int code = pArgs->GetArgCount() > 1 ? atoi(pArgs->GetArg(1)) : s_lastJoinCode;
+		if (code <= 0)
 		{
 			CryLogAlways("usage: coop_join <code>   (the code the host sees when he starts a coop game)");
 			return;
 		}
-		s_joinAgent.Stop();
+		if (!s_haveKey)
+		{
+			CryLogAlways("[CoopRelay] no player key (%s could not be written): cannot join", PLAYER_FILE);
+			return;
+		}
+		StopJoin("left the last game");
 		s_joinConnected = 0;
 		s_loggedJoinDirect = -1;
 		s_joinErrorShown = false;
-		s_joinAgent.Start(s_pRelay->GetString(), atoi(pArgs->GetArg(1)), s_pDirect->GetIVal() != 0);
-		CryLogAlways("[CoopRelay] joining coop game %s through %s ...", pArgs->GetArg(1), s_pRelay->GetString());
+		s_loggedHostState = HS_NONE;
+		s_rejoinTries = 0;
+		if (code != s_lastJoinCode)
+		{
+			s_lastJoinCode = code;
+			SavePlayer();
+		}
+		s_joinAgent.Start(s_pRelay->GetString(), s_key, code, s_pDirect->GetIVal() != 0);
+		CryLogAlways("[CoopRelay] joining coop game %d through %s ...", code, s_pRelay->GetString());
 	}
 
-	// coop_host [level]: host a coop game, from the first level or the one named
-	// (there are no saved games in coop: this is how a campaign continues)
-	void CmdHost(IConsoleCmdArgs* pArgs)
+	// coop_leave: leave the joined game for good (no joining again)
+	void CmdLeave(IConsoleCmdArgs*)
 	{
-		static const char* s_levels[] = { "island", "village", "rescue", "harbor", "tank", "mine", "core", "ice", "sphere", "ascension", "fleet" };
-		const char* level = s_levels[0];
-		if (pArgs->GetArgCount() > 1)
-		{
-			const char* arg = pArgs->GetArg(1);
-			const int number = atoi(arg);
-			level = 0;
-			for (int i = 0; i < 11; ++i)
-				if (number == i + 1 || !stricmp(arg, s_levels[i]))
-					level = s_levels[i];
-			if (!level)
-			{
-				CryLogAlways("usage: coop_host [level]   (island village rescue harbor tank mine core ice sphere ascension fleet, or 1-11)");
-				return;
-			}
-		}
-		gEnv->pConsole->ExecuteString("exec coop_settings.cfg");
-		string cmd;
-		cmd.Format("map multiplayer/tia/coop_%s s", level);
-		gEnv->pConsole->ExecuteString(cmd.c_str());
+		ShowWaiting(false);
+		StopJoin("left the coop game");
+		gEnv->pConsole->ExecuteString("disconnect");
 	}
 
 	ICVar* s_pEnglishKeyboard = 0;
@@ -1082,6 +1181,7 @@ namespace
 
 	void CmdStatus(IConsoleCmdArgs*)
 	{
+		CryLogAlways("[CoopRelay] player id %s", s_haveKey ? Hex(s_id, 8).c_str() : "(none)");
 		if (s_hosting && s_hostCode)
 			CryLogAlways("[CoopRelay] friends join with: coop_join %d   (%d connected, %d of them directly; relay %d ms)",
 				(int)s_hostCode, (int)s_hostFriends, (int)s_hostDirect, (int)s_relayRtt);
@@ -1093,10 +1193,100 @@ namespace
 				s_pEnable->GetIVal(), s_pRelay->GetString());
 		if (s_joinAgent.Running())
 		{
-			if (s_joinDirectRtt >= 0)
+			if (s_waitingForHost)
+				CryLogAlways("[CoopRelay] joined game %d: waiting for the host to be ready", s_lastJoinCode);
+			else if (s_joinDirectRtt >= 0)
 				CryLogAlways("[CoopRelay] joined, direct connection to the host: %d ms (through the relay: %d ms)", (int)s_joinDirectRtt, (int)s_relayRtt);
 			else
 				CryLogAlways("[CoopRelay] joined through the relay: %d ms (no direct connection)", (int)s_relayRtt);
+		}
+	}
+
+	void UpdateFriend()
+	{
+		if (!s_joinAgent.Running())
+			return;
+		const int port = s_joinPort;
+		if (port && !s_joinConnected)
+		{
+			s_joinConnected = port;
+			string cmd;
+			cmd.Format("connect 127.0.0.1 %d", port);
+			CryLogAlways("[CoopRelay] tunnel to the host open, %s", cmd.c_str());
+			gEnv->pConsole->ExecuteString(cmd.c_str());
+		}
+		if (s_joinError && !s_joinErrorShown)
+		{
+			s_joinErrorShown = true;
+			CryLogAlways("[CoopRelay] cannot join: %s", ErrorText(s_joinError));
+			if (s_waitingForHost)
+			{
+				ShowReason("The host's game is gone");
+				StopJoin("the host's game is gone");
+			}
+		}
+		if (s_joinLost)
+		{
+			s_joinLost = false;
+			CryLogAlways("[CoopRelay] connection to the relay lost, reconnecting");
+		}
+		const bool direct = s_joinDirectRtt >= 0;
+		if (direct != (s_loggedJoinDirect >= 0))
+		{
+			s_loggedJoinDirect = direct ? (int)s_joinDirectRtt : -1;
+			if (direct)
+				CryLogAlways("[CoopRelay] direct connection to the host: %d ms (through the relay: %d ms)", (int)s_joinDirectRtt, (int)s_relayRtt);
+			else
+				CryLogAlways("[CoopRelay] no direct connection to the host, playing through the relay (%d ms)", (int)s_relayRtt);
+		}
+
+		const int state = s_joinHostState;
+		if (state != s_loggedHostState)
+		{
+			static const char* names[] = { "?", "restarting", "ready", "connection lost", "gone" };
+			CryLogAlways("[CoopRelay] the host's game: %s", names[state >= 0 && state <= 4 ? state : 0]);
+			s_loggedHostState = state;
+		}
+		const float now = Now();
+		if (s_gameDropped)
+		{
+			if (state == HS_RESTARTING || state == HS_GONE)
+			{
+				s_gameDropped = false;
+				s_waitingForHost = true;
+				s_waitSince = now;
+				CryLogAlways("[CoopRelay] the host restarts his game: waiting for him, then joining again");
+				ShowWaiting(true);
+			}
+			else if (state == HS_READY && now - s_rejoinedAt < 60.0f && s_rejoinTries < 3)
+			{
+				// joining again right after he got ready did not work: once more
+				s_gameDropped = false;
+				s_waitingForHost = true;
+				s_waitSince = now;
+				++s_rejoinTries;
+				ShowWaiting(true);
+			}
+			else if (state == HS_CLOSED || now - s_droppedAt > 3.0f)
+			{
+				// the host is still there: a real disconnection (or he closed)
+				ShowReason(state == HS_CLOSED ? "The host has closed the game" : 0);
+				StopJoin(state == HS_CLOSED ? "the host closed the game" : "lost the connection to the host");
+			}
+		}
+		if (s_waitingForHost)
+		{
+			UpdateWaitingMessage(now);
+			if (state == HS_READY && now - s_waitSince > (s_rejoinTries ? 5.0f : 1.0f))
+			{
+				s_waitingForHost = false;
+				Rejoin();
+			}
+			else if (state == HS_CLOSED || now - s_waitSince > HOST_WAIT)
+			{
+				ShowReason(state == HS_CLOSED ? "The host has closed the game" : "The host did not come back");
+				StopJoin(state == HS_CLOSED ? "the host closed the game" : "the host did not come back");
+			}
 		}
 	}
 }
@@ -1115,9 +1305,15 @@ void CoopRelay::Init()
 		"Crysis Coop: code of the coop game this machine hosts through the relay (0 = none)");
 	s_pEnglishKeyboard = gEnv->pConsole->RegisterInt("coop_english_keyboard", 1, VF_DUMPTODISK,
 		"Crysis Coop: 1 = English keyboard layout in the game window (console commands can be typed with any system layout)");
-	gEnv->pConsole->AddCommand("coop_host", CmdHost, 0, "Crysis Coop: host a coop game: coop_host [level]  (default: the first level)");
-	gEnv->pConsole->AddCommand("coop_join", CmdJoin, 0, "Crysis Coop: join a friend's coop game: coop_join <code>");
+	// this player's own settings: the engine sends a server's console
+	// variables to every client that connects, these are not taken over
+	ICVar* own[] = { s_pRelay, s_pEnable, s_pDirect, s_pCode, s_pEnglishKeyboard };
+	for (int i = 0; i < (int)(sizeof(own) / sizeof(own[0])); ++i)
+		own[i]->SetFlags(own[i]->GetFlags() | VF_NOT_NET_SYNCED);
+	gEnv->pConsole->AddCommand("coop_join", CmdJoin, 0, "Crysis Coop: join a friend's coop game: coop_join <code>  (no code: the last one)");
+	gEnv->pConsole->AddCommand("coop_leave", CmdLeave, 0, "Crysis Coop: leave the joined coop game (no joining again by itself)");
 	gEnv->pConsole->AddCommand("coop_relay_status", CmdStatus, 0, "Crysis Coop: the code friends join with, connection and latency");
+	CoopCloud::Init();
 }
 
 void CoopRelay::Update(float frameTime)
@@ -1125,29 +1321,34 @@ void CoopRelay::Update(float frameTime)
 	if (!s_pEnable)
 		return;
 
-	// once, when the command line cvars are set: typing console commands with a
-	// Cyrillic (or any non-Latin) layout gives garbage, so the game's own
-	// thread gets the English layout (the rest of the system keeps its own)
+	// once, when the command line cvars are set: the player key, and the
+	// English keyboard layout (console commands typed with a Cyrillic or any
+	// other non-Latin layout give garbage; the rest of the system keeps its own)
 	if (!s_keyboardDone)
 	{
 		s_keyboardDone = true;
+		LoadPlayer();
 		if (s_pEnglishKeyboard && s_pEnglishKeyboard->GetIVal())
 			LoadKeyboardLayoutA("00000409", KLF_ACTIVATE);
 	}
+	CoopCloud::Update();
 
 	// ---- host
-	// coop_continue: not before the save is loaded (the load disconnects
-	// everybody but the host)
-	const bool hosting = gEnv->bServer && CoopAI::IsCoopSession() && g_pGame->GetIGameFramework()->IsGameStarted() && !CoopSave::IsLoadPending();
+	// the friends may connect once the level runs (coop_continue: once the
+	// save is loaded, the load disconnects everybody but the host)
+	const bool ready = gEnv->bServer && CoopAI::IsCoopSession() && g_pGame->GetIGameFramework()->IsGameStarted() && !CoopSave::IsLoadPending();
 	if (!s_hosting)
 	{
-		if (hosting && s_pEnable->GetIVal())
+		if (ready && s_pEnable->GetIVal() && s_haveKey)
+		{
+			StopJoin("hosting a game now");
 			StartHost();
+		}
 	}
 	else
 	{
-		// a level change keeps the game (and the friends): only a server that
-		// is gone for a while ends the relay session
+		// a level change or a restart keeps the game (and the friends): only a
+		// server that is gone for a while ends the relay session
 		s_serverGoneFor = (gEnv->bServer && CoopAI::IsNetGame()) ? 0.0f : s_serverGoneFor + frameTime;
 		if (s_serverGoneFor > 10.0f || !s_pEnable->GetIVal())
 		{
@@ -1155,8 +1356,15 @@ void CoopRelay::Update(float frameTime)
 			StopHost();
 		}
 	}
+	if (!s_restartCommand.empty() && Now() >= s_restartAt)
+	{
+		const string cmd = s_restartCommand;
+		s_restartCommand.clear();
+		gEnv->pConsole->ExecuteString(cmd.c_str());
+	}
 	if (s_hosting)
 	{
+		s_hostAgent.SetState(ready && s_restartCommand.empty() ? HS_READY : HS_RESTARTING);
 		if (s_hostFriends != s_loggedFriends || s_hostDirect != s_loggedHostDirect)
 		{
 			s_loggedFriends = s_hostFriends;
@@ -1183,7 +1391,7 @@ void CoopRelay::Update(float frameTime)
 			text[sizeof(text) - 1] = 0;
 			s_pCode->ForceSet(text);
 			string msg;
-			msg.Format("Co-op code: %d  -  your friend types in the console: coop_join %d", code, code);
+			msg.Format("Co-op code: %d (always the same)  -  your friend types in the console: coop_join %d", code, code);
 			CryLogAlways("[CoopRelay] %s", msg.c_str());
 			if (CGameRules* pRules = g_pGame->GetGameRules())
 				pRules->SendTextMessage(eTextMessageCenter, msg.c_str(), eRMI_ToAllClients);
@@ -1191,52 +1399,84 @@ void CoopRelay::Update(float frameTime)
 	}
 
 	// ---- friend
-	if (s_joinAgent.Running())
-	{
-		const int port = s_joinPort;
-		if (port && !s_joinConnected)
-		{
-			s_joinConnected = port;
-			string cmd;
-			cmd.Format("connect 127.0.0.1 %d", port);
-			CryLogAlways("[CoopRelay] tunnel to the host open, %s", cmd.c_str());
-			gEnv->pConsole->ExecuteString(cmd.c_str());
-		}
-		if (s_joinError && !s_joinErrorShown)
-		{
-			s_joinErrorShown = true;
-			CryLogAlways("[CoopRelay] cannot join: %s", ErrorText(s_joinError));
-		}
-		if (s_joinLost)
-		{
-			s_joinLost = false;
-			CryLogAlways("[CoopRelay] connection to the relay lost, reconnecting");
-		}
-		const bool direct = s_joinDirectRtt >= 0;
-		if (direct != (s_loggedJoinDirect >= 0))
-		{
-			s_loggedJoinDirect = direct ? (int)s_joinDirectRtt : -1;
-			if (direct)
-				CryLogAlways("[CoopRelay] direct connection to the host: %d ms (through the relay: %d ms)", (int)s_joinDirectRtt, (int)s_relayRtt);
-			else
-				CryLogAlways("[CoopRelay] no direct connection to the host, playing through the relay (%d ms)", (int)s_relayRtt);
-		}
-	}
+	UpdateFriend();
 }
 
-void CoopRelay::OnDisconnected()
+void CoopRelay::OnDisconnected(int cause, const char* description)
 {
-	// the friend left the game (or was dropped): the tunnel is not needed
-	if (s_joinAgent.Running() && !gEnv->bServer)
+	if (!s_joinAgent.Running() || gEnv->bServer || s_waitingForHost)
+		return;
+	// the player left himself
+	if (cause == eDC_UserRequested)
 	{
-		s_joinAgent.Stop();
-		s_joinConnected = 0;
-		CryLogAlways("[CoopRelay] left the coop game, tunnel closed");
+		StopJoin("left the coop game");
+		return;
 	}
+	// the host restarts, or the connection was lost for good: decided in
+	// UpdateFriend once the relay's word on the host is known
+	s_gameDropped = true;
+	s_droppedAt = Now();
+	s_dropCause = cause;
+	s_dropText = description ? description : "";
 }
 
 void CoopRelay::Shutdown()
 {
 	s_joinAgent.Stop();
 	StopHost();
+	CoopCloud::Shutdown();
+}
+
+void CoopRelay::GetPlayerKey(unsigned char key[16])
+{
+	LoadPlayer();
+	memcpy(key, s_key, 16);
+}
+
+string CoopRelay::LocalPlayerId()
+{
+	return s_haveKey ? Hex(s_id, 8) : string();
+}
+
+string CoopRelay::PlayerIdOfPort(int port)
+{
+	return s_hosting ? s_hostAgent.IdOfPort(port) : string();
+}
+
+const char* CoopRelay::RelayUrl()
+{
+	return s_pRelay ? s_pRelay->GetString() : "";
+}
+
+void CoopRelay::RestartGame(const char* mapCommand)
+{
+	if (s_joinAgent.Running())
+	{
+		ShowWaiting(false);
+		StopJoin("hosting a game now");
+	}
+	if (s_hosting && s_hostFriends > 0)
+	{
+		// the friends hear it from the relay before their games lose this one
+		s_hostAgent.SetState(HS_RESTARTING);
+		s_restartCommand = mapCommand;
+		s_restartAt = Now() + 1.0f;
+		CryLogAlways("[CoopRelay] the game restarts: the friends wait and join again by themselves");
+		return;
+	}
+	gEnv->pConsole->ExecuteString(mapCommand);
+}
+
+bool CoopRelay::HandlesDisconnect()
+{
+	return s_joinAgent.Running() && !gEnv->bServer;
+}
+
+string CoopRelay::RandomHex(int bytes)
+{
+	unsigned char b[32];
+	bytes = bytes < 1 ? 1 : bytes > 32 ? 32 : bytes;
+	if (!SecureRandom(b, bytes))
+		RandomBytes(b, bytes);
+	return Hex(b, bytes);
 }

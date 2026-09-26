@@ -14,6 +14,7 @@
 struct IFunctionHandler;
 struct IEntity;
 struct IVehicle;
+struct IActor;
 
 namespace CoopAI
 {
@@ -94,10 +95,16 @@ namespace CoopAI
 		std::vector<string> items;
 		std::vector<std::pair<string, int> > ammo;
 		string current;
+		string name;            // the player's name when it was taken
 	};
-	// server: every player's inventory by name (a dead player: his last
+	// who a player is from game to game: "id:<his relay player id>" (the host
+	// and friends joined through the relay), else "name:<player name>"
+	string PlayerKey(IActor* pActor);
+	// server: every player's inventory by PlayerKey (a dead player: his last
 	// snapshot); the host's own is left out if !includeLocal
 	void CollectInventories(std::map<string, SInventory>& out, bool includeLocal);
+	// server: hands the items and ammo out (replace: instead of what he has)
+	void GiveInventory(IActor* pActor, const SInventory& inv, bool replace);
 	// server: given back by player name when the players are equipped on
 	// that coop map (see coop_inv_restore)
 	void SetInventoryCarry(const char* level, const std::map<string, SInventory>& inventories);

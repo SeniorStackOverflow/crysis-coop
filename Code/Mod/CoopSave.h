@@ -27,4 +27,6 @@ namespace CoopSave
 	// a coop checkpoint's savegame file: not offered by the single player
 	// menus (Load game, Resume), which would load it as a single player game
 	bool IsCoopSaveName(const char* name);
+	// CryAction writes a savegame to this file (CGame::OnSaveGame)
+	void OnEngineSave(const char* file);
 }

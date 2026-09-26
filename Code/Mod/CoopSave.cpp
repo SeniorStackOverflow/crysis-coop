@@ -15,12 +15,15 @@
 #include "StdAfx.h"
 #include "CoopSave.h"
 #include "CoopAI.h"
+#include "CoopCloud.h"
+#include "CoopRelay.h"
 #include "Game.h"
 #include "GameRules.h"
 #include "IActorSystem.h"
 #include "IItemSystem.h"
 #include "ILevelSystem.h"
 #include "IViewSystem.h"
+#include "IPlayerProfiles.h"
 #include "ICryPak.h"
 #include "StringUtils.h"
 
@@ -153,19 +156,30 @@ namespace
 	}
 
 	// ------------------------------------------------------------------
-	// progress file: the last checkpoint and the other players' equipment
+	// campaigns: every game started with coop_host is a campaign of its own,
+	// kept in %USER%/SaveGames/coop/<id>/ (progress.txt: the last checkpoint,
+	// progress_prev.txt: the one before). Its savegames are
+	// coop_checkpoint_<id>_a / _b, used in turn.
 
-	const char* const PROGRESS_FILE = "%USER%/SaveGames/coop_progress.txt";
-	const char* const PROGRESS_PREV_FILE = "%USER%/SaveGames/coop_progress_prev.txt";
-	const char* const SAVE_NAME = "coop_checkpoint_%c.CRYSISJMSF";
+	const char* const COOP_DIR = "%USER%/SaveGames/coop";
+	const char* const LEGACY_PROGRESS = "%USER%/SaveGames/coop_progress.txt";
+	const char* const LEGACY_PROGRESS_PREV = "%USER%/SaveGames/coop_progress_prev.txt";
+	const char* const SAVE_EXT = ".CRYSISJMSF";
+	const char* const LEVELS[] = { "island", "village", "rescue", "harbor", "tank", "mine", "core", "ice", "sphere", "ascension", "fleet" };
 
 	struct SProgress
 	{
+		string campaign;    // 16 hex digits
+		string name;
 		string level;       // short name: rescue
 		string save;        // CryAction savegame name
 		string checkpoint;
 		string time;
-		std::map<string, CoopAI::SInventory> players;
+		unsigned int stamp; // unix time of the checkpoint
+		string host;        // the host's player key (CoopAI::PlayerKey)
+		string hostname;
+		std::map<string, CoopAI::SInventory> players;   // by player key, the host too
+		SProgress() : stamp(0) {}
 	};
 
 	string UserPath(const char* path)
@@ -173,6 +187,11 @@ namespace
 		char buf[ICryPak::g_nMaxPath];
 		const char* p = gEnv->pCryPak->AdjustFileName(path, buf, ICryPak::FLAGS_NO_MASTER_FOLDER_MAPPING | ICryPak::FLAGS_FOR_WRITING);
 		return p ? string(p) : string(path);
+	}
+
+	string CampaignFile(const string& campaign, const char* file)
+	{
+		return UserPath((string(COOP_DIR) + "/" + campaign + "/" + file).c_str());
 	}
 
 	void Split(const string& s, char sep, std::vector<string>& out)
@@ -189,20 +208,29 @@ namespace
 		}
 	}
 
-	bool WriteProgress(const char* file, const SProgress& p)
+	unsigned int ParseTime(const string& text)
 	{
-		const string path = UserPath(file);
-		FILE* f = fopen(path.c_str(), "wb");
-		if (!f)
-		{
-			CryLogAlways("[CoopSave] cannot write %s", path.c_str());
-			return false;
-		}
-		fprintf(f, "version=1\nlevel=%s\nsave=%s\ncheckpoint=%s\ntime=%s\n", p.level.c_str(), p.save.c_str(), p.checkpoint.c_str(), p.time.c_str());
+		struct tm t;
+		memset(&t, 0, sizeof(t));
+		if (sscanf(text.c_str(), "%d-%d-%d %d:%d:%d", &t.tm_year, &t.tm_mon, &t.tm_mday, &t.tm_hour, &t.tm_min, &t.tm_sec) != 6)
+			return 0;
+		t.tm_year -= 1900;
+		t.tm_mon -= 1;
+		t.tm_isdst = -1;
+		const time_t v = mktime(&t);
+		return v > 0 ? (unsigned int)v : 0;
+	}
+
+	string ProgressText(const SProgress& p)
+	{
+		string text;
+		text.Format("version=2\ncampaign=%s\nname=%s\nlevel=%s\nsave=%s\ncheckpoint=%s\ntime=%s\nstamp=%u\nhost=%s\nhostname=%s\n",
+			p.campaign.c_str(), p.name.c_str(), p.level.c_str(), p.save.c_str(), p.checkpoint.c_str(), p.time.c_str(), p.stamp,
+			p.host.c_str(), p.hostname.c_str());
 		for (std::map<string, CoopAI::SInventory>::const_iterator it = p.players.begin(); it != p.players.end(); ++it)
 		{
 			const CoopAI::SInventory& inv = it->second;
-			string items, ammo;
+			string items, ammo, line;
 			for (size_t i = 0; i < inv.items.size(); ++i)
 				items += (i ? "," : "") + inv.items[i];
 			for (size_t i = 0; i < inv.ammo.size(); ++i)
@@ -211,27 +239,31 @@ namespace
 				a.Format("%s%s:%d", i ? "," : "", inv.ammo[i].first.c_str(), inv.ammo[i].second);
 				ammo += a;
 			}
-			fprintf(f, "player=%s\t%s\t%s\t%s\n", it->first.c_str(), inv.current.c_str(), items.c_str(), ammo.c_str());
+			line.Format("player=%s\t%s\t%s\t%s\t%s\n", it->first.c_str(), inv.name.c_str(), inv.current.c_str(), items.c_str(), ammo.c_str());
+			text += line;
 		}
-		fclose(f);
-		return true;
+		return text;
 	}
 
-	bool ReadProgress(const char* file, SProgress& p)
+	void ParseProgress(const string& text, SProgress& p)
 	{
-		FILE* f = fopen(UserPath(file).c_str(), "rb");
-		if (!f)
-			return false;
-		char line[4096];
-		std::vector<string> fields, list, pair;
-		while (fgets(line, sizeof(line), f))
+		std::vector<string> lines, fields, list, pair;
+		Split(text, '\n', lines);
+		int version = 1;
+		for (size_t l = 0; l < lines.size(); ++l)
 		{
-			string s = string(line).TrimRight("\r\n");
+			const string s = string(lines[l]).TrimRight("\r");
 			const size_t eq = s.find('=');
 			if (eq == string::npos)
 				continue;
 			const string key = s.substr(0, eq), value = s.substr(eq + 1);
-			if (key == "level")
+			if (key == "version")
+				version = atoi(value.c_str());
+			else if (key == "campaign")
+				p.campaign = value;
+			else if (key == "name")
+				p.name = value;
+			else if (key == "level")
 				p.level = value;
 			else if (key == "save")
 				p.save = value;
@@ -239,18 +271,29 @@ namespace
 				p.checkpoint = value;
 			else if (key == "time")
 				p.time = value;
+			else if (key == "stamp")
+				p.stamp = (unsigned int)strtoul(value.c_str(), 0, 10);
+			else if (key == "host")
+				p.host = value;
+			else if (key == "hostname")
+				p.hostname = value;
 			else if (key == "player")
 			{
+				// version 1 (mod 0.3): name current items ammo
+				// version 2: key name current items ammo
 				Split(value, '\t', fields);
-				if (fields.size() < 4 || fields[0].empty())
+				if (version < 2)
+					fields.insert(fields.begin(), "name:" + (fields.empty() ? string() : fields[0]));
+				if (fields.size() < 5 || fields[0].length() < 4)
 					continue;
 				CoopAI::SInventory& inv = p.players[fields[0]];
-				inv.current = fields[1];
-				Split(fields[2], ',', list);
+				inv.name = fields[1];
+				inv.current = fields[2];
+				Split(fields[3], ',', list);
 				for (size_t i = 0; i < list.size(); ++i)
 					if (!list[i].empty())
 						inv.items.push_back(list[i]);
-				Split(fields[3], ',', list);
+				Split(fields[4], ',', list);
 				for (size_t i = 0; i < list.size(); ++i)
 				{
 					Split(list[i], ':', pair);
@@ -259,8 +302,122 @@ namespace
 				}
 			}
 		}
+		if (!p.stamp)
+			p.stamp = ParseTime(p.time);
+	}
+
+	bool ReadFile(const string& path, std::vector<char>& out)
+	{
+		FILE* f = fopen(path.c_str(), "rb");
+		if (!f)
+			return false;
+		fseek(f, 0, SEEK_END);
+		const long size = ftell(f);
+		fseek(f, 0, SEEK_SET);
+		out.resize(size > 0 ? size : 0);
+		const bool ok = size <= 0 || fread(&out[0], 1, size, f) == (size_t)size;
 		fclose(f);
+		return ok;
+	}
+
+	bool WriteFile(const string& path, const void* data, size_t size)
+	{
+		FILE* f = fopen(path.c_str(), "wb");
+		if (!f)
+			return false;
+		const bool ok = !size || fwrite(data, 1, size, f) == size;
+		fclose(f);
+		return ok;
+	}
+
+	bool ReadProgress(const string& path, SProgress& p)
+	{
+		std::vector<char> data;
+		if (!ReadFile(path, data) || data.empty())
+			return false;
+		ParseProgress(string(&data[0], data.size()), p);
 		return !p.level.empty() && !p.save.empty();
+	}
+
+	bool WriteProgress(const string& path, const SProgress& p)
+	{
+		const string text = ProgressText(p);
+		if (WriteFile(path, text.c_str(), text.length()))
+			return true;
+		CryLogAlways("[CoopSave] cannot write %s", path.c_str());
+		return false;
+	}
+
+	// where CryAction keeps a savegame of this profile (the folder the last
+	// save went to, else the profile manager's rule: CGame::OnSaveGame)
+	string s_engineSaveDir;         // resolved, with the profile prefix: ".../SaveGames/default_"
+	string EngineSavePath(const string& save)
+	{
+		if (!s_engineSaveDir.empty())
+			return s_engineSaveDir + save;
+		IPlayerProfileManager* pManager = g_pGame->GetIGameFramework()->GetIPlayerProfileManager();
+		const char* user = pManager ? pManager->GetCurrentUser() : 0;
+		IPlayerProfile* pProfile = pManager && user ? pManager->GetCurrentProfile(user) : 0;
+		const char* profile = pProfile ? pProfile->GetName() : "default";
+		const char* shared = pManager ? pManager->GetSharedSaveGameFolder() : 0;
+		if (shared && *shared)
+			return UserPath((string(shared) + "/" + profile + "_" + save).c_str());
+		return UserPath((string("%USER%/Profiles/") + profile + "/SaveGames/" + save).c_str());
+	}
+
+	void MakeDirs(const string& campaign)
+	{
+		gEnv->pCryPak->MakeDir(UserPath(COOP_DIR).c_str());
+		gEnv->pCryPak->MakeDir(CampaignFile(campaign, "").c_str());
+	}
+
+	// the campaigns on this PC, newest first
+	void ListLocal(std::vector<SProgress>& out)
+	{
+		out.clear();
+		WIN32_FIND_DATAA fd;
+		HANDLE h = FindFirstFileA((UserPath(COOP_DIR) + "/*").c_str(), &fd);
+		if (h == INVALID_HANDLE_VALUE)
+			return;
+		do
+		{
+			if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || strlen(fd.cFileName) != 16)
+				continue;
+			SProgress p;
+			if (ReadProgress(CampaignFile(fd.cFileName, "progress.txt"), p))
+			{
+				p.campaign = fd.cFileName;
+				out.push_back(p);
+			}
+		}
+		while (FindNextFileA(h, &fd));
+		FindClose(h);
+		for (size_t i = 0; i < out.size(); ++i)
+			for (size_t j = i + 1; j < out.size(); ++j)
+				if (out[j].stamp > out[i].stamp)
+					std::swap(out[i], out[j]);
+	}
+
+	// the progress of mod 0.3 (one campaign, no id) becomes a campaign
+	void ImportLegacy()
+	{
+		SProgress p;
+		if (!ReadProgress(UserPath(LEGACY_PROGRESS), p))
+			return;
+		p.campaign = CoopRelay::RandomHex(8);
+		p.name = "Campaign (0.3)";
+		MakeDirs(p.campaign);
+		WriteProgress(CampaignFile(p.campaign, "progress.txt"), p);
+		SProgress prev;
+		if (ReadProgress(UserPath(LEGACY_PROGRESS_PREV), prev))
+		{
+			prev.campaign = p.campaign;
+			prev.name = p.name;
+			WriteProgress(CampaignFile(p.campaign, "progress_prev.txt"), prev);
+		}
+		DeleteFileA(UserPath(LEGACY_PROGRESS).c_str());
+		DeleteFileA(UserPath(LEGACY_PROGRESS_PREV).c_str());
+		CryLogAlways("[CoopSave] the co-op progress of mod 0.3 is now the campaign \"%s\"", p.name.c_str());
 	}
 
 	// ------------------------------------------------------------------
@@ -271,9 +428,14 @@ namespace
 	string s_pendingName;
 	float s_pendingFor = 0.0f;
 	float s_retryTimer = 0.0f;
-	string s_readyLevel;          // the coop level the server runs
+	string s_readyLevel;            // the coop level the server runs
 	bool s_levelStartSaved = false;
-	string s_lastSave;            // the slot written last
+	// the campaign the host plays (empty: none yet, the first checkpoint
+	// starts one)
+	string s_campaign;
+	string s_campaignName;
+	string s_lastSave;              // the savegame slot written last
+	string s_lastEngineFile;        // CryAction's file of the last savegame
 
 	const char* ShortLevelName(const char* level)
 	{
@@ -284,6 +446,18 @@ namespace
 		if (!strnicmp(p, "coop_", 5))
 			p += 5;
 		return p;
+	}
+
+	void StartCampaign(const string& name)
+	{
+		std::vector<SProgress> local;
+		ListLocal(local);
+		s_campaign = CoopRelay::RandomHex(8);
+		s_campaignName = name;
+		if (s_campaignName.empty())
+			s_campaignName.Format("Campaign %d", (int)local.size() + 1);
+		s_lastSave.clear();
+		CryLogAlways("[CoopSave] new campaign \"%s\" (%s)", s_campaignName.c_str(), s_campaign.c_str());
 	}
 
 	// the AI system writes every object into the log while it (de)serializes
@@ -371,27 +545,49 @@ namespace
 			pRules->SendTextMessage(eTextMessageInfo, msg, eRMI_ToRemoteClients);
 	}
 
-	// on the host's own screen
+	// on the host's own screen (in the game) and in the console
 	void TellHost(const char* msg)
 	{
 		CryLogAlways("[CoopSave] %s", msg);
-		if (CGameRules* pRules = g_pGame->GetGameRules())
-			pRules->OnTextMessage(eTextMessageError, msg);
+		if (g_pGame->GetIGameFramework()->IsGameStarted())
+			if (CGameRules* pRules = g_pGame->GetGameRules())
+				pRules->OnTextMessage(eTextMessageError, msg);
+	}
+
+	// a checkpoint for the cloud: "CCSV" ver progress_len progress save_len save
+	void UploadCheckpoint(const SProgress& p)
+	{
+		std::vector<char> save;
+		const string savePath = !s_lastEngineFile.empty() ? s_lastEngineFile : EngineSavePath(p.save);
+		if (!ReadFile(savePath, save) || save.empty())
+		{
+			CryLogAlways("[CoopCloud] savegame %s not found: the checkpoint stays on this PC", savePath.c_str());
+			return;
+		}
+		const string text = ProgressText(p);
+		std::vector<char> blob;
+		blob.reserve(16 + text.length() + save.size());
+		const unsigned int head[3] = { 1, (unsigned int)text.length(), 0 };
+		blob.insert(blob.end(), "CCSV", "CCSV" + 4);
+		blob.insert(blob.end(), (const char*)&head[0], (const char*)&head[0] + 8);
+		blob.insert(blob.end(), text.begin(), text.end());
+		const unsigned int saveLen = (unsigned int)save.size();
+		blob.insert(blob.end(), (const char*)&saveLen, (const char*)&saveLen + 4);
+		blob.insert(blob.end(), save.begin(), save.end());
+		CoopCloud::Upload(p.campaign, blob);
 	}
 
 	bool SaveCheckpoint(const string& name)
 	{
 		IGameFramework* pFramework = g_pGame->GetIGameFramework();
-		if (s_lastSave.empty())
-		{
-			SProgress last;
-			if (ReadProgress(PROGRESS_FILE, last))
-				s_lastSave = last.save;
-		}
+		if (s_campaign.empty())
+			StartCampaign("");
 		string save;
-		save.Format(SAVE_NAME, s_lastSave == string().Format(SAVE_NAME, 'a') ? 'b' : 'a');
+		save.Format("coop_checkpoint_%s_%c%s", s_campaign.c_str(), s_lastSave.length() > strlen(SAVE_EXT) + 1 && s_lastSave[s_lastSave.length() - strlen(SAVE_EXT) - 1] == 'a' ? 'b' : 'a', SAVE_EXT);
 
 		SProgress progress;
+		progress.campaign = s_campaign;
+		progress.name = s_campaignName;
 		progress.level = s_readyLevel;
 		progress.save = save;
 		progress.checkpoint = name;
@@ -399,11 +595,18 @@ namespace
 		const time_t now = time(0);
 		strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", localtime(&now));
 		progress.time = stamp;
-		CoopAI::CollectInventories(progress.players, false);
+		progress.stamp = (unsigned int)now;
+		if (IActor* pHost = pFramework->GetClientActor())
+		{
+			progress.host = CoopAI::PlayerKey(pHost);
+			progress.hostname = pHost->GetEntity()->GetName();
+		}
+		CoopAI::CollectInventories(progress.players, true);
 
 		std::vector<EntityId> unsaved;
 		MarkRemotePlayersUnsaved(unsaved);
 		bool ok;
+		s_lastEngineFile.clear();
 		{
 			SQuietAILog quiet;
 			const bool mp = gEnv->bMultiplayer;
@@ -418,24 +621,30 @@ namespace
 			return false;
 		}
 
-		// the previous checkpoint stays as coop_progress_prev.txt (its save is
-		// the other slot)
-		const string cur = UserPath(PROGRESS_FILE), prev = UserPath(PROGRESS_PREV_FILE);
+		// the previous checkpoint stays as progress_prev.txt (its savegame is the
+		// other slot)
+		MakeDirs(s_campaign);
+		const string cur = CampaignFile(s_campaign, "progress.txt"), prev = CampaignFile(s_campaign, "progress_prev.txt");
 		MoveFileExA(cur.c_str(), prev.c_str(), MOVEFILE_REPLACE_EXISTING);
-		WriteProgress(PROGRESS_FILE, progress);
+		WriteProgress(cur, progress);
 		s_lastSave = save;
-		CryLogAlways("[CoopSave] checkpoint %s saved: %s, %s (%d other players' equipment)", name.c_str(), progress.level.c_str(),
-			save.c_str(), (int)progress.players.size());
+		CryLogAlways("[CoopSave] checkpoint %s saved: campaign \"%s\", %s, %s (%d players' equipment)", name.c_str(), s_campaignName.c_str(),
+			progress.level.c_str(), save.c_str(), (int)progress.players.size());
 		Notify("@game_saved");
+		if (CoopCloud::Enabled())
+			UploadCheckpoint(progress);
 		return true;
 	}
 
 	// ------------------------------------------------------------------
-	// coop_continue
+	// coop_continue / coop_campaigns: the campaigns on this PC and in the
+	// cloud, the newest checkpoint of the one chosen (downloaded if the cloud
+	// has a newer one), then its level is hosted and the save loaded into it
 
 	enum ELoadState
 	{
 		eLS_None,
+		eLS_WaitMap,    // the level is about to be hosted (CoopRelay::RestartGame)
 		eLS_WaitLevel,  // the level is being hosted
 		eLS_Loading,
 	};
@@ -443,6 +652,269 @@ namespace
 	SProgress s_load;
 	float s_loadWait = 0.0f;
 	const float LOAD_TIMEOUT = 180.0f;
+
+	struct SEntry
+	{
+		string campaign, name, level, checkpoint, host;
+		unsigned int localStamp, cloudStamp;
+		bool cloudOwn, cloudPrevious;
+		SEntry() : localStamp(0), cloudStamp(0), cloudOwn(false), cloudPrevious(false) {}
+		unsigned int Stamp() const { return localStamp > cloudStamp ? localStamp : cloudStamp; }
+	};
+
+	void Merge(const std::vector<SProgress>& local, const std::vector<CoopCloud::SCampaign>& cloud, std::vector<SEntry>& out)
+	{
+		out.clear();
+		for (size_t i = 0; i < local.size(); ++i)
+		{
+			SEntry e;
+			e.campaign = local[i].campaign;
+			e.name = local[i].name;
+			e.level = local[i].level;
+			e.checkpoint = local[i].checkpoint;
+			e.host = local[i].hostname;
+			e.localStamp = local[i].stamp;
+			out.push_back(e);
+		}
+		for (size_t i = 0; i < cloud.size(); ++i)
+		{
+			const CoopCloud::SCampaign& c = cloud[i];
+			SEntry* pEntry = 0;
+			for (size_t j = 0; j < out.size() && !pEntry; ++j)
+				if (out[j].campaign == c.id)
+					pEntry = &out[j];
+			if (!pEntry)
+			{
+				out.push_back(SEntry());
+				pEntry = &out.back();
+				pEntry->campaign = c.id;
+			}
+			pEntry->cloudStamp = c.stamp;
+			pEntry->cloudOwn = c.own;
+			pEntry->cloudPrevious = c.hasPrevious;
+			if (c.stamp >= pEntry->localStamp)
+			{
+				pEntry->name = c.name;
+				pEntry->level = c.level;
+				pEntry->checkpoint = c.checkpoint;
+				pEntry->host = c.host;
+			}
+		}
+		for (size_t i = 0; i < out.size(); ++i)
+			for (size_t j = i + 1; j < out.size(); ++j)
+				if (out[j].Stamp() > out[i].Stamp())
+					std::swap(out[i], out[j]);
+	}
+
+	string Describe(const SEntry& e, int number)
+	{
+		char when[32] = "?";
+		const time_t t = (time_t)e.Stamp();
+		if (t)
+			strftime(when, sizeof(when), "%Y-%m-%d %H:%M", localtime(&t));
+		string where;
+		if (e.localStamp && e.cloudStamp)
+			where = e.cloudStamp > e.localStamp ? "this PC, newer in the cloud" : "this PC and the cloud";
+		else if (e.localStamp)
+			where = "this PC";
+		else
+			where = e.cloudOwn ? string("the cloud") : "the cloud, hosted by " + e.host;
+		string text;
+		text.Format("%d. \"%s\" - %s, checkpoint %s, %s (%s)", number, e.name.c_str(), e.level.c_str(), e.checkpoint.c_str(), when, where.c_str());
+		return text;
+	}
+
+	enum EContinueState { eCS_None, eCS_Listing, eCS_Downloading };
+	EContinueState s_contState = eCS_None;
+	bool s_contListOnly = false;        // coop_campaigns: print the list only
+	bool s_contDelete = false;          // coop_campaign_delete
+	string s_contArg;                   // the campaign asked for ("": the newest)
+	bool s_contPrev = false;
+	float s_contSince = 0.0f;
+	SEntry s_contEntry;
+	std::vector<SEntry> s_contList;
+
+	void HostCheckpoint(const SProgress& progress)
+	{
+		CryLogAlways("[CoopSave] continuing campaign \"%s\": %s, checkpoint %s (saved %s)", progress.name.c_str(), progress.level.c_str(),
+			progress.checkpoint.c_str(), progress.time.c_str());
+		s_load = progress;
+		s_loadState = eLS_WaitMap;
+		s_loadWait = 0.0f;
+		s_campaign = progress.campaign;
+		s_campaignName = progress.name;
+		s_lastSave = progress.save;
+		gEnv->pConsole->ExecuteString("exec coop_settings.cfg");
+		string cmd;
+		cmd.Format("map multiplayer/tia/coop_%s s", progress.level.c_str());
+		CoopRelay::RestartGame(cmd.c_str());
+	}
+
+	// the checkpoint of the chosen campaign on this PC (and hosted)
+	void ContinueLocal(const SEntry& e, bool prev)
+	{
+		SProgress p;
+		if (!ReadProgress(CampaignFile(e.campaign, prev ? "progress_prev.txt" : "progress.txt"), p))
+		{
+			TellHost(prev ? "This campaign has no previous checkpoint on this PC" : "The campaign's checkpoint is missing on this PC");
+			return;
+		}
+		p.campaign = e.campaign;
+		HostCheckpoint(p);
+	}
+
+	// a downloaded checkpoint: stored as the campaign's newest on this PC
+	bool ApplyDownload(const SEntry& e, const std::vector<char>& blob, bool prev)
+	{
+		unsigned int version = 0, plen = 0, slen = 0;
+		if (blob.size() < 16 || memcmp(&blob[0], "CCSV", 4))
+			return false;
+		memcpy(&version, &blob[4], 4);
+		memcpy(&plen, &blob[8], 4);
+		if (12 + (size_t)plen + 4 > blob.size())
+			return false;
+		memcpy(&slen, &blob[12 + plen], 4);
+		if (12 + (size_t)plen + 4 + slen != blob.size())
+			return false;
+		SProgress p;
+		ParseProgress(string(&blob[12], plen), p);
+		if (p.save.empty() || p.level.empty() || !CoopSave::IsCoopSaveName(p.save.c_str()))
+			return false;
+		p.campaign = e.campaign;
+		const string savePath = EngineSavePath(p.save);
+		if (!WriteFile(savePath, &blob[16 + plen], slen))
+		{
+			CryLogAlways("[CoopCloud] cannot write %s", savePath.c_str());
+			return false;
+		}
+		MakeDirs(e.campaign);
+		const string cur = CampaignFile(e.campaign, "progress.txt");
+		if (!prev)
+			MoveFileExA(cur.c_str(), CampaignFile(e.campaign, "progress_prev.txt").c_str(), MOVEFILE_REPLACE_EXISTING);
+		WriteProgress(prev ? CampaignFile(e.campaign, "progress_prev.txt") : cur, p);
+		CryLogAlways("[CoopCloud] checkpoint %s of campaign \"%s\" downloaded (%d KB)", p.checkpoint.c_str(), p.name.c_str(), (int)(blob.size() / 1024));
+		return true;
+	}
+
+	void StartListing(bool listOnly, bool remove, const string& arg, bool prev)
+	{
+		ImportLegacy();
+		s_contListOnly = listOnly;
+		s_contDelete = remove;
+		s_contArg = arg;
+		s_contPrev = prev;
+		s_contSince = gEnv->pTimer->GetAsyncCurTime();
+		s_contState = eCS_Listing;
+		if (CoopCloud::Enabled())
+		{
+			CryLogAlways("[CoopSave] looking for the campaigns (this PC and the cloud)...");
+			CoopCloud::RequestList();
+		}
+	}
+
+	// the campaign asked for: a number of the list, its name or its id
+	const SEntry* Pick(const std::vector<SEntry>& list, const string& arg)
+	{
+		if (list.empty())
+			return 0;
+		if (arg.empty())
+			return &list[0];
+		const int number = atoi(arg.c_str());
+		if (number >= 1 && number <= (int)list.size() && string().Format("%d", number) == arg)
+			return &list[number - 1];
+		for (size_t i = 0; i < list.size(); ++i)
+			if (!stricmp(list[i].name.c_str(), arg.c_str()) || !stricmp(list[i].campaign.c_str(), arg.c_str()))
+				return &list[i];
+		return 0;
+	}
+
+	void DeleteCampaign(const SEntry& e)
+	{
+		if (e.localStamp)
+		{
+			for (int slot = 0; slot < 2; ++slot)
+			{
+				string save;
+				save.Format("coop_checkpoint_%s_%c%s", e.campaign.c_str(), 'a' + slot, SAVE_EXT);
+				const string path = EngineSavePath(save);
+				DeleteFileA(path.c_str());
+				DeleteFileA((path.substr(0, path.length() - strlen(SAVE_EXT)) + ".xml").c_str());
+			}
+			DeleteFileA(CampaignFile(e.campaign, "progress.txt").c_str());
+			DeleteFileA(CampaignFile(e.campaign, "progress_prev.txt").c_str());
+			RemoveDirectoryA(CampaignFile(e.campaign, "").c_str());
+		}
+		if (e.cloudStamp)
+			CoopCloud::RequestDelete(e.campaign);
+		CryLogAlways("[CoopSave] campaign \"%s\" deleted%s", e.name.c_str(), e.cloudStamp ? (e.cloudOwn ? " (also from the cloud)" : " (and off your cloud list)") : "");
+		if (e.campaign == s_campaign)
+			s_campaign.clear();
+	}
+
+	void UpdateContinue()
+	{
+		if (s_contState == eCS_Listing)
+		{
+			std::vector<CoopCloud::SCampaign> cloud;
+			const CoopCloud::EStatus status = CoopCloud::Enabled() ? CoopCloud::ListStatus(&cloud) : CoopCloud::eS_Failed;
+			const bool timedOut = gEnv->pTimer->GetAsyncCurTime() - s_contSince > 8.0f;
+			if (status == CoopCloud::eS_Busy && !timedOut)
+				return;
+			s_contState = eCS_None;
+			std::vector<SProgress> local;
+			ListLocal(local);
+			Merge(local, cloud, s_contList);
+			if (s_contListOnly)
+			{
+				if (s_contList.empty())
+					CryLogAlways("No co-op campaigns yet. Start one with: coop_host");
+				for (size_t i = 0; i < s_contList.size(); ++i)
+					CryLogAlways("%s", Describe(s_contList[i], (int)i + 1).c_str());
+				if (status != CoopCloud::eS_Done && CoopCloud::Enabled())
+					CryLogAlways("(the cloud did not answer: campaigns on this PC only)");
+				return;
+			}
+			const SEntry* pEntry = Pick(s_contList, s_contArg);
+			if (!pEntry)
+			{
+				CryLogAlways(s_contList.empty() ? "No saved co-op progress. Start a new game with: coop_host"
+					: "No such campaign (coop_campaigns lists them)");
+				return;
+			}
+			s_contEntry = *pEntry;
+			if (s_contDelete)
+			{
+				DeleteCampaign(s_contEntry);
+				return;
+			}
+			const bool cloudNewer = s_contEntry.cloudStamp > s_contEntry.localStamp && (!s_contPrev || s_contEntry.cloudPrevious);
+			if (cloudNewer)
+			{
+				CryLogAlways("[CoopSave] downloading the campaign's checkpoint from the cloud...");
+				CoopCloud::RequestDownload(s_contEntry.campaign, s_contPrev ? 1 : 0);
+				s_contState = eCS_Downloading;
+				return;
+			}
+			ContinueLocal(s_contEntry, s_contPrev);
+		}
+		else if (s_contState == eCS_Downloading)
+		{
+			std::vector<char> blob;
+			const CoopCloud::EStatus status = CoopCloud::DownloadStatus(&blob);
+			if (status == CoopCloud::eS_Busy)
+				return;
+			s_contState = eCS_None;
+			if (status == CoopCloud::eS_Done && ApplyDownload(s_contEntry, blob, s_contPrev))
+				ContinueLocal(s_contEntry, s_contPrev);
+			else if (s_contEntry.localStamp)
+			{
+				CryLogAlways("[CoopSave] the cloud's checkpoint is not available: continuing from the one on this PC");
+				ContinueLocal(s_contEntry, s_contPrev);
+			}
+			else
+				CryLogAlways("[CoopSave] the campaign could not be downloaded");
+		}
+	}
 
 	void LoadNow()
 	{
@@ -473,29 +945,98 @@ namespace
 		}
 		if (!limitRestored)
 			TellHost("Friends may not be able to join this game: if they cannot, host it again with coop_continue");
-		s_lastSave = s_load.save;
-		CoopAI::SetInventoryCarry(s_load.level.c_str(), s_load.players);
+		// whoever hosts now gets his own equipment (the save has the one of
+		// the player who hosted then, who gets his back when he joins)
+		std::map<string, CoopAI::SInventory> carry = s_load.players;
+		if (IActor* pHost = pFramework->GetClientActor())
+		{
+			const string key = CoopAI::PlayerKey(pHost);
+			std::map<string, CoopAI::SInventory>::iterator own = carry.find(key);
+			if (key != s_load.host && own != carry.end())
+			{
+				CoopAI::GiveInventory(pHost, own->second, true);
+				CryLogAlways("[CoopSave] %s hosts this time: his own equipment (%d items)", pHost->GetEntity()->GetName(), (int)own->second.items.size());
+			}
+			if (own != carry.end())
+				carry.erase(own);
+		}
+		CoopAI::SetInventoryCarry(s_load.level.c_str(), carry);
 		CoopAI::OnGameLoaded();
 		CryLogAlways("[CoopSave] progress loaded: %s, checkpoint %s (saved %s)", s_load.level.c_str(), s_load.checkpoint.c_str(), s_load.time.c_str());
 	}
 
-	void CmdContinue(IConsoleCmdArgs* pArgs)
+	// coop_host [level] [campaign name]: a new campaign
+	void CmdHost(IConsoleCmdArgs* pArgs)
 	{
-		const bool prev = pArgs->GetArgCount() > 1 && !stricmp(pArgs->GetArg(1), "prev");
-		SProgress progress;
-		if (!ReadProgress(prev ? PROGRESS_PREV_FILE : PROGRESS_FILE, progress))
+		const char* level = LEVELS[0];
+		int first = 1;
+		if (pArgs->GetArgCount() > 1)
 		{
-			CryLogAlways("No saved co-op progress%s. Start a new game with: coop_host", prev ? " (previous checkpoint)" : "");
-			return;
+			const char* arg = pArgs->GetArg(1);
+			const int number = atoi(arg);
+			for (int i = 0; i < 11; ++i)
+				if (number == i + 1 || !stricmp(arg, LEVELS[i]))
+				{
+					level = LEVELS[i];
+					first = 2;
+				}
 		}
-		CryLogAlways("[CoopSave] continuing: %s, checkpoint %s (saved %s)", progress.level.c_str(), progress.checkpoint.c_str(), progress.time.c_str());
-		s_load = progress;
-		s_loadState = eLS_WaitLevel;
-		s_loadWait = 0.0f;
+		string name;
+		for (int i = first; i < pArgs->GetArgCount(); ++i)
+			name += (name.empty() ? "" : " ") + string(pArgs->GetArg(i));
+		ImportLegacy();
+		StartCampaign(name);
+		s_loadState = eLS_None;
+		s_contState = eCS_None;
 		gEnv->pConsole->ExecuteString("exec coop_settings.cfg");
 		string cmd;
-		cmd.Format("map multiplayer/tia/coop_%s s", progress.level.c_str());
-		gEnv->pConsole->ExecuteString(cmd.c_str());
+		cmd.Format("map multiplayer/tia/coop_%s s", level);
+		CoopRelay::RestartGame(cmd.c_str());
+	}
+
+	// coop_continue [campaign] [prev]
+	void CmdContinue(IConsoleCmdArgs* pArgs)
+	{
+		string arg;
+		bool prev = false;
+		for (int i = 1; i < pArgs->GetArgCount(); ++i)
+		{
+			if (!stricmp(pArgs->GetArg(i), "prev"))
+				prev = true;
+			else
+				arg += (arg.empty() ? "" : " ") + string(pArgs->GetArg(i));
+		}
+		StartListing(false, false, arg, prev);
+	}
+
+	// coop_load [prev]: the host goes back to the last checkpoint of the
+	// campaign he plays; the friends join again by themselves
+	void CmdLoad(IConsoleCmdArgs* pArgs)
+	{
+		if (s_campaign.empty())
+		{
+			CryLogAlways("coop_load: no campaign is being played (coop_continue picks one)");
+			return;
+		}
+		StartListing(false, false, s_campaign, pArgs->GetArgCount() > 1 && !stricmp(pArgs->GetArg(1), "prev"));
+	}
+
+	void CmdCampaigns(IConsoleCmdArgs*)
+	{
+		StartListing(true, false, "", false);
+	}
+
+	void CmdDelete(IConsoleCmdArgs* pArgs)
+	{
+		string arg;
+		for (int i = 1; i < pArgs->GetArgCount(); ++i)
+			arg += (arg.empty() ? "" : " ") + string(pArgs->GetArg(i));
+		if (arg.empty())
+		{
+			CryLogAlways("usage: coop_campaign_delete <number or name>   (see coop_campaigns)");
+			return;
+		}
+		StartListing(false, true, arg, false);
 	}
 
 	void CmdSave(IConsoleCmdArgs*)
@@ -515,8 +1056,14 @@ void CoopSave::Init()
 {
 	s_pCheckpoints = gEnv->pConsole->RegisterInt("coop_checkpoints", 1, 0,
 		"Crysis Coop: 1 = the host saves the campaign progress at its checkpoints and at every level start (coop_continue)");
+	gEnv->pConsole->AddCommand("coop_host", CmdHost, 0,
+		"Crysis Coop: host a new co-op campaign: coop_host [level] [campaign name]  (default: the first level)");
 	gEnv->pConsole->AddCommand("coop_continue", CmdContinue, 0,
-		"Crysis Coop: host the co-op campaign from the last checkpoint (coop_continue prev: the one before)");
+		"Crysis Coop: host a co-op campaign from its last checkpoint: coop_continue [number or name] [prev]  (default: the newest)");
+	gEnv->pConsole->AddCommand("coop_load", CmdLoad, 0,
+		"Crysis Coop: the host goes back to the last checkpoint (coop_load prev: the one before); friends join again by themselves");
+	gEnv->pConsole->AddCommand("coop_campaigns", CmdCampaigns, 0, "Crysis Coop: the co-op campaigns on this PC and in the cloud");
+	gEnv->pConsole->AddCommand("coop_campaign_delete", CmdDelete, 0, "Crysis Coop: delete a co-op campaign: coop_campaign_delete <number or name>");
 	gEnv->pConsole->AddCommand("coop_save", CmdSave, 0, "Crysis Coop: the host saves the co-op progress now");
 }
 
@@ -527,17 +1074,30 @@ void CoopSave::OnLoadingStart(const char* levelName)
 	s_levelStartSaved = false;
 	// coop_continue: some other level than the saved one (coop_host, a level
 	// change): no load then
-	if (s_loadState == eLS_WaitLevel && stricmp(ShortLevelName(levelName), s_load.level.c_str()))
+	if ((s_loadState == eLS_WaitMap || s_loadState == eLS_WaitLevel) && stricmp(ShortLevelName(levelName), s_load.level.c_str()))
 	{
 		CryLogAlways("[CoopSave] %s is not the saved level %s: continue cancelled", levelName, s_load.level.c_str());
 		s_loadState = eLS_None;
 	}
+	else if (s_loadState == eLS_WaitMap)
+		s_loadState = eLS_WaitLevel;
 }
 
 void CoopSave::OnLevelReady(const char* levelName)
 {
 	s_readyLevel = ShortLevelName(levelName);
 	s_levelStartSaved = s_loadState == eLS_WaitLevel;
+}
+
+void CoopSave::OnEngineSave(const char* file)
+{
+	if (!IsCoopSaveName(file))
+		return;
+	s_lastEngineFile = UserPath(file);
+	// the folder and profile prefix the downloaded savegames go to
+	const char* name = CryStringUtils::stristr(s_lastEngineFile.c_str(), "coop_checkpoint_");
+	if (name)
+		s_engineSaveDir = s_lastEngineFile.substr(0, name - s_lastEngineFile.c_str());
 }
 
 void CoopSave::RequestCheckpoint(const char* name)
@@ -563,7 +1123,10 @@ bool CoopSave::IsCoopSaveName(const char* name)
 
 void CoopSave::Update(float frameTime)
 {
-	if (!gEnv->bServer || s_readyLevel.empty() || !g_pGame)
+	if (!g_pGame)
+		return;
+	UpdateContinue();
+	if (!gEnv->bServer || s_readyLevel.empty())
 		return;
 	IGameFramework* pFramework = g_pGame->GetIGameFramework();
 

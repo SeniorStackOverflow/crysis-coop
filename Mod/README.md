@@ -36,8 +36,9 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/SeniorStackOverflo
 coop_host
 ```
 
-The campaign starts from the first level. To start from another level, give its name:
+A new campaign starts from the first level. To start from another level, give its name:
 `coop_host village`. The levels are island, village, rescue, harbor, tank, mine, core, ice, sphere, ascension and fleet (or `1`–`11`).
+A name for the campaign may follow: `coop_host island With Sasha`.
 
 To carry on where you stopped last time, the host types instead
 
@@ -45,15 +46,15 @@ To carry on where you stopped last time, the host types instead
 coop_continue
 ```
 
-When the level has loaded, a code appears on the screen, for example `Co-op code: 64117`.
+When the level has loaded, a code appears on the screen, for example `Co-op code: 382615`. It is always the same code for the same host.
 
 **Friend:** start **Crysis Coop**, open the console and type the host's code:
 
 ```
-coop_join 64117
+coop_join 382615
 ```
 
-The friend appears next to the host once the host has landed or finished the level's intro. At the end of a level, everybody goes on to the next one together, and the code stays the same.
+Next time `coop_join` alone joins the same host again. The friend appears next to the host once the host has landed or finished the level's intro. At the end of a level, everybody goes on to the next one together.
 
 ## Saving
 
@@ -62,26 +63,49 @@ campaign: at every level start and at the campaign's checkpoints ("Game
 saved" on everybody's screen). The host can also save at any moment with
 `coop_save`.
 
-`coop_continue` hosts the game from the last checkpoint: the level with
-everything done in it so far, the host where he was. Friends join with the
-new code as usual and get back the weapons they had at that checkpoint.
-`coop_continue prev` goes back one checkpoint more.
+* `coop_continue` hosts the newest campaign from its last checkpoint: the level
+  with everything done in it so far, the host where he was. Friends get back the
+  weapons they had at that checkpoint.
+* `coop_load` goes back to the last checkpoint in the middle of the game.
+* When the host's game restarts (`coop_load`, `coop_continue`, a new game) or
+  his connection drops, the friends' games wait for him and join again by
+  themselves: "The host is loading the game".
 
-The progress lives in the host's `Documents\My Games\Crysis\SaveGames`
-(`coop_progress.txt` and the `coop_checkpoint_*` saves). A new game with
-`coop_host` overwrites it at its first checkpoint.
+**Campaigns.** Every `coop_host` starts a campaign of its own; a new game never
+overwrites an old one.
+
+* `coop_campaigns` lists them (numbered, newest first).
+* `coop_continue 2` or `coop_continue With Sasha` picks one.
+* `prev` goes one checkpoint further back: `coop_continue prev`, `coop_load prev`.
+* `coop_campaign_delete 3` deletes one.
+
+**Cloud.** Every checkpoint is also kept on the mod's server, for everybody who
+played in that campaign.
+
+* The campaign is not tied to one PC: any friend who played in it can
+  `coop_continue` it as the host (his game downloads the newest checkpoint). The
+  others join him as usual.
+* `coop_cloud 0` keeps your checkpoints on your PC only.
+
+The progress lives in `Documents\My Games\Crysis\SaveGames`: the `coop` folder
+and the `coop_checkpoint_*` saves.
 
 ## Console commands
 
 | Command | |
 |---|---|
-| `coop_host [level]` | host a new co-op game |
-| `coop_continue` | host the game from the last checkpoint |
+| `coop_host [level] [name]` | host a new co-op campaign |
+| `coop_continue [number or name] [prev]` | host a campaign from its last checkpoint |
+| `coop_load [prev]` | back to the last checkpoint (host, during the game) |
 | `coop_save` | save now (host) |
-| `coop_join <code>` | join a friend's game |
+| `coop_campaigns` | the campaigns on this PC and in the cloud |
+| `coop_campaign_delete <number or name>` | delete a campaign |
+| `coop_join [code]` | join a friend's game (no code: the last one) |
+| `coop_leave` | leave the friend's game |
 | `coop_relay_status` | the code, who is connected, latency |
 | `coop_tp` | teleport to the leader (if stuck) |
 | `coop_status` | players and their state |
+| `coop_cloud 0` | no checkpoints on the server |
 | `coop_direct 0` | never connect directly, always through the relay |
 | `coop_english_keyboard 0` | keep the system keyboard layout in the game window |
 
