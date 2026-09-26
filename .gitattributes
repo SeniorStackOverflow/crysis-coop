@@ -3,3 +3,5 @@
 *.h linguist-language=C++
 *.h.in linguist-language=C++
 *.ico binary
+*.py text eol=lf
+*.sh text eol=lf
