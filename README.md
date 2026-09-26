@@ -68,10 +68,10 @@ The files:
 | `Code/Mod/` | the game DLL (`Coop.dll`), based on the CryENGINE 2 Mod SDK game code. The coop work is mostly in `CoopAI.cpp`, `CoopRelay.cpp`, `CoopSave.cpp`, `CoopCloud.cpp`, `CoopMenu.cpp`, `Nodes/CoopFlowNodes.cpp`, plus hooks in the stock files |
 | `Code/CryEngine/` | engine interface headers from the SDK |
 | `Mod/` | the mod's Lua scripts and configs (copied to `Mods/Coop`) |
-| `Launcher/` | `CrysisCoop.exe`: starts the game with the mod, checks what the mod needs first |
+| `Launcher/` | `CrysisCoop.exe`: starts the game with the mod, checks what the mod needs first, and updates the mod by itself (`Update.cpp`: signed manifest, from the VPS or GitHub) |
 | `Installer/` | `install.ps1`, `install.bat`, `uninstall.ps1`; `install_linux.py` for Linux (the game under Wine) |
 | `Relay/` | the relay server (Python, no dependencies: tunnel, codes, cloud checkpoints) and its deployment |
-| `tools/` | `package.ps1` (release archive), `lua_check.py` |
+| `tools/` | `package.ps1` (release archive and signed update), `publish_update.ps1` (update to the VPS), `update_key.ps1` (the release key), `lua_check.py` |
 
 The co-op levels are **not** in this repository or in the releases: the installer builds them from the player's own
 game files.
@@ -87,12 +87,15 @@ build_coop.bat
 ```
 
 This builds the 32-bit `Coop.dll` and the launcher `CrysisCoop.exe`, and copies them, together with `Mod/`, into
-`..\Mods\Coop` (the launcher also into the game folder). Run the game with `..\CrysisCoop.exe`, or
+`..\Mods\Coop` (the launcher also into the game folder) and marks it as a development build (`Mods\Coop\noupdate`:
+the launcher does not replace it with a release). Run the game with `..\CrysisCoop.exe`, or
 `Bin32\Crysis.exe -mod Coop` ([C1-Launcher](https://github.com/ccomrade/c1-launcher) is required). Edit scripts and
 configs in `Mod/`, not in `Mods\Coop`.
 
-`tools\package.ps1` makes the release archive in `dist\`. The GitHub workflow builds the DLL and attaches the archive
-to a release when a `v*` tag is pushed.
+`tools\package.ps1` makes the release archive in `dist\`, and the automatic update in `dist\update-v<version>\`
+(signed with the release key from `tools\update_key.ps1`, kept on the publishing PC only).
+`tools\publish_update.ps1` puts the update on the VPS; every player's launcher installs it at its next start. The
+GitHub workflow builds the DLL and the launcher and attaches the archive to a release when a `v*` tag is pushed.
 
 The relay server: see [Relay/README.md](Relay/README.md). The mod uses `wss://crysis.46-225-103-75.sslip.io/` by
 default. Point the `coop_relay` cvar at your own relay to use that instead.

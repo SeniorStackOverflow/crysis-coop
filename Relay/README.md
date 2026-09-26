@@ -17,6 +17,7 @@ provider's firewall drops everything else, and nothing else is needed.
 * `coop_relay.py` is the service (Python 3, no dependencies). Its docstring describes the protocol.
 * `crysis-coop-relay.service` is the systemd unit.
 * `crysis-coop.caddy` is the Caddy site. It goes into `/etc/caddy/conf.d/`, which the main Caddyfile imports.
+  It also serves the mod's automatic updates from `/srv/crysis-coop-update` at `/update/` (see below).
 * Mod side: `Code/Mod/CoopRelay.cpp` (tunnel, codes, rejoining) and `Code/Mod/CoopCloud.cpp` (checkpoints).
 * `test_protocol.py <url>` checks a running relay (codes, rejoining, cloud rights, protocol 1).
 
@@ -47,9 +48,25 @@ sudo install -m 0755 coop_relay.py /srv/crysis-coop-relay/
 sudo install -m 0644 crysis-coop-relay.service /etc/systemd/system/
 sudo install -m 0644 crysis-coop.caddy /etc/caddy/conf.d/
 sudo systemctl daemon-reload && sudo systemctl enable --now crysis-coop-relay
+sudo mkdir -p /srv/crysis-coop-update && sudo chown "$USER" /srv/crysis-coop-update
 sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy
 journalctl -u crysis-coop-relay -f
 ```
+
+## Updates
+
+The mod's launcher (`Launcher/Update.cpp`) asks `https://<this host>/update/update.txt` at every start, and GitHub's
+latest release when this host does not answer. When the manifest names a newer version, it downloads the package
+next to it and installs it before the game starts, without asking the player.
+
+* `update.txt` is signed with the release key (`tools/update_key.ps1`, kept on the publishing PC only). The
+  launcher installs nothing that is not signed by it, and checks the package's SHA-256 and size from the
+  manifest. A broken or taken-over server can make it skip an update, never install something else.
+* Publishing: `tools/package.ps1` (writes `dist/update-v<version>/`), then `tools/publish_update.ps1` (uploads
+  the package, then renames `update.txt` into place; keeps the last 3 packages). Attach the same two files to the
+  GitHub release as well.
+* Going back: put an older version's files there again. The launchers never install an older version than the
+  one they have, so this only stops further updates; fix forward with a newer version.
 
 ## Limits
 

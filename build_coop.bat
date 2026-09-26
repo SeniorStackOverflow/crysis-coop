@@ -34,4 +34,6 @@ copy /Y Installer\uninstall.ps1 "..\Mods\Coop\uninstall.ps1" >nul
 rem the launcher: in the mod (the installer's copy) and in the game folder
 copy /Y build\Bin32\CrysisCoop.exe "..\Mods\Coop\CrysisCoop.exe" >nul || exit /b 1
 copy /Y build\Bin32\CrysisCoop.exe "..\CrysisCoop.exe" >nul || exit /b 1
+rem a development build: the launcher must not replace it with a release
+echo Development build: CrysisCoop.exe does not update the mod while this file exists.> "..\Mods\Coop\noupdate"
 echo BUILD_OK

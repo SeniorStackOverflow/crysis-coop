@@ -1,4 +1,12 @@
 crysis.46-225-103-75.sslip.io {
+	# Crysis Coop: the mod's automatic updates (signed files only), /srv/crysis-coop-update
+	handle_path /update/* {
+		root * /srv/crysis-coop-update
+		header Cache-Control "no-cache"
+		file_server
+	}
 	# Crysis Coop relay (WebSocket), /srv/crysis-coop-relay
-	reverse_proxy 127.0.0.1:64190
+	handle {
+		reverse_proxy 127.0.0.1:64190
+	}
 }

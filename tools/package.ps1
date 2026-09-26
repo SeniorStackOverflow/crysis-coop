@@ -10,6 +10,14 @@ Builds the release archive dist\Crysis-Coop-v<version>.zip:
 No game files: the installer builds the co-op levels from the player's own
 copy of Crysis.
 
+And the automatic update (see Launcher/Update.cpp) in dist\update-v<version>\:
+  Crysis-Coop-v<version>-update.bin  every file of Mods\Coop above
+  update.txt                         version, package, size, SHA-256, signed
+                                     with the release key (tools/update_key.ps1);
+                                     without the key it is not written
+tools\publish_update.ps1 puts them on the update server, and both go into
+the GitHub release as well.
+
   -Dll       the built Coop.dll (default: build\Bin32\Coop.dll, or the
              Visual Studio generator's build\Bin32\Release\Coop.dll)
   -Version   default: the project version in CMakeLists.txt
@@ -74,3 +82,41 @@ try {
     $archive.Dispose()
 }
 Write-Host "$zip ($([math]::Round((Get-Item -LiteralPath $zip).Length / 1MB, 2)) MB)"
+
+# ---- the automatic update: "CCUP1\n", the file count, then per file the
+# path length, the path (UTF-8, '/'), the size, the bytes (u32 little endian)
+$updateDir = Join-Path $dist "update-v$Version"
+if (Test-Path -LiteralPath $updateDir) { Remove-Item -LiteralPath $updateDir -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $updateDir | Out-Null
+$files = @(Get-ChildItem -LiteralPath $mod -Recurse -File)
+$stream = New-Object IO.MemoryStream
+$writer = New-Object IO.BinaryWriter($stream)
+$writer.Write([Text.Encoding]::ASCII.GetBytes("CCUP1`n"))
+$writer.Write([uint32]$files.Count)
+foreach ($f in $files) {
+    $path = [Text.Encoding]::UTF8.GetBytes($f.FullName.Substring($mod.Length + 1).Replace('\', '/'))
+    $bytes = [IO.File]::ReadAllBytes($f.FullName)
+    $writer.Write([uint32]$path.Length)
+    $writer.Write($path)
+    $writer.Write([uint32]$bytes.Length)
+    $writer.Write($bytes)
+}
+$writer.Flush()
+$package = "Crysis-Coop-v$Version-update.bin"
+$packageBytes = $stream.ToArray()
+[IO.File]::WriteAllBytes((Join-Path $updateDir $package), $packageBytes)
+$sha = -join ([Security.Cryptography.SHA256]::Create().ComputeHash($packageBytes) | ForEach-Object { $_.ToString('x2') })
+$body = "Crysis Coop update`nversion $Version`npackage $package`nsize $($packageBytes.Length)`nsha256 $sha`n"
+
+$keyFile = Join-Path $env:USERPROFILE '.crysis-coop\update_signing_key.bin'
+if (Test-Path -LiteralPath $keyFile) {
+    Add-Type -AssemblyName System.Core
+    $key = [Security.Cryptography.CngKey]::Import([IO.File]::ReadAllBytes($keyFile), [Security.Cryptography.CngKeyBlobFormat]::EccPrivateBlob)
+    $ecdsa = New-Object Security.Cryptography.ECDsaCng($key)
+    $ecdsa.HashAlgorithm = [Security.Cryptography.CngAlgorithm]::Sha256
+    $signature = -join ($ecdsa.SignData([Text.Encoding]::ASCII.GetBytes($body)) | ForEach-Object { $_.ToString('x2') })
+    [IO.File]::WriteAllBytes((Join-Path $updateDir 'update.txt'), [Text.Encoding]::ASCII.GetBytes("$body" + "signature $signature`n"))
+    Write-Host "$updateDir ($($files.Count) files, $([math]::Round($packageBytes.Length / 1MB, 2)) MB, signed)"
+} else {
+    Write-Warning "No release key ($keyFile): update.txt is not written, the launchers will not take this version by themselves."
+}

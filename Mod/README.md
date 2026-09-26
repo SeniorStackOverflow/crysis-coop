@@ -28,6 +28,13 @@ starts the plain game. If something the mod needs is missing, it says what and h
 passed on to the game (`CrysisCoop.exe -dx10`, `CrysisCoop.exe +coop_join 123456`). For Steam or GOG Galaxy, add
 `CrysisCoop.exe` as a game or program of its own.
 
+**Updates are automatic.** At every start the launcher checks for a new version of the mod and installs it before
+the game starts (a small window shows while it downloads). So you and your friends always play the same version,
+without downloading anything. The updates come from the mod's server, or from GitHub when that one does not
+answer, and only ones signed with the mod's release key are installed. Offline, the game simply starts as it is.
+To turn it off, start `CrysisCoop.exe -coop_noupdate` or create an empty file `Mods\Coop\noupdate`; what the
+updater did is in `Mods\Coop\update.log`.
+
 Without downloading the archive first (PowerShell):
 
 ```powershell

@@ -11,10 +11,17 @@
 //
 // -coop_check: only the checks, no window and no game; the exit code says
 // what is missing (0 ready, see EExit). The installer uses it.
+//
+// Before the game starts, the mod updates itself when a newer release is out
+// (Update.cpp; -coop_noupdate skips it, -coop_update_only updates without
+// starting the game: exit code 0 up to date, 10 updated, 11 skipped, 12
+// failed).
 #include <windows.h>
 
 #include <string>
 #include <vector>
+
+#include "Update.h"
 
 namespace
 {
@@ -119,6 +126,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR args, int)
 	{
 		return Fail(eExit_NoMod, L"The Crysis Coop mod is not installed (Mods\\Coop\\Bin32\\Coop.dll is missing). Run the mod's installer:",
 			L"Мод Crysis Coop не установлен (нет Mods\\Coop\\Bin32\\Coop.dll). Запустите установщик мода:", reinstall);
+	}
+	if (!s_quiet)
+	{
+		const Update::EResult update = Update::Run(game, extra);
+		static const int UPDATE_EXIT[] = { 0, 10, 11, 12 };      // up to date, updated, skipped, failed
+		if (HasArg(extra, L"-coop_update_only"))
+			return UPDATE_EXIT[update];
 	}
 	if (!Exists(mod + L"\\Game\\Levels\\Multiplayer\\TIA\\coop_island\\coop_island.xml"))
 	{

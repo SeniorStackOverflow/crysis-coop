@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.15)
 ################################################################################
 
 project(Coop
-	VERSION 0.6.1.0
+	VERSION 0.7.0.0
 	DESCRIPTION "Crysis co-op campaign"
 	HOMEPAGE_URL "https://github.com/SeniorStackOverflow/crysis-coop"
 	LANGUAGES CXX RC
@@ -263,6 +263,7 @@ target_link_options(${CMAKE_PROJECT_NAME} PRIVATE "/MAP:${PROJECT_BINARY_DIR}/Co
 add_executable(CrysisCoop WIN32
 	Launcher/Launcher.cpp
 	Launcher/Launcher.rc
+	Launcher/Update.cpp
 )
 
 set_source_files_properties(Launcher/Launcher.rc PROPERTIES OBJECT_DEPENDS
@@ -272,4 +273,4 @@ target_include_directories(CrysisCoop PRIVATE ${PROJECT_BINARY_DIR})
 target_compile_definitions(CrysisCoop PRIVATE UNICODE _UNICODE)
 # the Russian messages are UTF-8
 target_compile_options(CrysisCoop PRIVATE /utf-8)
-target_link_libraries(CrysisCoop PRIVATE version)
+target_link_libraries(CrysisCoop PRIVATE version winhttp bcrypt)
