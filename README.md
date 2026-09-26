@@ -1,154 +1,90 @@
 ![](logo.jpg)
 
-# Crysis Mod SDK
+# Crysis Coop
 
-Create your own Mod DLL for [Crysis (2007)](https://en.wikipedia.org/wiki/Crysis_(video_game)) using modern tools.
+The **Crysis (2007) single player campaign in co-op** for 2–4 players, built as a
+Crysis mod (C++ game DLL, Lua and configs).
 
-## Getting started
+* The host plays the campaign exactly as in single player: AI, story scripts, cutscenes, objectives, level to level.
+* Friends join over the internet with a short code (`coop_join 64117`). Nobody has to open or forward ports.
+* The game connects the players directly when it can (UDP hole punching), otherwise through a small relay server.
 
-You will need a computer **that can run Crysis** with Windows 10 or later.
+*Русское описание для игроков: [Mod/README_RU.md](Mod/README_RU.md)*
 
-Older versions of Windows are also fine as long as they run the tools mentioned below.
-Linux can also be used, but it requires a special setup (Wine + DXVK + MSVC in Wine), which is not described here.
+## Install and play
 
-### Install Crysis (2007)
-
-Ideally from [GOG](https://www.gog.com/game/crysis), but [Steam](https://store.steampowered.com/app/17300/Crysis/)
-and [EA](https://www.ea.com/games/crysis/crysis) are fine too.
-
-DVD version can also be used, but then you need to install [1.2](https://comrade.one/Crysis_Patch_1_2.exe) and
-[1.2.1](https://comrade.one/Crysis_Patch_1_2_1.exe) official patches.
-
-> [!TIP]
-> Replace the original Crysis executables with [C1-Launcher](https://github.com/ccomrade/c1-launcher).
-> It provides various quality of life improvements and simply makes the game work.
->
-> This is a recommended but optional step. If the original executables work on your computer, you can use them.
-
-### Install Git
+Download the latest [release](https://github.com/SeniorStackOverflow/crysis-coop/releases/latest), extract it and
+run `install.bat`, or run this in PowerShell:
 
 ```powershell
-winget install -e --id Git.Git
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/SeniorStackOverflow/crysis-coop/releases/latest/download/install.ps1 | iex"
 ```
 
-### Install MSVC toolchain and CMake
+* Host: start the **Crysis Coop** shortcut, open the console (`~`) and type `coop_host`.
+* Friend: start **Crysis Coop** and type `coop_join <the code the host sees>`.
 
-> [!NOTE]
-> If you already have Visual Studio 2019 or later with **Desktop development with C++** workload installed,
-> you can skip this step.
+Needs Crysis 1.2.1 (GOG, Steam, EA; DVD + patches) on Windows 8 or later. Each player needs their own copy of the game.
+The player guide is in [Mod/README.md](Mod/README.md).
 
-```powershell
-winget install -e --id Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --includeRecommended --add Microsoft.VisualStudio.Workload.VCTools"
-```
+## How it works
 
-### Install Visual Studio Code (VS Code)
+Crysis 1 has no co-op. The mod runs the single player levels as network maps.
 
-```powershell
-winget install -e --id Microsoft.VisualStudioCode
-```
+* **Server side.** The host's game runs the full single player simulation:
+  * the AI system (the engine switches it off in network games);
+  * the level flow graphs and story;
+  * the gamerules of the campaign.
+* **Clients.** They receive what the stock network code does not carry:
+  * AI actions and shots;
+  * cutscenes and HUD/flow effects (mirrored flow nodes);
+  * objectives, map markers, usable objects;
+  * player placement by scripts;
+  * nanosuit modes.
+* **Campaign.** Level changes keep everybody connected, and inventories and campaign state carry over.
 
-After the installation, open VS Code, go to Extensions, and install **C/C++ Extension Pack** to get the following:
+The files:
 
-![](Docs/Images/vscode_cpp_extensions.png)
+| Path | |
+|---|---|
+| `Code/Mod/` | the game DLL (`Coop.dll`), based on the CryENGINE 2 Mod SDK game code. The coop work is mostly in `CoopAI.cpp`, `CoopRelay.cpp`, `Nodes/CoopFlowNodes.cpp`, plus hooks in the stock files |
+| `Code/CryEngine/` | engine interface headers from the SDK |
+| `Mod/` | the mod's Lua scripts and configs (copied to `Mods/Coop`) |
+| `Installer/` | `install.ps1`, `install.bat`, `uninstall.ps1` |
+| `Relay/` | the relay server (Python, no dependencies) and its deployment |
+| `tools/` | `package.ps1` (release archive), `lua_check.py` |
 
-For more information, see the [official documentation](https://code.visualstudio.com/docs/cpp/config-msvc).
-
-### Clone the repository
-
-> [!IMPORTANT]
-> The repository (project) folder must be inside Crysis folder.
->
-> For example: `C:\GOG Games\Crysis\c1-mod-sdk`
->
-> Crysis folder is expected to be writable without admin rights, so please avoid "Program Files".
-
-#### Using command line
-
-Change into Crysis folder:
-
-```powershell
-cd "C:\GOG Games\Crysis"
-```
-
-And clone the repository:
-
-```powershell
-git clone "https://github.com/ccomrade/c1-mod-sdk.git"
-```
-
-#### Using VS Code
-
-With no folder open, click Clone Repository, use this repository URL, and select Crysis folder as the destination.
-
-#### Using GitHub.com
-
-Just click **Code > Download ZIP** above and extract it into Crysis folder.
-Note that Git is not needed this way, but it also means that no version control is available.
-
-### Open the project
-
-Open the folder created in the previous step in VS Code. That's it.
+The co-op levels are **not** in this repository or in the releases: the installer builds them from the player's own
+game files.
 
 ## Building
 
-In CMake view, select the configuration you want to use:
+Requirements:
+* Visual Studio 2019 or later, or its Build Tools, with the "Desktop development with C++" workload.
+* The repository cloned into the Crysis folder, e.g. `C:\GOG Games\Crysis\crysis-coop`.
 
-![](Docs/Images/vscode_cmake_configure.png)
-
-And run the build:
-
-![](Docs/Images/vscode_cmake_build.png)
-
-Or use the status bar button:
-
-![](Docs/Images/vscode_cmake_build_other.png)
-
-### Building via command line
-
-You can also run the build without VS Code. It requires MSVC toolchain command line:
-
-![](Docs/Images/open_dev_powershell.png)
-
-Change into the project folder:
-
-```powershell
-cd "C:\GOG Games\Crysis\c1-mod-sdk"
+```bat
+build_coop.bat
 ```
 
-Available configurations can be viewed using:
+This builds the 32-bit `Coop.dll` and copies it, together with `Mod/`, into `..\Mods\Coop`. Run the game with
+`Bin32\Crysis.exe -mod Coop` ([C1-Launcher](https://github.com/ccomrade/c1-launcher) is required). Edit scripts and
+configs in `Mod/`, not in `Mods\Coop`.
 
-```powershell
-cmake --list-presets
-```
+`tools\package.ps1` makes the release archive in `dist\`. The GitHub workflow builds the DLL and attaches the archive
+to a release when a `v*` tag is pushed.
 
-Prepare the selected configuration:
+The relay server: see [Relay/README.md](Relay/README.md). The mod uses `wss://crysis.46-225-103-75.sslip.io/` by
+default. Point the `coop_relay` cvar at your own relay to use that instead.
 
-```powershell
-cmake --preset release-bin64
-```
+## Credits
 
-Run the build:
+* [c1-mod-sdk](https://github.com/ccomrade/c1-mod-sdk) by ccomrade: the CryENGINE 2 Mod SDK set up for modern MSVC, on which this project is built.
+* [C1-Launcher](https://github.com/ccomrade/c1-launcher) by ccomrade: required to run the mod.
 
-```powershell
-cmake --build ..\Mods\MyMod\Bin64
-```
+## License
 
-## Debugging
+The game code is based on the CryENGINE 2 Mod SDK and is distributed under its license, [LICENSE.txt](LICENSE.txt).
+Free distribution only, and a legal copy of Crysis is required.
 
-Go to Run and Debug view in VS Code, select what you want to debug, and launch it:
-
-![](Docs/Images/vscode_debug_selection.png)
-
-## Running
-
-You can also run your mod without VS Code:
-
-```powershell
-..\Bin32\Crysis.exe -mod MyMod
-```
-
-Add `-dx9` or `-dx10` to run the game in DX9 or DX10 mode. By default, it runs in DX10 mode.
-
-To run 64-bit version, use `Bin64` instead of `Bin32`.
-
-To run a dedicated server, use `CrysisDedicatedServer.exe` instead of `Crysis.exe`.
+This site is not endorsed by or affiliated with Crytek or Electronic Arts. Trademarks are the property of their
+respective owners. Game content copyright Crytek.
