@@ -12,6 +12,9 @@
 // -coop_check: only the checks, no window and no game; the exit code says
 // what is missing (0 ready, see EExit). The installer uses it.
 //
+// The game runs on 4 CPUs (GameAffinity: Crysis plays no sound on CPUs with
+// many; -coop_allcpus gives it all of them).
+//
 // Before the game starts, the mod updates itself when a newer release is out
 // (Update.cpp; -coop_noupdate skips it, -coop_update_only updates without
 // starting the game: exit code 0 up to date, 10 updated, 11 skipped, 12
@@ -85,6 +88,47 @@ namespace
 				return dir;
 		}
 		return L"";
+	}
+
+	// Crysis plays no sound on CPUs with many logical processors (the old
+	// CrysisLauncher.exe's fix, 12 of them on the user's PC). The game gets
+	// 4, one per physical core where the system says which is which, so
+	// hyper-threads do not share a core
+	DWORD_PTR GameAffinity()
+	{
+		const int COUNT = 4;
+		DWORD_PTR process = 0, system = 0;
+		if (!GetProcessAffinityMask(GetCurrentProcess(), &process, &system) || !process)
+			return 0;
+		int available = 0;
+		for (DWORD_PTR m = process; m; m &= m - 1)
+			++available;
+		if (available <= COUNT)
+			return 0;
+		DWORD_PTR mask = 0;
+		int n = 0;
+		DWORD len = 0;
+		GetLogicalProcessorInformation(nullptr, &len);
+		std::vector<SYSTEM_LOGICAL_PROCESSOR_INFORMATION> cores(len / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) + 1);
+		len = (DWORD)(cores.size() * sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION));
+		if (GetLogicalProcessorInformation(cores.data(), &len))
+			for (DWORD i = 0; i < len / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) && n < COUNT; ++i)
+			{
+				const DWORD_PTR own = cores[i].ProcessorMask & process;
+				if (cores[i].Relationship == RelationProcessorCore && own)
+				{
+					mask |= own & (~own + 1);       // the core's first logical processor
+					++n;
+				}
+			}
+		// fewer cores than that (or no information): more logical processors
+		for (DWORD_PTR bit = 1; bit && n < COUNT; bit <<= 1)
+			if ((process & bit) && !(mask & bit))
+			{
+				mask |= bit;
+				++n;
+			}
+		return mask;
 	}
 
 	std::wstring ProductName(const std::wstring& file)
@@ -166,11 +210,19 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR args, int)
 	PROCESS_INFORMATION pi = {};
 	std::vector<wchar_t> line(cmd.begin(), cmd.end());
 	line.push_back(0);
-	if (!CreateProcessW(exe.c_str(), line.data(), nullptr, nullptr, FALSE, 0, nullptr, game.c_str(), &si, &pi))
+	// started suspended: the CPUs are set before the game's first instruction
+	// (-coop_allcpus: all of them)
+	const DWORD_PTR affinity = HasArg(extra, L"-coop_allcpus") ? 0 : GameAffinity();
+	if (!CreateProcessW(exe.c_str(), line.data(), nullptr, nullptr, FALSE, affinity ? CREATE_SUSPENDED : 0, nullptr, game.c_str(), &si, &pi))
 	{
 		wchar_t code[32];
 		wsprintfW(code, L" (error %lu)", GetLastError());
 		return Fail(eExit_StartFailed, L"The game could not be started:", L"Не удалось запустить игру:", exe + code);
+	}
+	if (affinity)
+	{
+		SetProcessAffinityMask(pi.hProcess, affinity);
+		ResumeThread(pi.hThread);
 	}
 	AllowSetForegroundWindow(pi.dwProcessId);
 	CloseHandle(pi.hThread);

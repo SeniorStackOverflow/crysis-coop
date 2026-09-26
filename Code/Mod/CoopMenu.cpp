@@ -75,14 +75,48 @@ namespace
 		s_noteUntil = Now() + 8.0f;
 	}
 
-	// ---- drawing (virtual 800x600)
+	// ---- drawing: the menu is laid out on an 800x600 page that keeps its
+	// shape on any screen (scaled by the smaller of width/800 and height/600,
+	// centered). IUIDraw's own 800x600 space stretches with the screen, and
+	// each primitive goes its own way (measured at 1280x720): an image keeps
+	// its aspect around its stretched center, text is scaled by height/600
+	// from the top left. So every call is given what lands on the page.
+	struct SView
+	{
+		float sx = 1, sy = 1;       // IUIDraw's scale: screen width/800, height/600
+		float s = 1;                // the page's scale
+		float ox = 0, oy = 0;       // the page's top left on the screen (pixels)
+	} s_view;
+
+	void UpdateView()
+	{
+		const float w = (float)(std::max)(1, gEnv->pRenderer->GetWidth()), h = (float)(std::max)(1, gEnv->pRenderer->GetHeight());
+		s_view.sx = w / W;
+		s_view.sy = h / H;
+		s_view.s = (std::min)(s_view.sx, s_view.sy);
+		s_view.ox = (w - W * s_view.s) * 0.5f;
+		s_view.oy = (h - H * s_view.s) * 0.5f;
+	}
+
 	void Rect(float x, float y, float w, float h, float r, float g, float b, float a)
 	{
+		// an image (X, Y, w, h) lands at left sx*X + (sx - sy)*w/2, top sy*Y,
+		// size sy*w x sy*h: scaled by the height, centered where the stretched
+		// one would be (measured at 1280x720 and 1000x800)
+		const float iw = w * s_view.s / s_view.sy, ih = h * s_view.s / s_view.sy;
+		const float ix = (s_view.ox + s_view.s * x - (s_view.sx - s_view.sy) * iw * 0.5f) / s_view.sx;
+		const float iy = (s_view.oy + s_view.s * y) / s_view.sy;
 		if (s_white > 0)
-			s_pUI->DrawImage(s_white, x, y, w, h, 0.0f, r, g, b, a);
+			s_pUI->DrawImage(s_white, ix, iy, iw, ih, 0.0f, r, g, b, a);
 		else
-			s_pUI->DrawQuad(x, y, w, h, s_pUI->GetColorARGB((uint8)(a * 255), (uint8)(r * 255), (uint8)(g * 255), (uint8)(b * 255)),
+			s_pUI->DrawQuad(ix, iy, iw, ih, s_pUI->GetColorARGB((uint8)(a * 255), (uint8)(r * 255), (uint8)(g * 255), (uint8)(b * 255)),
 				0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, false);
+	}
+
+	// the whole screen, not just the page
+	void FillScreen(float r, float g, float b, float a)
+	{
+		Rect(-s_view.ox / s_view.s, -s_view.oy / s_view.s, W * s_view.sx / s_view.s, H * s_view.sy / s_view.s, r, g, b, a);
 	}
 
 	void Frame(float x, float y, float w, float h, float r, float g, float b, float a)
@@ -97,7 +131,10 @@ namespace
 	void Text(float x, float y, float size, const char* text, float r = 0.86f, float g = 0.95f, float b = 0.86f, float a = 1.0f, EAlign align = eA_Left)
 	{
 		const EUIDRAWHORIZONTAL h = align == eA_Center ? UIDRAWHORIZONTAL_CENTER : align == eA_Right ? UIDRAWHORIZONTAL_RIGHT : UIDRAWHORIZONTAL_LEFT;
-		s_pUI->DrawText(s_pFont, x, y, size, size, text, a, r, g, b, UIDRAWHORIZONTAL_LEFT, UIDRAWVERTICAL_TOP, h, UIDRAWVERTICAL_TOP);
+		// text: position and size times height/600
+		const float k = 1.0f / s_view.sy;
+		s_pUI->DrawText(s_pFont, (s_view.ox + s_view.s * x) * k, (s_view.oy + s_view.s * y) * k, size * s_view.s * k, size * s_view.s * k,
+			text, a, r, g, b, UIDRAWHORIZONTAL_LEFT, UIDRAWVERTICAL_TOP, h, UIDRAWVERTICAL_TOP);
 	}
 
 	bool Hover(float x, float y, float w, float h)
@@ -434,7 +471,7 @@ namespace
 	void DrawPanel()
 	{
 		// the rest of the screen is dimmed: the panel has the input
-		Rect(0, 0, W, H, 0.0f, 0.0f, 0.0f, 0.55f);
+		FillScreen(0.0f, 0.0f, 0.0f, 0.55f);
 		Rect(PX, PY, PW, PH, 0.02f, 0.05f, 0.03f, 0.94f);
 		Frame(PX, PY, PW, PH, 0.35f, 0.85f, 0.40f, 1.0f);
 		Rect(PX, PY, PW, 40, 0.07f, 0.18f, 0.08f, 1.0f);
@@ -570,9 +607,10 @@ namespace
 
 	void ToVirtual(int x, int y, float& vx, float& vy)
 	{
-		const float w = (float)(std::max)(1, gEnv->pRenderer->GetWidth()), h = (float)(std::max)(1, gEnv->pRenderer->GetHeight());
-		vx = x * W / w;
-		vy = y * H / h;
+		// window pixels to the page (see UpdateView)
+		UpdateView();
+		vx = (x - s_view.ox) / s_view.s;
+		vy = (y - s_view.oy) / s_view.s;
 	}
 
 	// the menu texts the mod changes (Network > Quick game is the co-op game).
@@ -696,6 +734,7 @@ void CoopMenu::RenderMenu(bool inGame)
 		return;
 	s_drawnFrame = gEnv->pRenderer->GetFrameID(false);
 	s_hits.clear();
+	UpdateView();
 	s_pUI->PreRender();
 	DrawPanel();
 	s_pUI->PostRender();

@@ -26,7 +26,8 @@ Run `install.bat` from the release archive. The installer:
 The launcher starts the game with the mod (`Bin32\Crysis.exe -mod Coop -dx9`), the way the game's own shortcut
 starts the plain game. If something the mod needs is missing, it says what and how to fix it. Its arguments are
 passed on to the game (`CrysisCoop.exe -dx10`, `CrysisCoop.exe +coop_join 123456`). For Steam or GOG Galaxy, add
-`CrysisCoop.exe` as a game or program of its own.
+`CrysisCoop.exe` as a game or program of its own. The game gets 4 of the CPU's cores: Crysis plays no sound on
+CPUs with many threads (`-coop_allcpus` gives it all of them).
 
 **Updates are automatic.** At every start the launcher checks for a new version of the mod and installs it before
 the game starts (a small window shows while it downloads). So you and your friends always play the same version,
@@ -129,6 +130,7 @@ The same without the menu (the console opens with `~`):
 | `coop_cloud 0` | no checkpoints on the server |
 | `coop_direct 0` | never connect directly, always through the relay |
 | `coop_english_keyboard 0` | keep the system keyboard layout in the game window |
+| `coop_trace 1` | for a bug report: from the next level loaded on, this PC writes a detailed trace to `coop_trace_server.log` (host) or `coop_trace_client.log` (friend) in the game folder, about 200 KB a minute. Off by default |
 
 ## Connection
 
