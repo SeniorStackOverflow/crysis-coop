@@ -1,0 +1,4 @@
+crysis.46-225-103-75.sslip.io {
+	# Crysis Coop relay (WebSocket), /srv/crysis-coop-relay
+	reverse_proxy 127.0.0.1:64190
+}
