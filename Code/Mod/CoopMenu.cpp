@@ -756,6 +756,11 @@ void CoopMenu::RenderMenu(bool inGame)
 	s_hits.clear();
 	UpdateView();
 	s_pUI->PreRender();
+	// IUIDraw's images are depth tested against the game's scene: over the
+	// in-game menu, a character near the camera cut through the panel (the
+	// text, which is not depth tested, stayed on top). Nothing of the scene
+	// is drawn after the menu, so its depth can go
+	gEnv->pRenderer->ClearBuffer(FRT_CLEAR_DEPTH | FRT_CLEAR_IMMEDIATE, nullptr);
 	DrawPanel();
 	s_pUI->PostRender();
 }
