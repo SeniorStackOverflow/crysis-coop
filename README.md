@@ -87,8 +87,9 @@ build_coop.bat
 ```
 
 This builds the 32-bit `Coop.dll` and the launcher `CrysisCoop.exe`, and copies them, together with `Mod/`, into
-`..\Mods\Coop` (the launcher also into the game folder) and marks it as a development build (`Mods\Coop\noupdate`:
-the launcher does not replace it with a release). Run the game with `..\CrysisCoop.exe`, or
+`..\Mods\Coop` (the launcher also into the game folder). The launcher updates this copy like any other only when a
+newer release than the build is out (keep your build's version ahead, or use `-coop_noupdate`). Run the game with
+`..\CrysisCoop.exe`, or
 `Bin32\Crysis.exe -mod Coop` ([C1-Launcher](https://github.com/ccomrade/c1-launcher) is required). Edit scripts and
 configs in `Mod/`, not in `Mods\Coop`.
 
