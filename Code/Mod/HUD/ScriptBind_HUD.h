@@ -43,6 +43,7 @@ protected:
 	virtual int CoopIsVehicleCrewHostile(IFunctionHandler *pH, ScriptHandle vehicleId);
 	virtual int CoopIsAirborne(IFunctionHandler *pH, ScriptHandle playerId);
 	virtual int CoopIsPlayingCutscene(IFunctionHandler *pH);
+	virtual int CoopReviveState(IFunctionHandler *pH, int op, ScriptHandle targetId, ScriptHandle reviverId, float seconds);
 	virtual int DrawStatusText(IFunctionHandler *pH, const char* pText);
 	virtual int ReloadLevel(IFunctionHandler *pH);
 	virtual int ReloadLevelSavegame(IFunctionHandler *pH);

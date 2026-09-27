@@ -33,6 +33,7 @@ History:
 #include "SoundMoods.h"
 #include "IWorldQuery.h"
 #include "ShotValidator.h"
+#include "CoopRevive.h"
 
 #include <StlUtils.h>
 
@@ -1243,6 +1244,14 @@ IMPLEMENT_RMI(CGameRules, ClCoopSync)
 //------------------------------------------------------------------------
 IMPLEMENT_RMI(CGameRules, SvCoopSync)
 {
+	// Crysis Coop: a client's use key on a downed teammate (the sender is
+	// the channel's player)
+	if (params.kind == 13)
+	{
+		if (CActor* pActor = GetActorByChannelId(m_pGameFramework->GetGameChannelId(pNetChannel)))
+			CoopRevive::OnInputFromClient(pActor->GetEntityId(), params.name.c_str(), params.op == 1);
+		return true;
+	}
 	CoopAI::OnSyncMirror(params.kind, params.op, params.entity, params.name.c_str(), params.text.c_str(), params.type, params.f, true);
 	return true;
 }

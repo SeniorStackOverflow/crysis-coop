@@ -9,7 +9,11 @@ CoopConfig =
 	TEAM_NAME = "black",                -- US nanosuit models (stock TIA team)
 	START_TIMER = 3,
 
-	RESPAWN_DELAY = 8,                  -- seconds dead before auto-respawn
+	RESPAWN_DELAY = 8,                  -- seconds dead before auto-respawn (coop_auto_respawn 1)
+	REVIVE_TIME = 3,                    -- seconds a teammate holds the use key next to a downed player
+	REVIVE_RANGE = 4.5,                 -- m between them (Coop.dll's use key: 4)
+	REVIVE_HEALTH = 0.5,                -- part of his health a revived player gets back
+	ALL_DOWN_DELAY = 6,                 -- seconds everybody is down before the last checkpoint loads
 	SPAWN_INVULNERABILITY = 5,          -- seconds of invulnerability after (re)spawn
 	SPAWN_RADIUS = 2.5,                 -- meters from the leader
 	SPAWN_Z_OFFSET = 0.5,

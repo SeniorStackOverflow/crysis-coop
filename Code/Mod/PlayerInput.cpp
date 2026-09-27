@@ -17,6 +17,7 @@
 #include "HUD/HUD.h"
 #include "GameRules.h"
 #include "CoopAI.h"
+#include "CoopRevive.h"
 
 #include <IWorldQuery.h>
 #include <IInteractor.h>
@@ -146,6 +147,10 @@ void CPlayerInput::OnAction( const ActionId& actionId, int activationMode, float
 	FUNCTION_PROFILER(GetISystem(), PROFILE_GAME);
 
 	CoopAI::TraceInput(actionId.c_str(), activationMode, value);
+
+	// Crysis Coop: the use key next to a downed teammate revives him
+	if (actionId == g_pGame->Actions().use && CoopRevive::OnUse(m_pPlayer, activationMode))
+		return;
 
 	m_pPlayer->GetGameObject()->ChangedNetworkState( INPUT_ASPECT );
 

@@ -13,6 +13,7 @@
 *************************************************************************/
 #include "StdAfx.h"
 #include "CoopAI.h"
+#include "CoopRevive.h"
 #include "ScriptBind_HUD.h"
 #include "HUD.h"
 #include "IGameObject.h"
@@ -71,6 +72,7 @@ void CScriptBind_HUD::RegisterMethods()
 	SCRIPT_REG_TEMPLFUNC(CoopIsVehicleCrewHostile, "vehicleId");
 	SCRIPT_REG_TEMPLFUNC(CoopIsAirborne, "playerId");
 	SCRIPT_REG_FUNC(CoopIsPlayingCutscene);
+	SCRIPT_REG_TEMPLFUNC(CoopReviveState, "op, targetId, reviverId, seconds");
 	SCRIPT_REG_FUNC(ReloadLevel);
 	SCRIPT_REG_FUNC(ReloadLevelSavegame);
 	SCRIPT_REG_FUNC(TacWarning);
@@ -190,6 +192,13 @@ int CScriptBind_HUD::CoopIsVehicleCrewHostile(IFunctionHandler *pH, ScriptHandle
 int CScriptBind_HUD::CoopIsAirborne(IFunctionHandler *pH, ScriptHandle playerId)
 {
 	return pH->EndFunction(CoopAI::IsAirborne((EntityId)playerId.n));
+}
+
+// the revive state from the rules (see CoopRevive::OnState)
+int CScriptBind_HUD::CoopReviveState(IFunctionHandler *pH, int op, ScriptHandle targetId, ScriptHandle reviverId, float seconds)
+{
+	CoopRevive::OnState(op, (EntityId)targetId.n, (EntityId)reviverId.n, seconds, true);
+	return pH->EndFunction();
 }
 
 int CScriptBind_HUD::CoopIsPlayingCutscene(IFunctionHandler *pH)

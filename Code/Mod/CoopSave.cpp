@@ -14,6 +14,7 @@
 
 #include "StdAfx.h"
 #include "CoopSave.h"
+#include "CoopRevive.h"
 #include "CoopAI.h"
 #include "CoopCloud.h"
 #include "CoopRelay.h"
@@ -1129,6 +1130,10 @@ void CoopSave::RequestCheckpoint(const char* name)
 	s_pendingFor = 0.0f;
 	s_retryTimer = 0.0f;
 	CryLogAlways("[CoopSave] checkpoint %s reached", s_pendingName.c_str());
+	// the downed come back at a checkpoint of the story the others reach (not
+	// at "Save now": that would get around being revived)
+	if (s_pendingName != "manual")
+		CoopRevive::OnCheckpoint();
 }
 
 bool CoopSave::IsLoadPending()

@@ -371,7 +371,7 @@ end
 -- 6. revive (replaces InstantAction:RevivePlayer, which needs SpawnPoints
 --    that SP levels don't have)
 --------------------------------------------------------------------------
-function TeamInstantAction:RevivePlayer(channelId, player, keepEquip)
+function TeamInstantAction:RevivePlayer(channelId, player, keepEquip, atPos, atAng)
 	if (not player or not player.actor) then
 		return false;
 	end
@@ -382,6 +382,10 @@ function TeamInstantAction:RevivePlayer(channelId, player, keepEquip)
 	self:AutoAssignTeam(player);
 	local teamId = self:CoopTeamId();
 	local pos, ang, found = self:CoopGetSpawnTransform(player);
+	-- revived by a teammate: where he fell (see section 15)
+	if (atPos) then
+		pos, ang, found = atPos, atAng or ang, true;
+	end
 	local isHost = (g_localActorId ~= nil and player.id == g_localActorId);
 	if (isHost and not found) then
 		if (self.coopHostSpawned and not player:IsDead() and player.actor:GetSpectatorMode() == 0) then
@@ -723,11 +727,15 @@ function TeamInstantAction:CoopTick()
 		self:CoopRecordAnchor();
 	end
 
-	local players = self.game:GetPlayers();
-	if (players) then
-		for i,p in ipairs(players) do
-			if (p.actor and p:IsDead() and p.death_time and (_time - p.death_time) >= C.RESPAWN_DELAY) then
-				self:RevivePlayer(p.actor:GetChannel(), p);
+	if (self:CoopReviveMode()) then
+		self:CoopTickDowned();
+	else
+		local players = self.game:GetPlayers();
+		if (players) then
+			for i,p in ipairs(players) do
+				if (p.actor and p:IsDead() and p.death_time and (_time - p.death_time) >= C.RESPAWN_DELAY) then
+					self:RevivePlayer(p.actor:GetChannel(), p);
+				end
 			end
 		end
 	end
@@ -1059,6 +1067,7 @@ end
 function TeamInstantAction.Server.InGame:OnUpdate(frameTime)
 	TeamInstantAction.Server.OnUpdate(self, frameTime);
 	self:CheckTimeLimit();
+	self:CoopUpdateRevives();
 end
 
 function TeamInstantAction.Server.PostGame:OnBeginState()
@@ -1381,3 +1390,162 @@ function TeamInstantAction.Client:OnRevive(playerId, pos, rot, teamId)
 end
 
 CoopLog("gamerules overrides applied");
+
+--------------------------------------------------------------------------
+-- 15. downed players and reviving them (coop_auto_respawn 0, the default)
+--  A player who dies stays down. A teammate brings him back by holding the
+--  use key next to him for REVIVE_TIME (Coop.dll's CoopRevive: the key, the
+--  HUD, the network); he gets up where he fell. When everybody is down, the
+--  host goes back to the last checkpoint, as in the campaign. The downed also
+--  come back at a checkpoint the others reach, so a body nobody can get to
+--  (the sea, a chasm) is not a dead end.
+--------------------------------------------------------------------------
+function TeamInstantAction:CoopReviveMode()
+	return (tonumber(System.GetCVar("coop_auto_respawn")) or 0) == 0;
+end
+
+local function CoopDistance(a, b)
+	local p = CopyVec(a:GetWorldPos(g_Vectors.temp_v1));
+	local q = b:GetWorldPos(g_Vectors.temp_v2);
+	local dx, dy, dz = p.x - q.x, p.y - q.y, p.z - q.z;
+	return math.sqrt(dx*dx + dy*dy + dz*dz);
+end
+
+-- a player in the game: not a spectator (a joiner waiting for the intro)
+local function CoopInGame(p)
+	return p and p.actor and p.actor:GetSpectatorMode() == 0;
+end
+
+-- a dead player's click does not bring him back here
+local stockRequestRevive = TeamInstantAction.Server.RequestRevive;
+function TeamInstantAction.Server:RequestRevive(entityId)
+	if (self:CoopReviveMode()) then
+		return;
+	end
+	if (stockRequestRevive) then
+		stockRequestRevive(self, entityId);
+	end
+end
+
+-- Coop.dll: a player's use key on a downed teammate, pressed or let go
+function TeamInstantAction:CoopReviveInput(reviverId, targetId, press)
+	if (not self:CoopReviveMode()) then
+		return;
+	end
+	self.coopRevives = self.coopRevives or {};
+	local reviver, target = System.GetEntity(reviverId), System.GetEntity(targetId);
+	if (not reviver or not target) then
+		return;
+	end
+	local running = self.coopRevives[target.id];
+	if (not press) then
+		if (running and running.by == reviver.id) then
+			self.coopRevives[target.id] = nil;
+			HUD.CoopReviveState(2, target.id, reviver.id, 0);
+		end
+		return;
+	end
+	if (running or not CoopInGame(reviver) or not CoopInGame(target) or reviver:IsDead() or not target:IsDead()) then
+		return;
+	end
+	if (CoopDistance(reviver, target) > C.REVIVE_RANGE) then
+		return;
+	end
+	self.coopRevives[target.id] = { by = reviver.id, t0 = _time };
+	CoopLog(tostring(reviver:GetName()).." revives "..tostring(target:GetName()));
+	HUD.CoopReviveState(1, target.id, reviver.id, C.REVIVE_TIME);
+end
+
+-- every frame: a revive goes on while the reviver stays next to him
+function TeamInstantAction:CoopUpdateRevives()
+	if (not self.coopRevives) then
+		return;
+	end
+	for targetId, r in pairs(self.coopRevives) do
+		local target, reviver = System.GetEntity(targetId), System.GetEntity(r.by);
+		if (not target or not reviver or not CoopInGame(target) or not target:IsDead() or reviver:IsDead()
+			or CoopDistance(reviver, target) > C.REVIVE_RANGE + 1) then
+			self.coopRevives[targetId] = nil;
+			HUD.CoopReviveState(2, targetId, r.by, 0);
+		elseif (_time - r.t0 >= C.REVIVE_TIME) then
+			self.coopRevives[targetId] = nil;
+			-- up where he fell, looking the way his teammate does
+			local pos = CopyVec(target:GetWorldPos(g_Vectors.temp_v1));
+			pos.z = pos.z + 0.3;
+			local ang = CopyVec(reviver:GetWorldAngles(g_Vectors.temp_v2));
+			if (self:RevivePlayer(target.actor:GetChannel(), target, false, pos, ang)) then
+				target.actor:SetHealth(math.max(1, target.actor:GetMaxHealth() * C.REVIVE_HEALTH));
+				CoopLog(tostring(reviver:GetName()).." revived "..tostring(target:GetName()));
+				self.game:SendTextMessage(TextMessageInfo, tostring(reviver:GetName()).." revived "..tostring(target:GetName()), TextMessageToAll);
+			end
+			HUD.CoopReviveState(3, targetId, r.by, 0);
+		end
+	end
+end
+
+-- every second: who went down, and everybody down -> the last checkpoint
+function TeamInstantAction:CoopTickDowned()
+	self.coopDownSeen = self.coopDownSeen or {};
+	local alive, down = 0, 0;
+	for i,p in ipairs(self.game:GetPlayers() or {}) do
+		if (CoopInGame(p)) then
+			if (p:IsDead()) then
+				down = down + 1;
+				if (not self.coopDownSeen[p.id]) then
+					self.coopDownSeen[p.id] = true;
+					CoopLog(tostring(p:GetName()).." is down");
+					self.game:SendTextMessage(TextMessageInfo, tostring(p:GetName()).." is down", TextMessageToAll);
+				end
+			else
+				alive = alive + 1;
+				self.coopDownSeen[p.id] = nil;
+			end
+		end
+	end
+	if (down == 0 or alive > 0) then
+		if (self.coopAllDownAt) then
+			self.coopAllDownAt = nil;
+			self.coopAllDownLoading = nil;
+			HUD.CoopReviveState(5, NULL_ENTITY, NULL_ENTITY, 0);
+		end
+		return;
+	end
+	if (not self.coopAllDownAt) then
+		self.coopAllDownAt = _time + C.ALL_DOWN_DELAY;
+		CoopLog("everybody is down: back to the last checkpoint in "..C.ALL_DOWN_DELAY.." s");
+		HUD.CoopReviveState(4, NULL_ENTITY, NULL_ENTITY, C.ALL_DOWN_DELAY);
+	elseif (not self.coopAllDownLoading and _time >= self.coopAllDownAt) then
+		self.coopAllDownLoading = _time;
+		CoopLog("everybody is down: loading the last checkpoint");
+		System.ExecuteCommand("coop_load");
+	elseif (self.coopAllDownLoading and _time - self.coopAllDownLoading > 15) then
+		-- nothing was loaded (no campaign here): everybody comes back instead
+		CoopLog("everybody is down, no checkpoint to go back to: everybody comes back");
+		self.coopAllDownAt = nil;
+		self.coopAllDownLoading = nil;
+		HUD.CoopReviveState(5, NULL_ENTITY, NULL_ENTITY, 0);
+		self:CoopReviveAllDowned("no checkpoint");
+	end
+end
+
+-- the downed come back next to the others (Coop.dll: a checkpoint of the
+-- story was reached); the host first, the friends then join him
+function TeamInstantAction:CoopReviveAllDowned(reason)
+	local list = {};
+	for i,p in ipairs(self.game:GetPlayers() or {}) do
+		if (CoopInGame(p) and p:IsDead()) then
+			if (p.id == g_localActorId) then
+				table.insert(list, 1, p);
+			else
+				table.insert(list, p);
+			end
+		end
+	end
+	for i,p in ipairs(list) do
+		CoopLog(tostring(p:GetName()).." comes back ("..tostring(reason)..")");
+		if (self.coopRevives) then
+			self.coopRevives[p.id] = nil;
+		end
+		self:RevivePlayer(p.actor:GetChannel(), p);
+	end
+end

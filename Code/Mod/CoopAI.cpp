@@ -32,6 +32,7 @@
 #include "CoopRelay.h"
 #include "CoopSave.h"
 #include "CoopMenu.h"
+#include "CoopRevive.h"
 #include "Game.h"
 #include "GameCVars.h"
 #include "GameRules.h"
@@ -1510,6 +1511,7 @@ void CoopAI::Init()
 	CoopRelay::Init();
 	CoopSave::Init();
 	CoopMenu::Init();
+	CoopRevive::Init();
 	if (gEnv->pConsole && !s_pTrace)
 	{
 		// off for players (~200 KB a minute). Per machine: a host's trace no
@@ -3898,7 +3900,7 @@ namespace
 // map/radar markers and cutscenes follow the host (server -> clients)
 namespace
 {
-	enum ESyncKind { eSync_Radar = 1, eSync_Sequence = 2, eSync_TimeOfDay = 3, eSync_Hide = 5, eSync_AIState = 6, eSync_Progress = 7, eSync_DebugLook = 8, eSync_HostPlayer = 9, eSync_Usable = 10, eSync_PlayerSeat = 11, eSync_SuitMode = 12 };
+	enum ESyncKind { eSync_Radar = 1, eSync_Sequence = 2, eSync_TimeOfDay = 3, eSync_Hide = 5, eSync_AIState = 6, eSync_Progress = 7, eSync_DebugLook = 8, eSync_HostPlayer = 9, eSync_Usable = 10, eSync_PlayerSeat = 11, eSync_SuitMode = 12, eSync_Revive = 13 };
 	// client: the host's player (the campaign's player; the others are extra)
 	EntityId s_hostPlayerId = 0;
 	// debugging (client): the local player's camera is kept on this entity
@@ -5644,6 +5646,12 @@ void CoopAI::OnSyncMirror(int kind, int op, uint32 entity, const char* name, con
 {
 	if (fromClient && (kind != eSync_Radar || op != 1))
 		return;
+	if (kind == eSync_Revive)
+	{
+		// the server's revive state (a client's use key goes to CGameRules::SvCoopSync)
+		CoopRevive::OnStateFromServer(op, name, text, f);
+		return;
+	}
 	if (kind == eSync_Radar)
 	{
 		// entity ids match on both sides for level entities; the name catches

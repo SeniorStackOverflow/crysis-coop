@@ -58,6 +58,7 @@ add_library(${CMAKE_PROJECT_NAME} MODULE
 	Code/Mod/CoopCloud.cpp
 	Code/Mod/CoopMenu.cpp
 	Code/Mod/CoopRelay.cpp
+	Code/Mod/CoopRevive.cpp
 	Code/Mod/CoopSave.cpp
 	Code/Mod/CoopWebSocket.cpp
 	Code/Mod/CompatibilityAlienMovementController.cpp

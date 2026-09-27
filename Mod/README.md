@@ -142,7 +142,14 @@ blocked UDP), the game keeps going through the relay.
 
 ## Good to know
 
-* A dead player comes back next to a teammate after 8 seconds.
+* **Nobody comes back by himself.** A player who dies is down and waits for a teammate: walk up to him and hold
+  **F** (use) for 3 seconds, and he gets up where he fell, with half his health. The HUD shows who is down and how
+  far, the "Hold F" prompt next to him, and the progress.
+* **When everybody is down**, the game goes back to the last checkpoint after a few seconds, as in the campaign
+  (the friends join again by themselves).
+* The downed also come back next to the others at the next checkpoint of the story, so a body nobody can reach is
+  no dead end. The host's console `coop_auto_respawn 1` brings back the old rule (the dead come back by themselves
+  after 8 seconds).
 * Enemies, objectives, cutscenes and the story are the host's. Friends see and play them with him.
 * If the host leaves, the game ends for everyone.
 * The host and his friends need exactly the same version of the mod: the game refuses a friend with another one,

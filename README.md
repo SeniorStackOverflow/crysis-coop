@@ -65,7 +65,7 @@ The files:
 
 | Path | |
 |---|---|
-| `Code/Mod/` | the game DLL (`Coop.dll`), based on the CryENGINE 2 Mod SDK game code. The coop work is mostly in `CoopAI.cpp`, `CoopRelay.cpp`, `CoopSave.cpp`, `CoopCloud.cpp`, `CoopMenu.cpp`, `Nodes/CoopFlowNodes.cpp`, plus hooks in the stock files |
+| `Code/Mod/` | the game DLL (`Coop.dll`), based on the CryENGINE 2 Mod SDK game code. The coop work is mostly in `CoopAI.cpp`, `CoopRelay.cpp`, `CoopSave.cpp`, `CoopCloud.cpp`, `CoopMenu.cpp`, `CoopRevive.cpp`, `Nodes/CoopFlowNodes.cpp`, plus hooks in the stock files |
 | `Code/CryEngine/` | engine interface headers from the SDK |
 | `Mod/` | the mod's Lua scripts and configs (copied to `Mods/Coop`) |
 | `Launcher/` | `CrysisCoop.exe`: starts the game with the mod, checks what the mod needs first, and updates the mod by itself (`Update.cpp`: signed manifest, from the VPS or GitHub) |

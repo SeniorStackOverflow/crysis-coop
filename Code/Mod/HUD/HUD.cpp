@@ -20,6 +20,7 @@ History:
 *************************************************************************/
 #include "StdAfx.h"
 #include "CoopMenu.h"
+#include "CoopRevive.h"
 #include "CoopAI.h"
 #include <StlUtils.h>
 #include <ctype.h>
@@ -3597,6 +3598,7 @@ void CHUD::OnPostUpdate(float frameTime)
 		}
 
 		CoopMenu::RenderHud(m_pUIDraw, m_pDefaultFont);
+		CoopRevive::RenderHud(m_pUIDraw, m_pDefaultFont);
 
 		m_pUIDraw->PostRender();
 	}
