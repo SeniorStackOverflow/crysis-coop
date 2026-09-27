@@ -473,12 +473,25 @@ namespace
 		sendto(s, buf, payload + 2, 0, (const sockaddr*)&to, sizeof(to));
 	}
 
+	// an agent's thread ends within a moment of Stop (CCoopWebSocket::Abort
+	// wakes its receive). The main thread waits this long at most: a thread
+	// still stuck after it (a dead connection) is let go with its object
+	const DWORD AGENT_STOP_WAIT_MS = 3000;
+
+	bool WaitDone(const std::atomic<bool>& done)
+	{
+		for (DWORD start = GetTickCount(); !done; Sleep(10))
+			if (GetTickCount() - start > AGENT_STOP_WAIT_MS)
+				return false;
+		return true;
+	}
+
 	// --------------------------------------------------------------------
 	// host: the tunnel, the direct paths and one local socket per friend
 	class CHostAgent
 	{
 	public:
-		CHostAgent() : m_stop(false), m_state(HS_RESTARTING), m_gamePort(64087), m_useDirect(true), m_direct(INVALID_SOCKET)
+		CHostAgent() : m_stop(false), m_done(true), m_abandoned(false), m_state(HS_RESTARTING), m_gamePort(64087), m_useDirect(true), m_direct(INVALID_SOCKET)
 		{
 			memset(m_key, 0, sizeof(m_key));
 		}
@@ -490,15 +503,25 @@ namespace
 			m_gamePort = gamePort;
 			m_useDirect = useDirect;
 			m_stop = false;
-			m_thread = std::thread(&CHostAgent::Run, this);
+			m_done = false;
+			m_thread = std::thread([this] { Run(); m_done = true; });
 		}
 
-		void Stop()
+		// false: the thread did not end in time and was let go (StopAgent)
+		bool Stop()
 		{
 			m_stop = true;
 			m_ws.Abort();
-			if (m_thread.joinable())
-				m_thread.join();
+			if (!m_thread.joinable())
+				return true;
+			if (!WaitDone(m_done))
+			{
+				m_abandoned = true;
+				m_thread.detach();
+				return false;
+			}
+			m_thread.join();
+			return true;
 		}
 
 		bool Running() const { return m_thread.joinable(); }
@@ -578,9 +601,12 @@ namespace
 			if (m_direct != INVALID_SOCKET)
 				closesocket(m_direct);
 			m_direct = INVALID_SOCKET;
-			s_hostFriends = 0;
-			s_hostDirect = 0;
-			s_hostCode = 0;
+			if (!m_abandoned)
+			{
+				s_hostFriends = 0;
+				s_hostDirect = 0;
+				s_hostCode = 0;
+			}
 			WSACleanup();
 		}
 
@@ -615,6 +641,8 @@ namespace
 				if (n < 1)
 					break;
 				const unsigned char op = (unsigned char)buf[0];
+				if (m_abandoned)
+					break;
 				if (op == OP_REGISTERED && n >= 13)
 				{
 					unsigned int code;
@@ -775,6 +803,8 @@ namespace
 		CWebSocket m_ws;
 		std::thread m_thread;
 		std::atomic<bool> m_stop;
+		std::atomic<bool> m_done;
+		std::atomic<bool> m_abandoned;  // let go by Stop: touches no shared state any more
 		std::mutex m_lock;
 		std::map<unsigned short, SFriend> m_friends;
 		std::vector<unsigned short> m_closing;
@@ -793,7 +823,7 @@ namespace
 	class CJoinAgent
 	{
 	public:
-		CJoinAgent() : m_stop(false), m_code(0), m_useDirect(true), m_direct(INVALID_SOCKET), m_haveGame(false)
+		CJoinAgent() : m_stop(false), m_done(true), m_abandoned(false), m_code(0), m_useDirect(true), m_direct(INVALID_SOCKET), m_haveGame(false)
 		{
 			memset(m_key, 0, sizeof(m_key));
 		}
@@ -811,15 +841,25 @@ namespace
 			s_joinLost = false;
 			s_joinDirectRtt = -1;
 			s_relayRtt = -1;
-			m_thread = std::thread(&CJoinAgent::Run, this);
+			m_done = false;
+			m_thread = std::thread([this] { Run(); m_done = true; });
 		}
 
-		void Stop()
+		// false: the thread did not end in time and was let go (StopAgent)
+		bool Stop()
 		{
 			m_stop = true;
 			m_ws.Abort();
-			if (m_thread.joinable())
-				m_thread.join();
+			if (!m_thread.joinable())
+				return true;
+			if (!WaitDone(m_done))
+			{
+				m_abandoned = true;
+				m_thread.detach();
+				return false;
+			}
+			m_thread.join();
+			return true;
 		}
 
 		bool Running() const { return m_thread.joinable(); }
@@ -908,7 +948,8 @@ namespace
 			if (m_direct != INVALID_SOCKET)
 				closesocket(m_direct);
 			m_direct = INVALID_SOCKET;
-			s_joinDirectRtt = -1;
+			if (!m_abandoned)
+				s_joinDirectRtt = -1;
 			WSACleanup();
 		}
 
@@ -977,7 +1018,7 @@ namespace
 			for (;;)
 			{
 				const int n = m_ws.Receive(buf);
-				if (n < 1 || (unsigned char)buf[0] == OP_ERROR)
+				if (n < 1 || (unsigned char)buf[0] == OP_ERROR || m_abandoned)
 					break;
 				const unsigned char op = (unsigned char)buf[0];
 				if (op == OP_PING)
@@ -1002,6 +1043,8 @@ namespace
 		CWebSocket m_ws;
 		std::thread m_thread;
 		std::atomic<bool> m_stop;
+		std::atomic<bool> m_done;
+		std::atomic<bool> m_abandoned;  // let go by Stop: touches no shared state any more
 		std::mutex m_lock;
 		sockaddr_in m_game;
 		bool m_haveGame;
@@ -1013,8 +1056,19 @@ namespace
 		SOCKET m_direct;
 	};
 
-	CHostAgent s_hostAgent;
-	CJoinAgent s_joinAgent;
+	CHostAgent* s_hostAgent = new CHostAgent;
+	CJoinAgent* s_joinAgent = new CJoinAgent;
+
+	// ends an agent's thread without waiting on the network for long (Stop);
+	// a thread that is let go keeps its object, a new one takes its place
+	template <class T> void StopAgent(T*& agent, const char* what)
+	{
+		if (!agent->Stop())
+		{
+			CryLogAlways("[CoopRelay] the %s connection did not close in time: left behind", what);
+			agent = new T;
+		}
+	}
 	bool s_hosting = false;
 	float s_serverGoneFor = 0.0f;
 	int s_announcedCode = 0;
@@ -1046,8 +1100,8 @@ namespace
 
 	void StopHost()
 	{
-		if (s_hosting || s_hostAgent.Running())
-			s_hostAgent.Stop();
+		if (s_hosting || s_hostAgent->Running())
+			StopAgent(s_hostAgent, "host");
 		s_hosting = false;
 		s_announcedCode = 0;
 		s_loggedFriends = 0;
@@ -1062,7 +1116,7 @@ namespace
 		ICVar* pPort = gEnv->pConsole->GetCVar("sv_port");
 		const int gamePort = pPort ? pPort->GetIVal() : 64087;
 		s_relayRtt = -1;
-		s_hostAgent.Start(s_pRelay->GetString(), s_key, gamePort, s_pDirect->GetIVal() != 0);
+		s_hostAgent->Start(s_pRelay->GetString(), s_key, gamePort, s_pDirect->GetIVal() != 0);
 		s_hosting = true;
 		s_serverGoneFor = 0.0f;
 		CryLogAlways("[CoopRelay] hosting through the relay %s (game port %d)", s_pRelay->GetString(), gamePort);
@@ -1070,9 +1124,9 @@ namespace
 
 	void StopJoin(const char* why)
 	{
-		if (!s_joinAgent.Running())
+		if (!s_joinAgent->Running())
 			return;
-		s_joinAgent.Stop();
+		StopAgent(s_joinAgent, "friend");
 		s_joinConnected = 0;
 		s_gameDropped = false;
 		s_waitingForHost = false;
@@ -1166,7 +1220,7 @@ namespace
 			s_lastJoinCode = code;
 			SavePlayer();
 		}
-		s_joinAgent.Start(s_pRelay->GetString(), s_key, code, s_pDirect->GetIVal() != 0);
+		s_joinAgent->Start(s_pRelay->GetString(), s_key, code, s_pDirect->GetIVal() != 0);
 		CryLogAlways("[CoopRelay] joining coop game %d through %s ...", code, s_pRelay->GetString());
 		return true;
 	}
@@ -1198,7 +1252,7 @@ namespace
 		else
 			CryLogAlways("[CoopRelay] not hosting a coop game (coop_relay_enable %d, relay %s)",
 				s_pEnable->GetIVal(), s_pRelay->GetString());
-		if (s_joinAgent.Running())
+		if (s_joinAgent->Running())
 		{
 			if (s_waitingForHost)
 				CryLogAlways("[CoopRelay] joined game %d: waiting for the host to be ready", s_lastJoinCode);
@@ -1211,7 +1265,7 @@ namespace
 
 	void UpdateFriend()
 	{
-		if (!s_joinAgent.Running())
+		if (!s_joinAgent->Running())
 			return;
 		const int port = s_joinPort;
 		if (port && !s_joinConnected)
@@ -1371,7 +1425,7 @@ void CoopRelay::Update(float frameTime)
 	}
 	if (s_hosting)
 	{
-		s_hostAgent.SetState(ready && s_restartCommand.empty() ? HS_READY : HS_RESTARTING);
+		s_hostAgent->SetState(ready && s_restartCommand.empty() ? HS_READY : HS_RESTARTING);
 		if (s_hostFriends != s_loggedFriends || s_hostDirect != s_loggedHostDirect)
 		{
 			s_loggedFriends = s_hostFriends;
@@ -1411,7 +1465,7 @@ void CoopRelay::Update(float frameTime)
 
 void CoopRelay::OnDisconnected(int cause, const char* description)
 {
-	if (!s_joinAgent.Running() || gEnv->bServer || s_waitingForHost)
+	if (!s_joinAgent->Running() || gEnv->bServer || s_waitingForHost)
 		return;
 	// the player left himself
 	if (cause == eDC_UserRequested)
@@ -1429,7 +1483,7 @@ void CoopRelay::OnDisconnected(int cause, const char* description)
 
 void CoopRelay::Shutdown()
 {
-	s_joinAgent.Stop();
+	StopAgent(s_joinAgent, "friend");
 	StopHost();
 	CoopCloud::Shutdown();
 }
@@ -1447,7 +1501,7 @@ string CoopRelay::LocalPlayerId()
 
 string CoopRelay::PlayerIdOfPort(int port)
 {
-	return s_hosting ? s_hostAgent.IdOfPort(port) : string();
+	return s_hosting ? s_hostAgent->IdOfPort(port) : string();
 }
 
 const char* CoopRelay::RelayUrl()
@@ -1457,7 +1511,7 @@ const char* CoopRelay::RelayUrl()
 
 void CoopRelay::RestartGame(const char* mapCommand)
 {
-	if (s_joinAgent.Running())
+	if (s_joinAgent->Running())
 	{
 		ShowWaiting(false);
 		StopJoin("hosting a game now");
@@ -1465,7 +1519,7 @@ void CoopRelay::RestartGame(const char* mapCommand)
 	if (s_hosting && s_hostFriends > 0)
 	{
 		// the friends hear it from the relay before their games lose this one
-		s_hostAgent.SetState(HS_RESTARTING);
+		s_hostAgent->SetState(HS_RESTARTING);
 		s_restartCommand = mapCommand;
 		s_restartAt = Now() + 1.0f;
 		CryLogAlways("[CoopRelay] the game restarts: the friends wait and join again by themselves");
@@ -1476,7 +1530,7 @@ void CoopRelay::RestartGame(const char* mapCommand)
 
 bool CoopRelay::HandlesDisconnect()
 {
-	return s_joinAgent.Running() && !gEnv->bServer;
+	return s_joinAgent->Running() && !gEnv->bServer;
 }
 
 string CoopRelay::RandomHex(int bytes)
@@ -1498,7 +1552,7 @@ bool CoopRelay::Join(int code)
 
 void CoopRelay::Leave()
 {
-	const bool joined = s_joinAgent.Running();
+	const bool joined = s_joinAgent->Running();
 	ShowWaiting(false);
 	StopJoin("left the coop game");
 	if (joined || !gEnv->bServer)
@@ -1534,7 +1588,7 @@ CoopRelay::EJoinState CoopRelay::GetJoinState(string* pError, int* pCode)
 		*pCode = s_joinedCode;
 	if (pError)
 		*pError = s_joinError ? ErrorText(s_joinError) : "";
-	if (!s_joinAgent.Running())
+	if (!s_joinAgent->Running())
 		return s_joinError ? eJS_Failed : eJS_None;
 	if (s_joinError)
 		return eJS_Failed;

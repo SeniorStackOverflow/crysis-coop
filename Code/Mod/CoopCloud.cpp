@@ -48,6 +48,7 @@ namespace
 	std::map<string, SUpload> s_uploads;
 	std::vector<string> s_log;                          // for the main thread (the engine log is not thread safe)
 	std::thread s_thread;
+	std::atomic<bool> s_done(true);     // the thread has ended (see Shutdown)
 	bool s_stop = false;
 	string s_url;
 	unsigned char s_key[16];
@@ -339,7 +340,8 @@ namespace
 		if (!s_thread.joinable())
 		{
 			s_stop = false;
-			s_thread = std::thread(Run);
+			s_done = false;
+			s_thread = std::thread([] { Run(); s_done = true; });
 		}
 		s_wake.notify_all();
 	}
@@ -378,8 +380,16 @@ void CoopCloud::Shutdown()
 		s_stop = true;
 		s_wake.notify_all();
 	}
-	if (s_thread.joinable())
+	if (!s_thread.joinable())
+		return;
+	// the game is quitting: a transfer stuck on a dead connection must not
+	// keep it from closing (under Wine a blocked receive never ends by itself)
+	for (DWORD start = GetTickCount(); !s_done && GetTickCount() - start < 3000; Sleep(10))
+		;
+	if (s_done)
 		s_thread.join();
+	else
+		s_thread.detach();
 }
 
 void CoopCloud::Upload(const string& campaign, const std::vector<char>& blob)

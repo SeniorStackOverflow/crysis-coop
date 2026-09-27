@@ -21,6 +21,7 @@ namespace
 	PFN_Send s_wsSend = 0;
 	PFN_Receive s_wsReceive = 0;
 	PFN_Close s_wsClose = 0;
+	PFN_Close s_wsShutdown = 0;     // same signature as WinHttpWebSocketClose
 	enum { WS_BINARY_MESSAGE = 0, WS_BINARY_FRAGMENT = 1, WS_CLOSE = 4 };
 	const DWORD OPTION_UPGRADE_TO_WEB_SOCKET = 114;
 }
@@ -36,6 +37,7 @@ bool CCoopWebSocket::Supported()
 	s_wsReceive = (PFN_Receive)GetProcAddress(h, "WinHttpWebSocketReceive");
 	s_wsClose = (PFN_Close)GetProcAddress(h, "WinHttpWebSocketClose");
 	s_wsSend = (PFN_Send)GetProcAddress(h, "WinHttpWebSocketSend");
+	s_wsShutdown = (PFN_Close)GetProcAddress(h, "WinHttpWebSocketShutdown");
 	if (!s_wsUpgrade || !s_wsReceive || !s_wsClose || !s_wsSend)
 	{
 		s_wsSend = 0;
@@ -140,6 +142,13 @@ void CCoopWebSocket::Abort()
 	std::lock_guard<std::mutex> lock(m_sendLock);
 	if (m_ws)
 	{
+		// a Receive blocked in another thread: Windows ends it when the handle
+		// closes, Wine does not (the game froze in the menu when a hosted
+		// game ended: the main thread waited on the tunnel's thread for good).
+		// A close frame first: the relay answers by closing the connection,
+		// which ends the Receive everywhere
+		if (s_wsShutdown)
+			s_wsShutdown(m_ws, 1000, 0, 0);
 		WinHttpCloseHandle(m_ws);
 		m_ws = 0;
 	}
