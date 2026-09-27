@@ -1740,6 +1740,14 @@ void CGameRules::CoopSendSync(int kind, int op, EntityId entity, const char* nam
 		GetGameObject()->InvokeRMI(ClCoopSync(), params, eRMI_ToRemoteClients);
 }
 
+void CGameRules::CoopSendVehicle(const CoopVehicleParams& params, int channelId)
+{
+	if (channelId)
+		GetGameObject()->InvokeRMI(ClCoopVehicle(), params, eRMI_ToClientChannel, channelId);
+	else
+		GetGameObject()->InvokeRMI(ClCoopVehicle(), params, eRMI_ToRemoteClients);
+}
+
 void CGameRules::CoopSendSyncToServer(int kind, int op, EntityId entity, const char* name, const char* text, int type, float f)
 {
 	CoopSyncParams params;

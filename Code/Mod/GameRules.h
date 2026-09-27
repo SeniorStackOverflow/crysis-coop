@@ -310,6 +310,8 @@ public:
 	void CoopSendShot(EntityId shooter, const char* weapon, const Vec3& pos, const Vec3& dir, EntityId mountedId = 0, const char* mountedName = 0);
 	void CoopSendSync(int kind, int op, EntityId entity, const char* name, const char* text, int type, float f, int channelId);
 	void CoopSendSyncToServer(int kind, int op, EntityId entity, const char* name, const char* text, int type, float f);
+	struct CoopVehicleParams;
+	void CoopSendVehicle(const CoopVehicleParams& params, int channelId);
 	void CoopSendAIMove(EntityId id, uint8 stance, const Vec3& move, const Vec3& look, bool sprint);
 	virtual void SetObjectiveEntity(int teamId, const char *objective, EntityId entityId);
 	virtual void RemoveObjective(int teamId, const char *objective);
@@ -905,6 +907,30 @@ public:
 		}
 	};
 
+	// Crysis Coop: where a vehicle is and how it moves (the server's; for
+	// the clients whose copy the engine does not move, see CoopAI)
+	struct CoopVehicleParams
+	{
+		CoopVehicleParams(): id(0), seq(0) { pos.zero(); rot.SetIdentity(); vel.zero(); w.zero(); }
+		uint32 id;
+		uint16 seq;      // newer states only (they may come out of order)
+		Vec3 pos;
+		Quat rot;
+		Vec3 vel;
+		Vec3 w;
+		void SerializeWith(TSerialize ser)
+		{
+			// the level's own entity id, the same on every machine (not
+			// 'eid': the vehicle may not be bound on the client)
+			ser.Value("id", id);
+			ser.Value("seq", seq);
+			ser.Value("pos", pos);
+			ser.Value("rot", rot);
+			ser.Value("vel", vel);
+			ser.Value("w", w);
+		}
+	};
+
 	struct SetObjectiveParams
 	{
 		SetObjectiveParams(): status(0), entityId(0), rawEntityId(0) {};
@@ -1067,6 +1093,7 @@ public:
 	DECLARE_CLIENT_RMI_NOATTACH(ClCoopVoice, CoopVoiceParams, eNRT_ReliableUnordered);
 	DECLARE_CLIENT_RMI_NOATTACH(ClCoopSync, CoopSyncParams, eNRT_ReliableOrdered);
 	DECLARE_CLIENT_RMI_NOATTACH(ClCoopShot, CoopShotParams, eNRT_UnreliableUnordered);
+	DECLARE_CLIENT_RMI_NOATTACH(ClCoopVehicle, CoopVehicleParams, eNRT_ReliableUnordered);
 	DECLARE_SERVER_RMI_NOATTACH(SvCoopSync, CoopSyncParams, eNRT_ReliableOrdered);
 	DECLARE_CLIENT_RMI_NOATTACH_FAST(ClSetGameStartTimer, SetGameTimeParams, eNRT_ReliableUnordered);
 

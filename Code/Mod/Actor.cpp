@@ -13,6 +13,7 @@
 *************************************************************************/
 #include "StdAfx.h"
 #include "CoopAI.h"
+#include "CoopRevive.h"
 #include <StringUtils.h>
 #include "Game.h"
 #include "GameCVars.h"
@@ -3385,7 +3386,20 @@ void CActor::NetKill(EntityId shooterId, uint16 weaponClassId, int damage, int m
 
 	bool ranked=pHUD->GetPlayerRank(shooterId)!=0 || pHUD->GetPlayerRank(GetEntityId())!=0;
 
-	if(IsClient() && gEnv->bMultiplayer && shooterId != GetEntityId() && g_pGameCVars->g_deathCam != 0)
+	// Crysis Coop: a player who goes down watches a teammate who stands (through
+	// his eyes, PlayerView; CoopRevive keeps it one who stands), not the soldier
+	// who shot him; with nobody standing, his own body
+	if(IsClient() && gEnv->bMultiplayer && CoopAI::IsCoopSession())
+	{
+		const EntityId watch = CoopRevive::TeammateToWatch(GetEntityId());
+		SetSpectatorTarget(watch);
+		IEntity* pWatch = watch ? gEnv->pEntitySystem->GetEntity(watch) : 0;
+		CryLogAlways("[CoopRevive] down: watching %s", pWatch ? pWatch->GetName() : "the own body");
+		if(g_pGame->GetGameRules()->GetTeam(shooterId) != g_pGame->GetGameRules()->GetTeam(GetEntityId()) && shooterId != GetEntityId()
+			&& g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(shooterId))
+			SAFE_HUD_FUNC(GetTagNames()->AddEnemyTagName(shooterId));
+	}
+	else if(IsClient() && gEnv->bMultiplayer && shooterId != GetEntityId() && g_pGameCVars->g_deathCam != 0)
 	{
 		// use the spectator target to store who killed us (used for the MP death cam - not quite spectator mode but similar...).
 		if(g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(shooterId))

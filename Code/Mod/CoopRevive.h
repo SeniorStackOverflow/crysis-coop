@@ -30,7 +30,8 @@ namespace CoopRevive
 	// the revive state from the server's rules (fromScript: on the server,
 	// then sent to the clients): 1 target is being revived by reviver
 	// (seconds: how long it takes), 2 stopped, 3 revived, 4 everybody is down
-	// (seconds: until the checkpoint loads), 5 not any more
+	// (seconds: until the team is back at the checkpoint), 5 not any more,
+	// 6 back at the checkpoint (seconds: the screen comes out of black)
 	void OnState(int op, EntityId target, EntityId reviver, float seconds, bool fromScript);
 
 	// the same from the other machine: players by name (their entity ids
@@ -38,10 +39,16 @@ namespace CoopRevive
 	void OnStateFromServer(int op, const char* target, const char* reviver, float seconds);
 	void OnInputFromClient(EntityId reviver, const char* target, bool press);
 
-	// server: a checkpoint of the story was reached (the rules bring the
-	// downed back)
-	void OnCheckpoint();
+	// server: a checkpoint was reached (story, "manual") or loaded
+	// ("loaded"): the rules remember where everybody is (the place the team
+	// goes back to when everybody is down) and, at a story checkpoint, bring
+	// the downed back
+	void OnCheckpoint(const char* name);
 
 	// the HUD: the prompt, the progress bar, who is down, the countdown
 	void RenderHud(IUIDraw* pUIDraw, IFFont* pFont);
+
+	// the player a downed one watches (through his eyes): the nearest
+	// teammate standing, 0 when nobody stands
+	EntityId TeammateToWatch(EntityId downed);
 }

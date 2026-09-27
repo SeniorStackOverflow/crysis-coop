@@ -24,7 +24,9 @@ namespace
 		float start, duration;
 	};
 	std::vector<SRevive> s_revives;     // running on the server now
-	float s_allDownUntil = 0.0f;        // everybody is down: the checkpoint loads then
+	float s_allDownUntil = 0.0f;        // everybody is down: back to the checkpoint then
+	float s_fadeInStart = 0.0f;         // back at the checkpoint: the screen comes out of black
+	float s_fadeInTime = 0.0f;
 	EntityId s_holding = 0;             // the local player holds the use key on this teammate
 	int s_white = -1;
 
@@ -74,6 +76,25 @@ namespace
 		return best;
 	}
 
+	// the local player is down: he keeps watching a teammate who stands (the
+	// one he watched may go down too, or leave)
+	void UpdateDownedView(IActor* pLocal)
+	{
+		CActor* pActor = static_cast<CActor*>(pLocal);
+		if (!IsDown(pLocal))
+			return;
+		const EntityId current = pActor->GetSpectatorTarget();
+		IActor* pCurrent = current ? g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(current) : 0;
+		if (pCurrent && pCurrent->IsPlayer() && pCurrent->GetHealth() > 0 && static_cast<CActor*>(pCurrent)->GetSpectatorMode() == 0)
+			return;
+		const EntityId next = CoopRevive::TeammateToWatch(pLocal->GetEntityId());
+		if (next != current)
+		{
+			pActor->SetSpectatorTarget(next);
+			CryLogAlways("[CoopRevive] down: watching %s", next ? Name(next) : "the own body");
+		}
+	}
+
 	const SRevive* FindRevive(EntityId target, EntityId reviver)
 	{
 		for (size_t i = 0; i < s_revives.size(); ++i)
@@ -105,11 +126,24 @@ namespace
 			UIDRAWHORIZONTAL_CENTER, UIDRAWVERTICAL_TOP, UIDRAWHORIZONTAL_CENTER, UIDRAWVERTICAL_TOP);
 	}
 
-	void Bar(IUIDraw* pUI, float y, float fraction, float r, float g, float b)
+	bool White(IUIDraw* pUI)
 	{
 		if (s_white < 0)
 			s_white = pUI->CreateTexture("Textures/Defaults/White.dds");
-		if (s_white <= 0)
+		return s_white > 0;
+	}
+
+	// black over the whole screen, whatever its shape: IUIDraw centers an
+	// image's width on wide screens, so this one is far larger than 800x600
+	void Black(IUIDraw* pUI, float alpha)
+	{
+		if (alpha > 0.0f && White(pUI))
+			pUI->DrawImage(s_white, -1000.0f, -100.0f, 2800.0f, 800.0f, 0.0f, 0.0f, 0.0f, 0.0f, alpha > 1.0f ? 1.0f : alpha);
+	}
+
+	void Bar(IUIDraw* pUI, float y, float fraction, float r, float g, float b)
+	{
+		if (!White(pUI))
 			return;
 		const float w = 220.0f, h = 10.0f;
 		fraction = fraction < 0.0f ? 0.0f : fraction > 1.0f ? 1.0f : fraction;
@@ -138,7 +172,7 @@ namespace
 		const char* what = pArgs->GetArgCount() > 1 ? pArgs->GetArg(1) : "";
 		if (!stricmp(what, "checkpoint"))
 		{
-			CoopRevive::OnCheckpoint();
+			CoopRevive::OnCheckpoint(pArgs->GetArgCount() > 2 ? pArgs->GetArg(2) : "test");
 			return;
 		}
 		CPlayer* pPlayer = static_cast<CPlayer*>(LocalActor());
@@ -233,6 +267,13 @@ void CoopRevive::OnState(int op, EntityId target, EntityId reviver, float second
 		s_allDownUntil = Now() + seconds;
 	else if (op == 5)
 		s_allDownUntil = 0.0f;
+	else if (op == 6)
+	{
+		// everybody is up again at the checkpoint
+		s_allDownUntil = 0.0f;
+		s_fadeInStart = Now();
+		s_fadeInTime = seconds > 0.1f ? seconds : 0.1f;
+	}
 }
 
 void CoopRevive::OnStateFromServer(int op, const char* target, const char* reviver, float seconds)
@@ -246,45 +287,99 @@ void CoopRevive::OnInputFromClient(EntityId reviver, const char* target, bool pr
 		OnInput(reviver, id, press);
 }
 
-void CoopRevive::OnCheckpoint()
+void CoopRevive::OnCheckpoint(const char* name)
 {
-	CGameRules* pRules = gEnv->bServer && IsReviveMode() ? g_pGame->GetGameRules() : 0;
+	CGameRules* pRules = gEnv->bServer && CoopAI::IsCoopSession() ? g_pGame->GetGameRules() : 0;
 	IScriptTable* pScript = pRules ? pRules->GetEntity()->GetScriptTable() : 0;
 	if (pScript)
-		Script::CallMethod(pScript, "CoopReviveAllDowned", "checkpoint");
+		Script::CallMethod(pScript, "CoopOnCheckpoint", name ? name : "");
+}
+
+EntityId CoopRevive::TeammateToWatch(EntityId downed)
+{
+	IEntity* pDowned = gEnv->pEntitySystem->GetEntity(downed);
+	if (!pDowned || !g_pGame)
+		return 0;
+	const Vec3 pos = pDowned->GetWorldPos();
+	EntityId best = 0;
+	float bestDist = 0.0f;
+	IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+	while (IActor* pActor = it->Next())
+	{
+		if (pActor->GetEntityId() == downed || !pActor->IsPlayer() || pActor->GetHealth() <= 0
+			|| static_cast<CActor*>(pActor)->GetSpectatorMode() != 0)
+			continue;
+		const float d = pActor->GetEntity()->GetWorldPos().GetDistance(pos);
+		if (!best || d < bestDist)
+		{
+			best = pActor->GetEntityId();
+			bestDist = d;
+		}
+	}
+	return best;
 }
 
 void CoopRevive::RenderHud(IUIDraw* pUIDraw, IFFont* pFont)
 {
 	IActor* pLocal = LocalActor();
+	if (pLocal && CoopAI::IsCoopSession())
+		UpdateDownedView(pLocal);
 	if (!pUIDraw || !pFont || !pLocal || !IsReviveMode())
 	{
 		s_revives.clear();
 		s_allDownUntil = 0.0f;
+		s_fadeInTime = 0.0f;
 		return;
 	}
 	const float now = Now();
-	string text;
-	if (s_allDownUntil > now)
+	// the countdown ends in black (up to 3 s more while the server brings
+	// everybody back), which then fades away at the checkpoint
+	const bool allDown = s_allDownUntil > 0.0f && now < s_allDownUntil + 3.0f;
+	const bool fading = s_fadeInTime > 0.0f && now < s_fadeInStart + s_fadeInTime;
+	// anything to show: somebody down, a revive, the countdown
+	bool anyDown = allDown || fading || !s_revives.empty();
 	{
+		IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+		while (!anyDown)
+		{
+			IActor* pActor = it->Next();
+			if (!pActor)
+				break;
+			anyDown = IsDown(pActor);
+		}
+	}
+	if (!anyDown)
+		return;
+	// this HUD is drawn after the scene, whose depth would hide it behind
+	// the weapon in the player's hands: nothing of the scene comes later
+	gEnv->pRenderer->ClearBuffer(FRT_CLEAR_DEPTH | FRT_CLEAR_IMMEDIATE, nullptr);
+	string text;
+	if (allDown)
+	{
+		Black(pUIDraw, 1.0f - (s_allDownUntil - now) / 1.5f);
 		CenterText(pUIDraw, pFont, 240, 24, "EVERYBODY IS DOWN", 1.0f, 0.45f, 0.35f);
-		text.Format("Back to the last checkpoint in %d", (int)(s_allDownUntil - now) + 1);
-		CenterText(pUIDraw, pFont, 272, 16, text.c_str(), 0.95f, 0.9f, 0.8f);
+		if (now < s_allDownUntil)
+		{
+			text.Format("Back to the last checkpoint in %d", (int)(s_allDownUntil - now) + 1);
+			CenterText(pUIDraw, pFont, 272, 16, text.c_str(), 0.95f, 0.9f, 0.8f);
+		}
 		return;
 	}
+	if (fading)
+		Black(pUIDraw, 1.0f - (now - s_fadeInStart) / s_fadeInTime);
 	const EntityId self = pLocal->GetEntityId();
 	if (IsDown(pLocal))
 	{
 		if (const SRevive* r = FindRevive(self, 0))
 		{
 			text.Format("%s is reviving you", Name(r->reviver));
-			CenterText(pUIDraw, pFont, 400, 18, text.c_str(), 0.75f, 1.0f, 0.75f);
-			Bar(pUIDraw, 428, (now - r->start) / r->duration, 0.45f, 0.95f, 0.5f);
+			CenterText(pUIDraw, pFont, 330, 18, text.c_str(), 0.75f, 1.0f, 0.75f);
+			Bar(pUIDraw, 358, (now - r->start) / r->duration, 0.45f, 0.95f, 0.5f);
 		}
 		else
 		{
-			CenterText(pUIDraw, pFont, 380, 24, "YOU ARE DOWN", 1.0f, 0.45f, 0.35f);
-			CenterText(pUIDraw, pFont, 412, 16, "A teammate can revive you: he holds F next to you", 0.95f, 0.9f, 0.8f);
+			CenterText(pUIDraw, pFont, 300, 24, "YOU ARE DOWN", 1.0f, 0.45f, 0.35f);
+			CenterText(pUIDraw, pFont, 332, 16, "A teammate can revive you: he holds F next to you", 0.95f, 0.9f, 0.8f);
 		}
 		return;
 	}
@@ -293,13 +388,13 @@ void CoopRevive::RenderHud(IUIDraw* pUIDraw, IFFont* pFont)
 	if (const SRevive* r = FindRevive(0, self))
 	{
 		text.Format("Reviving %s", Name(r->target));
-		CenterText(pUIDraw, pFont, 400, 18, text.c_str(), 0.75f, 1.0f, 0.75f);
-		Bar(pUIDraw, 428, (now - r->start) / r->duration, 0.45f, 0.95f, 0.5f);
+		CenterText(pUIDraw, pFont, 330, 18, text.c_str(), 0.75f, 1.0f, 0.75f);
+		Bar(pUIDraw, 358, (now - r->start) / r->duration, 0.45f, 0.95f, 0.5f);
 	}
 	else if (EntityId near = NearestDown(pLocal, USE_RANGE))
 	{
 		text.Format("Hold F to revive %s", Name(near));
-		CenterText(pUIDraw, pFont, 400, 18, text.c_str(), 0.95f, 1.0f, 0.95f);
+		CenterText(pUIDraw, pFont, 330, 18, text.c_str(), 0.95f, 1.0f, 0.95f);
 	}
 	// every downed teammate, and how far
 	float y = 70.0f;

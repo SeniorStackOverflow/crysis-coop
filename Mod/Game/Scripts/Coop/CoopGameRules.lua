@@ -727,6 +727,11 @@ function TeamInstantAction:CoopTick()
 		self:CoopRecordAnchor();
 	end
 
+	self:CoopTickFallWatch();
+	if (self.coopSpotsPending and self:CoopKeepSpots(true) > 0) then
+		CoopLog("checkpoint "..tostring(self.coopSpotsPending)..": places kept now");
+		self.coopSpotsPending = nil;
+	end
 	if (self:CoopReviveMode()) then
 		self:CoopTickDowned();
 	else
@@ -1396,9 +1401,10 @@ CoopLog("gamerules overrides applied");
 --  A player who dies stays down. A teammate brings him back by holding the
 --  use key next to him for REVIVE_TIME (Coop.dll's CoopRevive: the key, the
 --  HUD, the network); he gets up where he fell. When everybody is down, the
---  host goes back to the last checkpoint, as in the campaign. The downed also
---  come back at a checkpoint the others reach, so a body nobody can get to
---  (the sea, a chasm) is not a dead end.
+--  team gets up where it stood at the last checkpoint (the world is not
+--  loaded: nobody is disconnected, no loading screen). The downed also come
+--  back at a checkpoint the others reach, so a body nobody can get to (the
+--  sea, a chasm) is not a dead end.
 --------------------------------------------------------------------------
 function TeamInstantAction:CoopReviveMode()
 	return (tonumber(System.GetCVar("coop_auto_respawn")) or 0) == 0;
@@ -1469,11 +1475,14 @@ function TeamInstantAction:CoopUpdateRevives()
 			HUD.CoopReviveState(2, targetId, r.by, 0);
 		elseif (_time - r.t0 >= C.REVIVE_TIME) then
 			self.coopRevives[targetId] = nil;
-			-- up where he fell, looking the way his teammate does
+			-- up where the body lies, looking the way the teammate does. A body
+			-- sinks a little into rock: a player put back 0.3 m above it fell
+			-- through the cliff, so a metre (and CoopWatchFall)
 			local pos = CopyVec(target:GetWorldPos(g_Vectors.temp_v1));
-			pos.z = pos.z + 0.3;
+			pos.z = pos.z + 1.0;
 			local ang = CopyVec(reviver:GetWorldAngles(g_Vectors.temp_v2));
 			if (self:RevivePlayer(target.actor:GetChannel(), target, false, pos, ang)) then
+				self:CoopWatchFall(target, pos, reviver);
 				target.actor:SetHealth(math.max(1, target.actor:GetMaxHealth() * C.REVIVE_HEALTH));
 				CoopLog(tostring(reviver:GetName()).." revived "..tostring(target:GetName()));
 				self.game:SendTextMessage(TextMessageInfo, tostring(reviver:GetName()).." revived "..tostring(target:GetName()), TextMessageToAll);
@@ -1505,7 +1514,6 @@ function TeamInstantAction:CoopTickDowned()
 	if (down == 0 or alive > 0) then
 		if (self.coopAllDownAt) then
 			self.coopAllDownAt = nil;
-			self.coopAllDownLoading = nil;
 			HUD.CoopReviveState(5, NULL_ENTITY, NULL_ENTITY, 0);
 		end
 		return;
@@ -1514,22 +1522,170 @@ function TeamInstantAction:CoopTickDowned()
 		self.coopAllDownAt = _time + C.ALL_DOWN_DELAY;
 		CoopLog("everybody is down: back to the last checkpoint in "..C.ALL_DOWN_DELAY.." s");
 		HUD.CoopReviveState(4, NULL_ENTITY, NULL_ENTITY, C.ALL_DOWN_DELAY);
-	elseif (not self.coopAllDownLoading and _time >= self.coopAllDownAt) then
-		self.coopAllDownLoading = _time;
-		CoopLog("everybody is down: loading the last checkpoint");
-		System.ExecuteCommand("coop_load");
-	elseif (self.coopAllDownLoading and _time - self.coopAllDownLoading > 15) then
-		-- nothing was loaded (no campaign here): everybody comes back instead
-		CoopLog("everybody is down, no checkpoint to go back to: everybody comes back");
+	elseif (_time >= self.coopAllDownAt) then
 		self.coopAllDownAt = nil;
-		self.coopAllDownLoading = nil;
-		HUD.CoopReviveState(5, NULL_ENTITY, NULL_ENTITY, 0);
-		self:CoopReviveAllDowned("no checkpoint");
+		self:CoopBackToCheckpoint();
 	end
 end
 
--- the downed come back next to the others (Coop.dll: a checkpoint of the
--- story was reached); the host first, the friends then join him
+-- Coop.dll: a checkpoint was reached (a story one, "manual" = Save now) or
+-- the progress was loaded ("loaded"). Everybody's place is kept: when the
+-- whole team is down, it comes back there (CoopBackToCheckpoint). At a
+-- checkpoint of the story the downed come back next to the others.
+function TeamInstantAction:CoopOnCheckpoint(name)
+	-- the places before a load are not in the world that was loaded
+	if (name == "loaded" or not self.coopSpots) then
+		self.coopSpots = {};
+	end
+	local kept = self:CoopKeepSpots();
+	CoopLog("checkpoint "..tostring(name)..": "..kept.." players' places kept");
+	-- nobody in the world yet (the level's first checkpoint comes before the
+	-- host's intro): the places are kept once somebody is (CoopTick)
+	self.coopSpotsPending = (kept == 0) and name or nil;
+	if (name ~= "manual" and name ~= "loaded" and self:CoopReviveMode()) then
+		self:CoopReviveAllDowned("checkpoint");
+	end
+end
+
+-- the place of every player standing in the world: not in a vehicle seat
+-- (the vehicle goes on without him), not lying on the ground, not in an
+-- intro or a cutscene
+function TeamInstantAction:CoopKeepSpots(quiet)
+	local kept = 0;
+	for i,p in ipairs(self.game:GetPlayers() or {}) do
+		-- "flying" is not trusted here: the server's physics says it of a
+		-- friend who stands (the friend's machine moves the player); one really in
+		-- the air has no ground below ("in the air")
+		local why = CoopInGame(p) and not p:IsDead() and self:CoopNotInWorld(p);
+		-- ... but one who falls is "flying" too
+		if (why == "flying" and HUD and HUD.CoopIsAirborne and HUD.CoopIsAirborne(p.id)) then
+			why = "in the air";
+		end
+		if (CoopInGame(p) and not p:IsDead() and not p.actor:GetLinkedVehicleId() and (not why or why == "flying")) then
+			self.coopSpots[p:GetName()] = {
+				pos = CopyVec(p:GetWorldPos(g_Vectors.temp_v1)),
+				ang = CopyVec(p:GetWorldAngles(g_Vectors.temp_v2)),
+				host = (p.id == g_localActorId),
+			};
+			kept = kept + 1;
+		elseif (not quiet and CoopInGame(p) and not p:IsDead()) then
+			CoopLog("place of "..tostring(p:GetName()).." not kept: "..(p.actor:GetLinkedVehicleId() and "in a vehicle" or tostring(why)));
+		end
+	end
+	return kept;
+end
+
+-- A player put back on their feet (revived, back at the checkpoint) who
+-- falls through the ground goes next to the teammate who revived them, or
+-- back to the same place higher up; watched for a few seconds (CoopTick)
+function TeamInstantAction:CoopWatchFall(p, pos, reviver)
+	self.coopFallWatch = self.coopFallWatch or {};
+	self.coopFallWatch[p.id] = { pos = CopyVec(pos), by = reviver and reviver.id, t = _time, tries = 0 };
+end
+
+function TeamInstantAction:CoopTickFallWatch()
+	if (not self.coopFallWatch) then
+		return;
+	end
+	for id, w in pairs(self.coopFallWatch) do
+		local p = System.GetEntity(id);
+		if (not p or not p.actor or p:IsDead() or _time - w.t > 8) then
+			self.coopFallWatch[id] = nil;
+		else
+			local now = p:GetWorldPos(g_Vectors.temp_v1);
+			if (now.z < w.pos.z - 8) then
+				local by = w.by and System.GetEntity(w.by);
+				local to, ang;
+				if (by and by.actor and not by:IsDead()) then
+					to = CopyVec(by:GetWorldPos(g_Vectors.temp_v2));
+					ang = CopyVec(by:GetWorldAngles(g_Vectors.temp_v2));
+					to.z = to.z + 0.5;
+				else
+					to = CopyVec(w.pos);
+					to.z = to.z + 2 + 2 * w.tries;
+					ang = CopyVec(p:GetWorldAngles(g_Vectors.temp_v2));
+				end
+				CoopLog(tostring(p:GetName()).." fell through the ground: put back "..(by and ("next to "..tostring(by:GetName())) or "higher up"));
+				self.game:MovePlayer(id, to, ang);
+				w.pos = CopyVec(to);
+				w.t = _time;
+				w.tries = w.tries + 1;
+				if (w.tries > 3) then
+					self.coopFallWatch[id] = nil;
+				end
+			end
+		end
+	end
+end
+
+-- a player's place at the last checkpoint; one who has none (joined or
+-- lay down since) stands next to the host's, or anybody's
+function TeamInstantAction:CoopSpotOf(p, n)
+	local spots = self.coopSpots or {};
+	local own = spots[p:GetName()];
+	if (own) then
+		return CopyVec(own.pos), CopyVec(own.ang);
+	end
+	local base;
+	for name, s in pairs(spots) do
+		if (s.host or not base) then
+			base = s;
+		end
+	end
+	if (not base) then
+		return nil;
+	end
+	local pos, ang = CopyVec(base.pos), CopyVec(base.ang);
+	-- side by side, 1.5 m apart, to the right of where the host looks
+	local right = { x = math.cos(ang.z), y = math.sin(ang.z), z = 0 };
+	pos.x = pos.x + right.x * 1.5 * n;
+	pos.y = pos.y + right.y * 1.5 * n;
+	return pos, ang;
+end
+
+-- everybody is down: the whole team comes back where it was at the last
+-- checkpoint, with what it carries now; nothing is loaded, so nobody is
+-- disconnected and nobody sees a loading screen (the explicit "Back to the
+-- last checkpoint" of the menu still loads it)
+function TeamInstantAction:CoopBackToCheckpoint()
+	local list, others = {}, 0;
+	for i,p in ipairs(self.game:GetPlayers() or {}) do
+		if (CoopInGame(p) and p:IsDead()) then
+			if (p.id == g_localActorId) then
+				table.insert(list, 1, p);
+			else
+				table.insert(list, p);
+			end
+		end
+	end
+	if (not self.coopSpots or not next(self.coopSpots)) then
+		CoopLog("everybody is down, no checkpoint place kept: everybody comes back");
+		self:CoopReviveAllDowned("no checkpoint");
+		HUD.CoopReviveState(6, NULL_ENTITY, NULL_ENTITY, C.BACK_FADE_TIME);
+		return;
+	end
+	for i,p in ipairs(list) do
+		if (self.coopRevives) then
+			self.coopRevives[p.id] = nil;
+		end
+		local own = self.coopSpots[p:GetName()] ~= nil;
+		local pos, ang = self:CoopSpotOf(p, own and 0 or i);
+		if (pos) then
+			pos.z = pos.z + 0.2;
+		end
+		if (self:RevivePlayer(p.actor:GetChannel(), p, false, pos, ang)) then
+			if (pos) then
+				self:CoopWatchFall(p, pos, nil);
+			end
+			CoopLog(tostring(p:GetName()).." is back at the checkpoint"..(own and "" or " (next to the others)"));
+		end
+	end
+	HUD.CoopReviveState(6, NULL_ENTITY, NULL_ENTITY, C.BACK_FADE_TIME);
+	self.game:SendTextMessage(TextMessageInfo, "Back to the last checkpoint", TextMessageToAll);
+end
+
+-- the downed come back next to the others (a checkpoint of the story was
+-- reached); the host first, the friends then join him
 function TeamInstantAction:CoopReviveAllDowned(reason)
 	local list = {};
 	for i,p in ipairs(self.game:GetPlayers() or {}) do

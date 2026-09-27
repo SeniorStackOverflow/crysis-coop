@@ -13,11 +13,15 @@ History:
 #include <windows.h>
 
 void* g_hInst = 0;
+void CoopKeepTestWindowBehind(bool windowExists); // GameDll.cpp
 
 BOOL APIENTRY DllMain ( HINSTANCE hInst, DWORD reason, LPVOID reserved )
 {
 	if ( reason == DLL_PROCESS_ATTACH )
+	{
 		g_hInst = hInst;
+		CoopKeepTestWindowBehind(false);
+	}
 	return TRUE;
 }
 #endif

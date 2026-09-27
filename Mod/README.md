@@ -145,8 +145,10 @@ blocked UDP), the game keeps going through the relay.
 * **Nobody comes back by himself.** A player who dies is down and waits for a teammate: walk up to him and hold
   **F** (use) for 3 seconds, and he gets up where he fell, with half his health. The HUD shows who is down and how
   far, the "Hold F" prompt next to him, and the progress.
-* **When everybody is down**, the game goes back to the last checkpoint after a few seconds, as in the campaign
-  (the friends join again by themselves).
+* **When everybody is down**, the screen goes black after a few seconds and the whole team gets up where it stood at
+  the last checkpoint, with what it carries. Nothing is loaded: nobody is disconnected, there is no loading screen.
+  (Esc → Co-op game → Back to the last checkpoint still loads the checkpoint itself.)
+* Soldiers stop shooting at a player who is down.
 * The downed also come back next to the others at the next checkpoint of the story, so a body nobody can reach is
   no dead end. The host's console `coop_auto_respawn 1` brings back the old rule (the dead come back by themselves
   after 8 seconds).

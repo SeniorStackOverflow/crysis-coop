@@ -1235,6 +1235,13 @@ IMPLEMENT_RMI(CGameRules, ClCoopShot)
 }
 
 //------------------------------------------------------------------------
+IMPLEMENT_RMI(CGameRules, ClCoopVehicle)
+{
+	CoopAI::OnVehicleState(params.id, params.seq, params.pos, params.rot, params.vel, params.w);
+	return true;
+}
+
+//------------------------------------------------------------------------
 IMPLEMENT_RMI(CGameRules, ClCoopSync)
 {
 	CoopAI::OnSyncMirror(params.kind, params.op, params.entity, params.name.c_str(), params.text.c_str(), params.type, params.f, false);

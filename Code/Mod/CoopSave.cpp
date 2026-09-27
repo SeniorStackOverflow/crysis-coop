@@ -989,6 +989,8 @@ namespace
 		CoopAI::SetInventoryCarry(s_load.level.c_str(), carry);
 		CoopAI::OnGameLoaded();
 		CryLogAlways("[CoopSave] progress loaded: %s, checkpoint %s (saved %s)", s_load.level.c_str(), s_load.checkpoint.c_str(), s_load.time.c_str());
+		// where the team goes back to when everybody is down
+		CoopRevive::OnCheckpoint("loaded");
 	}
 
 	// a new campaign on this level (short name)
@@ -1130,10 +1132,9 @@ void CoopSave::RequestCheckpoint(const char* name)
 	s_pendingFor = 0.0f;
 	s_retryTimer = 0.0f;
 	CryLogAlways("[CoopSave] checkpoint %s reached", s_pendingName.c_str());
-	// the downed come back at a checkpoint of the story the others reach (not
-	// at "Save now": that would get around being revived)
-	if (s_pendingName != "manual")
-		CoopRevive::OnCheckpoint();
+	// the place the team goes back to when everybody is down; at a story
+	// checkpoint the downed come back (the rules decide, see CoopOnCheckpoint)
+	CoopRevive::OnCheckpoint(s_pendingName.c_str());
 }
 
 bool CoopSave::IsLoadPending()

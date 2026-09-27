@@ -75,6 +75,8 @@ namespace CoopAI
 	// 2 progress): the clients do the same
 	void OnProgressBar(int op, int progress, int posX, int posY, const char* text, bool topText, bool locking);
 	void OnSyncMirror(int kind, int op, uint32 entity, const char* name, const char* text, int type, float f, bool fromClient);
+	// client: the server's state of a vehicle (see UpdateVehicleMirror)
+	void OnVehicleState(uint32 id, uint16 seq, const Vec3& pos, const Quat& rot, const Vec3& vel, const Vec3& w);
 	int DebugFlags();
 
 	// is the entity bound to the network (known to clients)? logs once per

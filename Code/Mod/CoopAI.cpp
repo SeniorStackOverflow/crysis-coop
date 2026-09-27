@@ -51,6 +51,9 @@ namespace
 	void ResetFlowMirror();
 	int s_totalAIShots = 0;
 	void ResetSync();
+	void CaptureHideBase();
+	void UpdateVehicleMirror(float frameTime);
+	void SendVehicleStates(int channelId);
 	void UpdateSequenceSync(float frameTime);
 	void UpdatePendingPickups(float frameTime);
 	void UpdateLoadoutCatchup(float frameTime);
@@ -706,8 +709,14 @@ namespace
 					}
 				}
 			}
-			fprintf(f, "%u\t%s\t%s\t%08x\t%d\t%s\n", pEntity->GetId(), pEntity->GetClass()->GetName(),
-				pEntity->GetName(), pEntity->GetFlags(), (int)pEntity->IsGarbage(), ext);
+			const Vec3 p = pEntity->GetWorldPos();
+			// network: bound here, the physics profile, the physics type
+			IGameObject* pGO = g_pGame->GetIGameFramework()->GetGameObject(pEntity->GetId());
+			INetContext* pNetContext = g_pGame->GetIGameFramework()->GetNetContext();
+			fprintf(f, "%u\t%s\t%s\t%08x\t%d\t%s\thidden=%d\tpos=(%.0f,%.0f,%.0f)\tbound=%d profile=%d phys=%d\n", pEntity->GetId(), pEntity->GetClass()->GetName(),
+				pEntity->GetName(), pEntity->GetFlags(), (int)pEntity->IsGarbage(), ext, (int)pEntity->IsHidden(), p.x, p.y, p.z,
+				pNetContext ? (int)pNetContext->IsBound(pEntity->GetId()) : -1, pGO ? (int)pGO->GetAspectProfile(eEA_Physics) : -1,
+				pEntity->GetPhysics() ? (int)pEntity->GetPhysics()->GetType() : -1);
 			n++;
 		}
 		fclose(f);
@@ -1783,6 +1792,8 @@ void CoopAI::OnLoadingComplete()
 	// the interactive objects' flags as loaded, before the story changes them
 	if (gEnv->bServer && g_pGame)
 		ScanUsableObjects(true);
+	if (gEnv->bServer && g_pGame)
+		CaptureHideBase();
 	s_coopLevelLoading = false;
 	RegisterCommands();
 
@@ -1929,19 +1940,32 @@ void CoopAI::GiveInventory(IActor* pTarget, const SInventory& inv, bool replace)
 		pInv->Destroy();
 		pInv->ResetAmmo();
 	}
+	// the item in his hands last: a friend's own machine decides what he
+	// holds, the server's selection never reaches it. A pick-up that selects
+	// does (ClPickUp)
+	bool currentGiven = false;
 	for (size_t i = 0; i < inv.items.size(); ++i)
-		if (pInv->GetCountOfClass(inv.items[i].c_str()) == 0)
+		if (inv.items[i] != inv.current && pInv->GetCountOfClass(inv.items[i].c_str()) == 0)
 			pItemSystem->GiveItem(pTarget, inv.items[i].c_str(), false, false, false);
+	if (!inv.current.empty() && pInv->GetCountOfClass(inv.current.c_str()) == 0)
+		currentGiven = pItemSystem->GiveItem(pTarget, inv.current.c_str(), false, true, false) != 0;
 	for (size_t i = 0; i < inv.ammo.size(); ++i)
 		if (IEntityClass* pAmmo = gEnv->pEntitySystem->GetClassRegistry()->FindClass(inv.ammo[i].first.c_str()))
 			pInv->SetAmmoCount(pAmmo, inv.ammo[i].second);
-	if (!inv.current.empty())
+	if (!inv.current.empty() && !currentGiven)
 		if (IScriptTable* pScript = pTarget->GetEntity()->GetScriptTable())
 		{
 			SmartScriptTable actorTable;
 			if (pScript->GetValue("actor", actorTable))
+			{
 				Script::CallMethod(actorTable, "SelectItemByName", inv.current.c_str());
+				// a friend: his own machine too
+				if (gEnv->bServer && pTarget != g_pGame->GetIGameFramework()->GetClientActor())
+					Script::CallMethod(actorTable, "SelectItemByNameRemote", inv.current.c_str());
+			}
 		}
+	CryLogAlways("[CoopInv] %s holds %s (%s)", pTarget->GetEntity()->GetName(), inv.current.empty() ? "-" : inv.current.c_str(),
+		currentGiven ? "picked up" : "selected");
 }
 
 void CoopAI::SetInventoryCarry(const char* level, const std::map<string, SInventory>& inventories)
@@ -1963,6 +1987,33 @@ void CoopAI::OnGameLoaded()
 	// the snapshots describe the players before the load
 	s_invSnapshots.clear();
 	CryLogAlways("[CoopAI] saved game loaded: dynamic network aspects switched off for %d AI actors", ai);
+	// The load replaces every vehicle's weapons. A friend who joins later
+	// never bound those vehicles then (the level's own objects, "static"):
+	// they stayed where the level has them, without physics, and their
+	// crews shot from nowhere. Bound again as the static objects they are,
+	// they reach the friends (their movement still does not: the vehicle
+	// mirror, UpdateVehicleMirror, moves them)
+	if (gEnv->bServer && gEnv->bMultiplayer)
+		if (INetContext* pNet = g_pGame->GetIGameFramework()->GetNetContext())
+		{
+			int n = 0;
+			IVehicleIteratorPtr pVehicles = g_pGame->GetIGameFramework()->GetIVehicleSystem()->CreateVehicleIterator();
+			while (IVehicle* pVehicle = pVehicles->Next())
+			{
+				const EntityId id = pVehicle->GetEntityId();
+				if (!pVehicle->GetWeaponCount() || !pNet->IsBound(id))
+					continue;
+				pNet->UnbindObject(id);
+				pNet->BindObject(id, eEA_Script | eEA_Physics | eEA_GameServerStatic | eEA_GameClientDynamic, true);
+				// the physics profile the game object has (physicalized): a new
+				// binding starts from the default one
+				const uint8 profile = pVehicle->GetGameObject()->GetAspectProfile(eEA_Physics);
+				if (profile != 255)
+					pNet->SetAspectProfile(id, eEA_Physics, profile);
+				++n;
+			}
+			CryLogAlways("[CoopAI] saved game loaded: %d armed vehicles bound to the network again", n);
+		}
 }
 
 int CoopAI::DebugFlags()
@@ -3179,6 +3230,7 @@ namespace
 	std::map<EntityId, int> s_awakeMode;
 	float s_shotLogTimer = 0.0f;
 	float s_wakeTimer = 0.0f;
+	std::set<EntityId> s_downedAIOff;   // downed players whose AI object is off (no target)
 	bool s_updateAllOn = false;
 	int s_updateAllSaved = 0;
 
@@ -3333,7 +3385,27 @@ namespace
 		while (IActor* pActor = pAIIt->Next())
 		{
 			if (pActor->IsPlayer())
+			{
+				// a downed player (dead, waiting to be revived) is no target:
+				// his AI object stays enabled after death, and the soldiers kept
+				// shooting at his body. Switched off while he is down, on again
+				// when he is revived
+				IAIObject* pPlayerAI = pActor->GetEntity()->GetAI();
+				const EntityId id = pActor->GetEntityId();
+				if (pPlayerAI && pActor->GetHealth() <= 0 && pPlayerAI->IsEnabled())
+				{
+					pPlayerAI->Event(AIEVENT_DISABLE, 0);
+					s_downedAIOff.insert(id);
+					CryLogAlways("[CoopAI] %s is down: no target for the soldiers", pActor->GetEntity()->GetName());
+				}
+				else if (pActor->GetHealth() > 0 && s_downedAIOff.erase(id))
+				{
+					if (pPlayerAI && !pPlayerAI->IsEnabled())
+						pPlayerAI->Event(AIEVENT_ENABLE, 0);
+					CryLogAlways("[CoopAI] %s is up: a target again", pActor->GetEntity()->GetName());
+				}
 				continue;
+			}
 			if (pActor->GetHealth() <= 0)
 			{
 				// a dead soldier's AI object stays enabled; with every soldier
@@ -3918,6 +3990,136 @@ namespace
 	float s_debugLookUntil = 0.0f;
 	// server: the last hidden state of every level entity whose state changed
 	std::map<EntityId, std::pair<string, bool> > s_hideState;
+	// server: the hidden state of the level's entities as the level file
+	// has them (a joiner's copy starts so). A loaded game changes many
+	// without a hide event
+	std::map<EntityId, bool> s_hideBase;
+
+	// the level's own things: not players, weapons (the network has those)
+	// or projectiles
+	bool HideSynced(IEntity* pEntity)
+	{
+		IGameFramework* pFramework = g_pGame->GetIGameFramework();
+		if (TraceNoisyClass(pEntity) || pFramework->GetIItemSystem()->IsItemClass(pEntity->GetClass()->GetName()))
+			return false;
+		IActor* pActor = pFramework->GetIActorSystem()->GetActor(pEntity->GetId());
+		return !pActor || !pActor->IsPlayer();
+	}
+
+	// ---- vehicle mirror. After the host continued a campaign (a loaded
+	// game) the engine sends no vehicle movement at all: a friend saw the
+	// jeep stand where the level has it while it drove at him on the host.
+	// The server sends where every vehicle is while it moves (5 times a
+	// second, reliably: unreliable ones were lost while soldiers fired, and
+	// the copy stopped half way; and at a join); a client moves its copy
+	// only when the engine does not (it is far off and does not follow)
+	struct SVehSent { Vec3 pos; bool moving; SVehSent(): pos(ZERO), moving(false) {} };
+	uint16 s_vehSeq = 0;
+	std::map<EntityId, SVehSent> s_vehSent;          // server
+	float s_vehMirrorTimer = 0.0f;
+	struct SVehMirror { Vec3 server, local; int stuck; bool active, have; uint16 seq; SVehMirror(): server(ZERO), local(ZERO), stuck(0), active(false), have(false), seq(0) {} };
+	std::map<EntityId, SVehMirror> s_vehMirror;      // client
+
+	// debugging: coop_debug_physdump <name> also traces that vehicle's states
+	bool VehicleTraced(IEntity* pEntity)
+	{
+		ICVar* pMatch = gEnv->pConsole->GetCVar("coop_debug_physdump");
+		return pMatch && pMatch->GetString()[0] && CryStringUtils::stristr(pEntity->GetName(), pMatch->GetString());
+	}
+
+	bool FillVehicleState(IVehicle* pVehicle, CGameRules::CoopVehicleParams& params, bool& moving)
+	{
+		IEntity* pEntity = pVehicle->GetEntity();
+		IPhysicalEntity* pPhys = pEntity->GetPhysics();
+		pe_status_dynamics dyn;
+		if (!pPhys || !pPhys->GetStatus(&dyn))
+			return false;
+		params.id = pEntity->GetId();
+		params.seq = ++s_vehSeq;
+		params.pos = pEntity->GetWorldPos();
+		params.rot = pEntity->GetWorldRotation();
+		params.vel = dyn.v;
+		params.w = dyn.w;
+		moving = dyn.v.len2() > 0.04f || dyn.w.len2() > 0.01f;
+		return true;
+	}
+
+	// a friend drives it: the friend's own machine moves it
+	bool DrivenByFriend(IVehicle* pVehicle)
+	{
+		IActor* pDriver = pVehicle->GetDriver();
+		return pDriver && pDriver->IsPlayer() && pDriver != g_pGame->GetIGameFramework()->GetClientActor();
+	}
+
+	void UpdateVehicleMirror(float frameTime)
+	{
+		if (!gEnv->bServer || !gEnv->bMultiplayer || !g_pGame || !CoopAI::IsCoopSession())
+			return;
+		if ((s_vehMirrorTimer += frameTime) < 0.2f)
+			return;
+		s_vehMirrorTimer = 0.0f;
+		CGameRules* pRules = g_pGame->GetGameRules();
+		IActor* pHost = g_pGame->GetIGameFramework()->GetClientActor();
+		bool friends = false;
+		IActorIteratorPtr pActors = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+		while (IActor* pActor = pActors->Next())
+			friends = friends || (pActor->IsPlayer() && pActor != pHost);
+		if (!pRules || !friends)
+			return;
+		IVehicleIteratorPtr pVehicles = g_pGame->GetIGameFramework()->GetIVehicleSystem()->CreateVehicleIterator();
+		while (IVehicle* pVehicle = pVehicles->Next())
+		{
+			if (pVehicle->GetEntity()->IsHidden() || DrivenByFriend(pVehicle))
+				continue;
+			CGameRules::CoopVehicleParams params;
+			bool moving = false;
+			if (!FillVehicleState(pVehicle, params, moving))
+				continue;
+			SVehSent& sent = s_vehSent[params.id];
+			moving = moving || params.pos.GetDistance(sent.pos) > 0.05f;
+			// at rest, and the last state sent said so too
+			if (!moving && !sent.moving)
+				continue;
+			pRules->CoopSendVehicle(params, 0);
+			sent.pos = params.pos;
+			sent.moving = moving;
+			if (params.seq % 500 == 0)
+				CryLogAlways("[CoopAI] vehicle states sent: %u", (unsigned)params.seq);
+			if (VehicleTraced(pVehicle->GetEntity()))
+				CryLogAlways("[CoopVeh>] %s seq=%u pos=(%.1f,%.1f,%.1f) v=%.1f", pVehicle->GetEntity()->GetName(), (unsigned)params.seq,
+					params.pos.x, params.pos.y, params.pos.z, params.vel.len());
+		}
+	}
+
+	// a friend joined: every vehicle once
+	void SendVehicleStates(int channelId)
+	{
+		CGameRules* pRules = g_pGame->GetGameRules();
+		if (!pRules)
+			return;
+		int n = 0;
+		IVehicleIteratorPtr pVehicles = g_pGame->GetIGameFramework()->GetIVehicleSystem()->CreateVehicleIterator();
+		while (IVehicle* pVehicle = pVehicles->Next())
+		{
+			CGameRules::CoopVehicleParams params;
+			bool moving = false;
+			if (!DrivenByFriend(pVehicle) && FillVehicleState(pVehicle, params, moving))
+			{
+				pRules->CoopSendVehicle(params, channelId);
+				++n;
+			}
+		}
+		CryLogAlways("[CoopSync] sent %d vehicle states to channel %d", n, channelId);
+	}
+
+	void CaptureHideBase()
+	{
+		s_hideBase.clear();
+		IEntityItPtr it = gEnv->pEntitySystem->GetEntityIterator();
+		while (IEntity* pEntity = it->Next())
+			if (!pEntity->IsGarbage() && HideSynced(pEntity))
+				s_hideBase[pEntity->GetId()] = pEntity->IsHidden();
+	}
 	enum ESeqOp { eSeq_Start = 1, eSeq_Stop = 2, eSeq_Time = 3 };
 	const char* const s_radarOpNames[] = { "?", "tag", "add", "add_temp", "story_add", "story_remove", "remove", "teammate", "jammer", "show_temp" };
 
@@ -4282,6 +4484,9 @@ namespace
 		s_forcedCutscene = 0;
 		s_cutsceneHidden.clear();
 		s_hideState.clear();
+		s_hideBase.clear();
+		s_vehSent.clear();
+		s_vehMirror.clear();
 		s_radarHistory.clear();
 		s_radarTempSent.clear();
 		s_seqServer.clear();
@@ -4480,6 +4685,24 @@ namespace
 				hasLiving ? living.velRequested.x : 0.0f, hasLiving ? living.velRequested.y : 0.0f, hasLiving ? living.velRequested.z : 0.0f,
 				hasLiving ? living.groundHeight : 0.0f, hasDyn ? dyn.bActive : -1, hasDyn ? dyn.gravity.z : 0.0f, hasFlags ? flags.flags : 0,
 				pAC ? (int)pAC->GetPhysicalColliderMode() : -1, pActor->GetLinkedVehicle() ? pActor->GetLinkedVehicle()->GetEntity()->GetName() : "-");
+		}
+		// vehicles of that name too (in the log: no trace needed)
+		IVehicleIteratorPtr pVehicles = g_pGame->GetIGameFramework()->GetIVehicleSystem()->CreateVehicleIterator();
+		while (IVehicle* pVehicle = pVehicles->Next())
+		{
+			IEntity* pEntity = pVehicle->GetEntity();
+			if (!CryStringUtils::stristr(pEntity->GetName(), pMatch->GetString()))
+				continue;
+			IPhysicalEntity* pPhys = pEntity->GetPhysics();
+			pe_status_dynamics dyn;
+			pe_status_awake awake;
+			const bool hasDyn = pPhys && pPhys->GetStatus(&dyn);
+			const Vec3 p = pEntity->GetWorldPos();
+			IActor* pDriver = pVehicle->GetDriver();
+			CryLogAlways("[CoopPhys] vehicle %s pos=(%.1f,%.1f,%.1f) hidden=%d phys=%d profile=%d awake=%d speed=%.1f mass=%.0f driver=%s flags=%08x",
+				pEntity->GetName(), p.x, p.y, p.z, (int)pEntity->IsHidden(), pPhys ? (int)pPhys->GetType() : -1,
+				(int)pVehicle->GetGameObject()->GetAspectProfile(eEA_Physics), pPhys ? pPhys->GetStatus(&awake) : -1,
+				hasDyn ? dyn.v.len() : -1.0f, hasDyn ? dyn.mass : -1.0f, pDriver ? pDriver->GetEntity()->GetName() : "-", pEntity->GetFlags());
 		}
 	}
 
@@ -4831,6 +5054,7 @@ namespace
 
 	void UpdateKillWatch(float frameTime)
 	{
+		UpdateVehicleMirror(frameTime);
 		UpdateDebugVisit(frameTime);
 		UpdateDebugFlow(frameTime);
 		UpdateDebugPhysQuery(frameTime);
@@ -5317,8 +5541,24 @@ namespace
 		for (std::map<string, float>::iterator it = s_seqServer.begin(); it != s_seqServer.end(); ++it)
 			pRules->CoopSendSync(eSync_Sequence, eSeq_Time, 0, it->first.c_str(), "", 0, it->second, channelId);
 		UpdateTimeOfDaySync(0.0f, channelId);
+		// hidden or shown as now: what the story changed, and what differs
+		// from the level file (a loaded game). The recorded state may be
+		// older than a load that came after it
+		int hides = 0, loaded = 0;
 		for (std::map<EntityId, std::pair<string, bool> >::iterator it = s_hideState.begin(); it != s_hideState.end(); ++it)
-			pRules->CoopSendSync(eSync_Hide, it->second.second ? 1 : 0, it->first, it->second.first.c_str(), "", 0, 0.0f, channelId);
+			if (IEntity* pEntity = gEnv->pEntitySystem->GetEntity(it->first))
+			{
+				pRules->CoopSendSync(eSync_Hide, pEntity->IsHidden() ? 1 : 0, it->first, pEntity->GetName(), "", 0, 0.0f, channelId);
+				++hides;
+			}
+		for (std::map<EntityId, bool>::iterator it = s_hideBase.begin(); it != s_hideBase.end(); ++it)
+			if (!s_hideState.count(it->first))
+			if (IEntity* pEntity = gEnv->pEntitySystem->GetEntity(it->first))
+				if (pEntity->IsHidden() != it->second)
+				{
+					pRules->CoopSendSync(eSync_Hide, pEntity->IsHidden() ? 1 : 0, it->first, pEntity->GetName(), "", 0, 0.0f, channelId);
+					++loaded;
+				}
 		for (std::map<EntityId, std::pair<string, int> >::iterator it = s_aiStateSent.begin(); it != s_aiStateSent.end(); ++it)
 			pRules->CoopSendSync(eSync_AIState, it->second.second, it->first, it->second.first.c_str(), "", 0, 0.0f, channelId);
 		if (IActor* pHost = g_pGame->GetIGameFramework()->GetClientActor())
@@ -5341,7 +5581,8 @@ namespace
 			pRules->CoopSendSync(eSync_Progress, 1, 0, "", s_progress.text.c_str(), s_progress.packed, (float)s_progress.progress, channelId);
 		CryLogAlways("[CoopSync] sent %d AI states, progress bar %s to channel %d", (int)s_aiStateSent.size(),
 			s_progress.visible ? "shown" : "hidden", channelId);
-		CryLogAlways("[CoopSync] sent %d hidden/shown entity states to channel %d", (int)s_hideState.size(), channelId);
+		CryLogAlways("[CoopSync] sent %d hidden/shown entity states (%d more not as in the level file) to channel %d", hides, loaded, channelId);
+		SendVehicleStates(channelId);
 		CryLogAlways("[CoopSync] sent %d map markers and %d running cutscenes to channel %d",
 			(int)s_radarHistory.size(), (int)s_seqServer.size(), channelId);
 	}
@@ -5552,16 +5793,8 @@ void CoopAI::OnProgressBar(int op, int progress, int posX, int posY, const char*
 
 void CoopAI::OnEntityHidden(IEntity* pEntity, bool hidden)
 {
-	if (!pEntity || !gEnv->bServer || !g_pGame || s_applyingSync || !IsCoopSession())
+	if (!pEntity || !gEnv->bServer || !g_pGame || s_applyingSync || !IsCoopSession() || !HideSynced(pEntity))
 		return;
-	// the level's own things: not players, weapons (the network has those)
-	// or projectiles
-	IGameFramework* pFramework = g_pGame->GetIGameFramework();
-	if (TraceNoisyClass(pEntity) || pFramework->GetIItemSystem()->IsItemClass(pEntity->GetClass()->GetName()))
-		return;
-	if (IActor* pActor = pFramework->GetIActorSystem()->GetActor(pEntity->GetId()))
-		if (pActor->IsPlayer())
-			return;
 	s_hideState[pEntity->GetId()] = std::make_pair(string(pEntity->GetName()), hidden);
 	if (!gEnv->bMultiplayer)
 		return;
@@ -5640,6 +5873,87 @@ void CoopAI::OnSuitModeControl(int mode, bool add, bool remove, bool defect, boo
 		if (CGameRules* pRules = g_pGame->GetGameRules())
 			pRules->CoopSendSync(eSync_SuitMode, op, 0, "", "", mode, 0.0f, 0);
 	Trace("SUIT> mode %d op %d", mode, op);
+}
+
+// the body itself: moving the entity alone does not move a vehicle's
+// physics, which then puts the entity back
+static void PlaceVehicle(IEntity* pEntity, IPhysicalEntity* pPhys, const Vec3& pos, const Quat& rot)
+{
+	if (pPhys)
+	{
+		pe_params_pos place;
+		place.pos = pos;
+		place.q = rot;
+		pPhys->SetParams(&place);
+	}
+	pEntity->SetWorldTM(Matrix34::Create(Vec3(1.0f, 1.0f, 1.0f), rot, pos));
+}
+
+void CoopAI::OnVehicleState(uint32 id, uint16 seq, const Vec3& pos, const Quat& rot, const Vec3& vel, const Vec3& w)
+{
+	if (gEnv->bServer || !g_pGame)
+		return;
+	IVehicle* pVehicle = g_pGame->GetIGameFramework()->GetIVehicleSystem()->GetVehicle(id);
+	if (!pVehicle)
+		return;
+	IEntity* pEntity = pVehicle->GetEntity();
+	// the local player drives it: this machine moves it
+	IActor* pLocal = g_pGame->GetIGameFramework()->GetClientActor();
+	if (pLocal && pVehicle->GetDriver() == pLocal)
+		return;
+	SVehMirror& m = s_vehMirror[id];
+	if (VehicleTraced(pEntity))
+		CryLogAlways("[CoopVeh<] %s seq=%u (last %u) pos=(%.1f,%.1f,%.1f) here=(%.1f,%.1f,%.1f) active=%d stuck=%d", pEntity->GetName(), (unsigned)seq,
+			(unsigned)m.seq, pos.x, pos.y, pos.z, pEntity->GetWorldPos().x, pEntity->GetWorldPos().y, pEntity->GetWorldPos().z, (int)m.active, m.stuck);
+	// an older state that came late
+	if (m.have && (int16)(seq - m.seq) <= 0)
+		return;
+	m.seq = seq;
+	const Vec3 here = pEntity->GetWorldPos();
+	const float off = here.GetDistance(pos);
+	IPhysicalEntity* pPhys = pEntity->GetPhysics();
+	if (!m.active)
+	{
+		// the engine moves the copy when it follows the server's. A copy
+		// that stays far off while the vehicle moves is moved from here on;
+		// one far off at rest when a friend joins is put in place once
+		if (!m.have)
+		{
+			m.stuck = 0;
+			if (off > 3.0f && vel.len2() < 0.04f)
+			{
+				PlaceVehicle(pEntity, pPhys, pos, rot);
+				CryLogAlways("[CoopAI] vehicle %s put where the server has it (%.0f m off)", pEntity->GetName(), off);
+			}
+		}
+		else if (off > 3.0f && here.GetDistance(m.local) < 0.1f * max(pos.GetDistance(m.server), 0.5f))
+			++m.stuck;
+		else
+			m.stuck = 0;
+		if (m.stuck >= 3)
+		{
+			m.active = true;
+			CryLogAlways("[CoopAI] vehicle %s is moved by the server's state (%.0f m off)", pEntity->GetName(), off);
+		}
+	}
+	if (m.active)
+	{
+		if (off > 0.3f)
+			PlaceVehicle(pEntity, pPhys, pos, rot);
+		if (pPhys)
+		{
+			pe_action_set_velocity velocity;
+			velocity.v = vel;
+			velocity.w = w;
+			pPhys->Action(&velocity);
+		}
+	}
+	m.server = pos;
+	m.local = pEntity->GetWorldPos();
+	m.have = true;
+	static int s_received = 0;
+	if (++s_received % 500 == 0)
+		CryLogAlways("[CoopAI] vehicle states received: %d (last %u, %s)", s_received, (unsigned)seq, pEntity->GetName());
 }
 
 void CoopAI::OnSyncMirror(int kind, int op, uint32 entity, const char* name, const char* text, int type, float f, bool fromClient)
