@@ -1191,6 +1191,18 @@ namespace
 		return attr("name") + " " + attr("version");
 	}
 
+	// "0.7.2" against "0.7.4": -1 older, 1 newer, 0 the same or not versions
+	int CompareVersions(const string& a, const string& b)
+	{
+		int x[3] = {}, y[3] = {};
+		if (sscanf(a.c_str(), "%d.%d.%d", &x[0], &x[1], &x[2]) < 1 || sscanf(b.c_str(), "%d.%d.%d", &y[0], &y[1], &y[2]) < 1)
+			return 0;
+		for (int i = 0; i < 3; ++i)
+			if (x[i] != y[i])
+				return x[i] < y[i] ? -1 : 1;
+		return 0;
+	}
+
 	// the reason of a lost connection in the co-op menu's words
 	string DropReason()
 	{
@@ -1200,9 +1212,21 @@ namespace
 		case eDC_ModMismatch:
 		{
 			// the engine's text: "Remote disconnected: <mod> <version>"
-			string host = s_dropText.length() > 21 ? s_dropText.substr(21) : string("?");
-			text.Format("the host has another version of the mod (%s, yours: %s). Both need the same one: "
-				"start Crysis Coop again, it updates itself", host.c_str(), OwnModVersion().c_str());
+			const string host = s_dropText.length() > 21 ? s_dropText.substr(21) : string("?");
+			const string own = OwnModVersion();
+			// who has to update: the one with the older version (the launcher
+			// updates the mod when the game starts, so a host who started his
+			// game before a release keeps the older one)
+			const int order = CompareVersions(host.substr(host.rfind(' ') + 1), own.substr(own.rfind(' ') + 1));
+			if (order < 0)
+				text.Format("the host's version of the mod is older than yours (host: %s, yours: %s). The host needs to "
+					"restart Crysis Coop: it updates itself when it starts", host.c_str(), own.c_str());
+			else if (order > 0)
+				text.Format("your version of the mod is older than the host's (yours: %s, host: %s). Restart Crysis Coop: "
+					"it updates itself when it starts", own.c_str(), host.c_str());
+			else
+				text.Format("the host has another version of the mod (%s, yours: %s). Both need the same one: "
+					"start Crysis Coop again, it updates itself", host.c_str(), own.c_str());
 			break;
 		}
 		case eDC_VersionMismatch: text = "the host's Crysis is another version (both need 1.2.1)"; break;
