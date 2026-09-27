@@ -59,7 +59,7 @@ Copy-Item -LiteralPath (Join-Path $root 'Installer\uninstall.ps1') -Destination 
 Copy-Item -LiteralPath (Join-Path $root 'LICENSE.txt') -Destination $mod
 Copy-Item -LiteralPath (Join-Path $root 'logo.jpg') -Destination $mod
 (Get-Content -LiteralPath (Join-Path $root 'info.xml.in') -Raw).
-    Replace('${CMAKE_PROJECT_NAME}', 'Coop').Replace('${CMAKE_PROJECT_VERSION}', $Version).
+    Replace('${CMAKE_PROJECT_NAME}', 'Coop').Replace('${COOP_MOD_VERSION}', $Version).
     Replace('${CMAKE_PROJECT_DESCRIPTION}', 'Crysis co-op campaign').
     Replace('${CMAKE_PROJECT_HOMEPAGE_URL}', 'https://github.com/SeniorStackOverflow/crysis-coop') |
     Set-Content -LiteralPath (Join-Path $mod 'info.xml') -Encoding UTF8

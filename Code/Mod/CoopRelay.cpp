@@ -25,6 +25,7 @@
 #include "CoopRelay.h"
 #include "CoopAI.h"
 #include "CoopCloud.h"
+#include "CoopMenu.h"
 #include "CoopSave.h"
 #include "CoopWebSocket.h"
 #include "Game.h"
@@ -32,6 +33,7 @@
 #include "ICryPak.h"
 #include "Menus/FlashMenuObject.h"
 #include "Menus/MPHub.h"
+#include "ICmdLine.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1088,6 +1090,9 @@ namespace
 	int s_rejoinTries = 0;
 	int s_dropCause = 0;
 	string s_dropText;
+	// why the last join ended, in words (the co-op menu shows it: the menu's
+	// own error box would be hidden under the co-op menu)
+	string s_joinFailText;
 	const float HOST_WAIT = 600.0f;
 	// host: the map command of a restart, run once the friends were told
 	string s_restartCommand;
@@ -1153,13 +1158,77 @@ namespace
 		}
 	}
 
-	// the friend's menu: why he is out of the game
+	// "<name> <version>" of this game's mod as the engine compares it with the
+	// host's: the running mod's info.xml (Mods\<-mod>\info.xml)
+	string OwnModVersion()
+	{
+		const ICmdLineArg* pMod = gEnv->pSystem->GetICmdLine()->FindArg(eCLAT_Pre, "mod");
+		const string mod = pMod && pMod->GetValue()[0] ? pMod->GetValue() : "Coop";
+		char exe[MAX_PATH] = {};
+		GetModuleFileNameA(0, exe, MAX_PATH);   // <game>\Bin32\Crysis.exe
+		for (int up = 0; up < 2; ++up)
+			if (char* slash = strrchr(exe, '\\'))
+				*slash = 0;
+		const string path = exe;
+		string xml;
+		if (FILE* f = fopen((path + "\\Mods\\" + mod + "\\info.xml").c_str(), "rb"))
+		{
+			char buf[4096];
+			xml.assign(buf, fread(buf, 1, sizeof(buf), f));
+			fclose(f);
+		}
+		// the <Mod> element's attributes (not the <?xml version=...?> line)
+		const string::size_type element = xml.find("<Mod");
+		auto attr = [&xml, element](const char* name) -> string
+		{
+			const string key = string(" ") + name + "=\"";
+			const string::size_type at = element == string::npos ? string::npos : xml.find(key.c_str(), element);
+			if (at == string::npos)
+				return string("?");
+			const string::size_type begin = at + key.length(), end = xml.find('"', begin);
+			return end == string::npos ? string("?") : xml.substr(begin, end - begin);
+		};
+		return attr("name") + " " + attr("version");
+	}
+
+	// the reason of a lost connection in the co-op menu's words
+	string DropReason()
+	{
+		string text;
+		switch (s_dropCause)
+		{
+		case eDC_ModMismatch:
+		{
+			// the engine's text: "Remote disconnected: <mod> <version>"
+			string host = s_dropText.length() > 21 ? s_dropText.substr(21) : string("?");
+			text.Format("the host has another version of the mod (%s, yours: %s). Both need the same one: "
+				"start Crysis Coop again, it updates itself", host.c_str(), OwnModVersion().c_str());
+			break;
+		}
+		case eDC_VersionMismatch: text = "the host's Crysis is another version (both need 1.2.1)"; break;
+		case eDC_ServerFull: text = "the host's game is full"; break;
+		case eDC_Timeout: text = "the host's game stopped answering"; break;
+		case eDC_MapNotFound: text.Format("this game has no level %s (run the mod's installer again)", s_dropText.c_str()); break;
+		default: text = "the connection to the host was lost"; break;
+		}
+		return text;
+	}
+
+	// the friend's menu: why he is out of the game. With the co-op menu open
+	// it says it there; the menu's error box would be under it
 	void ShowReason(const char* text)
 	{
+		s_joinFailText = text ? string(text) : DropReason();
+		CryLogAlways("[CoopRelay] out of the game: %s", s_joinFailText.c_str());
 		CFlashMenuObject* pMenu = g_pGame ? g_pGame->GetMenu() : 0;
 		if (CMPHub* pHub = pMenu ? pMenu->GetMPHub() : 0)
 		{
 			pHub->CloseLoadingDlg();
+			if (CoopMenu::IsOpen())
+			{
+				CoopMenu::OnJoinFailed();
+				return;
+			}
 			if (text)
 				pHub->ShowError(text, false);
 			else
@@ -1209,6 +1278,7 @@ namespace
 			return false;
 		}
 		StopJoin("left the last game");
+		s_joinFailText.clear();
 		s_joinedCode = code;
 		s_joinConnected = 0;
 		s_loggedJoinDirect = -1;
@@ -1587,9 +1657,9 @@ CoopRelay::EJoinState CoopRelay::GetJoinState(string* pError, int* pCode)
 	if (pCode)
 		*pCode = s_joinedCode;
 	if (pError)
-		*pError = s_joinError ? ErrorText(s_joinError) : "";
+		*pError = s_joinError ? string(ErrorText(s_joinError)) : s_joinFailText;
 	if (!s_joinAgent->Running())
-		return s_joinError ? eJS_Failed : eJS_None;
+		return s_joinError || !s_joinFailText.empty() ? eJS_Failed : eJS_None;
 	if (s_joinError)
 		return eJS_Failed;
 	if (s_waitingForHost)

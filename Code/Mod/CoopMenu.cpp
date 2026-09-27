@@ -137,6 +137,26 @@ namespace
 			text, a, r, g, b, UIDRAWHORIZONTAL_LEFT, UIDRAWVERTICAL_TOP, h, UIDRAWVERTICAL_TOP);
 	}
 
+	// a long text over several lines of at most maxChars, broken at spaces
+	void WrappedText(float x, float y, float size, const char* text, int maxChars, float r, float g, float b)
+	{
+		string rest = text;
+		for (float dy = 0; !rest.empty(); dy += size + 5)
+		{
+			string::size_type cut = rest.length();
+			if ((int)cut > maxChars)
+			{
+				cut = rest.rfind(' ', maxChars);
+				if (cut == string::npos || cut == 0)
+					cut = maxChars;
+			}
+			Text(x, y + dy, size, rest.substr(0, cut).c_str(), r, g, b);
+			rest = rest.substr(cut);
+			while (!rest.empty() && rest[0] == ' ')
+				rest = rest.substr(1);
+		}
+	}
+
 	bool Hover(float x, float y, float w, float h)
 	{
 		return s_mouseX >= x && s_mouseX < x + w && s_mouseY >= y && s_mouseY < y + h;
@@ -401,7 +421,7 @@ namespace
 		default: break;
 		}
 		if (!text.empty())
-			Text(x, PY + 190, 15, text.c_str(), 0.95f, 0.85f, 0.45f);
+			WrappedText(x, PY + 190, 15, text.c_str(), 52, 0.95f, 0.85f, 0.45f);
 		Button(ID_BACK, PX + PW - 130, PY + PH - 44, 110, 30, "Back");
 	}
 
@@ -846,6 +866,12 @@ bool CoopMenu::OnQuickGame()
 bool CoopMenu::IsOpen()
 {
 	return s_page != eP_Closed && Drawn();
+}
+
+void CoopMenu::OnJoinFailed()
+{
+	if (s_page != eP_Closed && s_page != eP_Join)
+		Open(eP_Join);
 }
 
 void CoopMenu::OnMenuClosed()

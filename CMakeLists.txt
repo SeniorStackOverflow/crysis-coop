@@ -26,6 +26,9 @@ endif()
 
 # prepare files in Crysis/Mods/MyMod/
 # PROJECT_BINARY_DIR is expected to be either Bin32/ or Bin64/ inside Crysis/Mods/MyMod/
+# Crysis Coop: the engine lets a friend in only with exactly the host's mod
+# version (info.xml): major.minor.patch, the same string tools/package.ps1 writes
+set(COOP_MOD_VERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${PROJECT_VERSION_PATCH}")
 configure_file(info.xml.in ${PROJECT_BINARY_DIR}/../info.xml)
 configure_file(logo.jpg ${PROJECT_BINARY_DIR}/../logo.jpg COPYONLY)
 

@@ -145,6 +145,8 @@ blocked UDP), the game keeps going through the relay.
 * A dead player comes back next to a teammate after 8 seconds.
 * Enemies, objectives, cutscenes and the story are the host's. Friends see and play them with him.
 * If the host leaves, the game ends for everyone.
+* The host and his friends need exactly the same version of the mod: the game refuses a friend with another one,
+  and the co-op menu says which versions they have. Starting **Crysis Coop** updates it (both of you).
 
 ## Uninstall
 

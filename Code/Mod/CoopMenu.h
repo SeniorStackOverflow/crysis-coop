@@ -27,6 +27,9 @@ namespace CoopMenu
 	// the Flash menu was closed: so is the panel
 	void OnMenuClosed();
 	bool IsOpen();
+	// a join (or a joined game) ended with an error: an open panel shows it
+	// on the Join page (CoopRelay::GetJoinState has the reason)
+	void OnJoinFailed();
 	// Network > Quick game (renamed "Co-op game"): opens the panel; true when
 	// the co-op menu took it
 	bool OnQuickGame();
