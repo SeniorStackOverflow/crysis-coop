@@ -662,6 +662,7 @@ namespace
 	}
 
 	void CmdWeaponInfo(IConsoleCmdArgs*);   // below
+	void CmdTestSave(IConsoleCmdArgs*);
 
 	void RegisterCommands()
 	{
@@ -669,6 +670,7 @@ namespace
 		if (s_added || !gEnv->pConsole)
 			return;
 		gEnv->pConsole->AddCommand("coop_aistats", CmdStats, 0, "Crysis Coop: log AI object statistics");
+		gEnv->pConsole->AddCommand("coop_test_save", CmdTestSave, 0, "Crysis Coop testing: coop_test_save [name] saves as the single player menu does");
 		gEnv->pConsole->AddCommand("coop_weapon_info", CmdWeaponInfo, 0, "Crysis Coop: log the damage of the local player's weapon and the item settings in use");
 		gEnv->pConsole->AddCommand("coop_dump_entities", CmdDumpEntities, 0, "Crysis Coop: write all entities to coop_entities_<side>_<tag>.txt");
 		gEnv->pConsole->AddCommand("coop_vehicle_restore", CmdVehicleRestore, 0, "Crysis Coop: restore a destroyed vehicle by entity name (server)");
@@ -1637,6 +1639,26 @@ bool CoopAI::IsCoopLevelName(const char* levelName)
 
 namespace
 {
+	// testing: a save as the single player menu's "Save" makes it
+	void CmdTestSave(IConsoleCmdArgs* pArgs)
+	{
+		string name = pArgs->GetArgCount() > 1 ? pArgs->GetArg(1) : "coop_test_save";
+		name += ".CRYSISJMSF";
+		IGameFramework* pF = g_pGame ? g_pGame->GetIGameFramework() : 0;
+		const bool can = pF && pF->CanSave();
+		const bool cutscene = pF && pF->GetIViewSystem() && pF->GetIViewSystem()->IsPlayingCutScene();
+		const bool ok = can && pF->SaveGame(name.c_str(), true, true, eSGR_QuickSave, true);
+		CryLogAlways("[CoopTest] save %s: %s (can save %d, cutscene %d)", name.c_str(), ok ? "done" : "FAILED", (int)can, (int)cutscene);
+		if (gEnv->pMovieSystem)
+			if (ISequenceIt* it = gEnv->pMovieSystem->GetSequences(true, false))
+			{
+				for (IAnimSequence* pSeq = it->first(); pSeq; pSeq = it->next())
+					CryLogAlways("[CoopTest]   playing sequence %s at %.1f s of %.1f", pSeq->GetName(), gEnv->pMovieSystem->GetPlayingTime(pSeq),
+						pSeq->GetTimeRange().end);
+				it->Release();
+			}
+	}
+
 	// the local player's weapon: its fire mode's damage, and the item settings in use
 	void CmdWeaponInfo(IConsoleCmdArgs*)
 	{
