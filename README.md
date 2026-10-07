@@ -11,6 +11,8 @@ Crysis mod (C++ game DLL, Lua and configs).
 * Friends join over the internet with a short code that stays the same (`coop_join 382615`). Nobody has to open or
   forward ports. When the host's game restarts (a checkpoint loads, a new game), the friends join again by themselves.
 * The game connects the players directly when it can (UDP hole punching), otherwise through a small relay server.
+* No friends around? One checkbox in the co-op menu starts an **AI companion**: a light second copy of the game in the
+  background, played by a bot, or by an AI agent through MCP (`CrysisCoop.exe -coop_mcp`).
 
 *Русское описание для игроков: [Mod/README_RU.md](Mod/README_RU.md)*
 
@@ -57,6 +59,14 @@ Crysis 1 has no co-op. The mod runs the single player levels as network maps.
     carry it on.
 * **Co-op menu.** A panel drawn with IUIDraw over the Flash main and in-game menus (`CoopMenu.cpp`). It takes the
   menu's mouse and keys before the Flash menu does. The HUD shows the host's code for a while.
+* **AI companion.** With the checkbox on (`coop_companion 1`), the host's game starts a second `Crysis.exe` with its
+  own profile (`CoopAgent.cpp`). It is a normal client: it joins the host through a small UDP relay on this PC, and
+  the host sees it as a player. The game is made light (800x450, lowest settings, no sound, 20 fps, low priority, other
+  CPU cores, window out of sight) and ends with the host. A bot plays its soldier: it steers the player's input, so
+  the stock game code does the walking, shooting, vehicles and revive. `CrysisCoop.exe -coop_mcp` (`Launcher/Mcp.cpp`) is
+  an MCP server over stdio that turns an AI agent's tool calls into requests to a small TCP bridge in the companion's
+  game (`127.0.0.1`, the port is in `%LOCALAPPDATA%\CrysisCoop\companiongent.port`). The agent sees text (`observe`)
+  and, when needed, a small picture (`screenshot`); the bot does the aiming and walking between its orders.
 * **Players and codes.** Every player has a random key made once. The relay keeps only its hash and gives each host
   a permanent code. The host tells the relay when his game restarts, and the friends' tunnels wait and reconnect
   their games (`CoopRelay.cpp`).
@@ -65,10 +75,10 @@ The files:
 
 | Path | |
 |---|---|
-| `Code/Mod/` | the game DLL (`Coop.dll`), based on the CryENGINE 2 Mod SDK game code. The coop work is mostly in `CoopAI.cpp`, `CoopRelay.cpp`, `CoopSave.cpp`, `CoopCloud.cpp`, `CoopMenu.cpp`, `CoopRevive.cpp`, `Nodes/CoopFlowNodes.cpp`, plus hooks in the stock files |
+| `Code/Mod/` | the game DLL (`Coop.dll`), based on the CryENGINE 2 Mod SDK game code. The coop work is mostly in `CoopAI.cpp`, `CoopRelay.cpp`, `CoopSave.cpp`, `CoopCloud.cpp`, `CoopMenu.cpp`, `CoopRevive.cpp`, `CoopAgent.cpp` (the AI companion), `Nodes/CoopFlowNodes.cpp`, plus hooks in the stock files |
 | `Code/CryEngine/` | engine interface headers from the SDK |
 | `Mod/` | the mod's Lua scripts and configs (copied to `Mods/Coop`) |
-| `Launcher/` | `CrysisCoop.exe`: starts the game with the mod, checks what the mod needs first, and updates the mod by itself (`Update.cpp`: signed manifest, from the VPS or GitHub) |
+| `Launcher/` | `CrysisCoop.exe`: starts the game with the mod, checks what the mod needs first, and updates the mod by itself (`Update.cpp`: signed manifest, from the VPS or GitHub); `CrysisCoop.exe -coop_mcp` is the MCP server for AI agents (`Mcp.cpp`) |
 | `Installer/` | `install.ps1`, `install.bat`, `uninstall.ps1`; `install_linux.py` for Linux (the game under Wine) |
 | `Relay/` | the relay server (Python, no dependencies: tunnel, codes, cloud checkpoints) and its deployment |
 | `tools/` | `package.ps1` (release archive and signed update), `publish_update.ps1` (update to the VPS), `update_key.ps1` (the release key), `lua_check.py` |

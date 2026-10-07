@@ -13,6 +13,7 @@
 *************************************************************************/
 #include "StdAfx.h"
 #include "Game.h"
+#include "CoopAgent.h"
 #include "GameCVars.h"
 #include "CoopAI.h"
 #include "CoopRelay.h"
@@ -160,6 +161,7 @@ bool CGame::Init(IGameFramework *pFramework)
 	RegisterConsoleVars();
 	RegisterConsoleCommands();
 	CoopAI::Init();
+	CoopAgent::Init();
 	RegisterGameObjectEvents();
 
 	// Initialize static item strings
@@ -413,9 +415,11 @@ int CGame::Update(bool haveFocus, unsigned int updateFlags)
 		m_pSoundMoods->Update();
 
 		CoopAI::Update(frameTime);
+		CoopAgent::Update(frameTime);
 	}
 
 	m_pFramework->PostUpdate( true, updateFlags );
+	CoopAgent::EndFrame();
 
 	if(m_inDevMode != gEnv->pSystem->IsDevMode())
 	{

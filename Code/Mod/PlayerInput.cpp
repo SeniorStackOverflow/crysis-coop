@@ -4,6 +4,7 @@
 // -------------------------------------------------------------------------
 #include "StdAfx.h"
 #include "PlayerInput.h"
+#include "CoopAgent.h"
 #include "Player.h"
 #include "Game.h"
 #include "GameCVars.h"
@@ -745,6 +746,9 @@ void CPlayerInput::PreUpdate()
 		else
 			m_actions &= ~ACTION_MOVE;
 	}
+
+	// Crysis Coop: the AI companion's bot turns, moves, runs and jumps here
+	CoopAgent::SteerInput(m_pPlayer, deltaRotation, m_deltaMovement, m_actions);
 
 	bool animControlled(m_pPlayer->m_stats.animationControlled);
 

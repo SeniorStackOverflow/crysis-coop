@@ -5656,6 +5656,16 @@ void CoopAI::OnEyeView(EntityId playerId)
 	s_eyeViewTime = gEnv->pTimer->GetCurrTime();
 }
 
+EntityId CoopAI::HostPlayerId()
+{
+	if (gEnv->bServer)
+	{
+		IActor* pHost = g_pGame ? g_pGame->GetIGameFramework()->GetClientActor() : 0;
+		return pHost ? pHost->GetEntityId() : 0;
+	}
+	return s_hostPlayerId;
+}
+
 bool CoopAI::GetMirroredAI(EntityId id, bool& hostile, int& alertness, bool* pEnabled)
 {
 	if (gEnv->bServer || s_aiStateMirror.empty())

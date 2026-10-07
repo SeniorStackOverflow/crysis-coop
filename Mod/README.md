@@ -88,6 +88,37 @@ the keyboard, still in the water). At the end of a level, everybody goes on to t
   * other campaigns or a new one.
 * A friend sees the connection and can **Leave the game**.
 
+## No friends around: the AI companion
+
+The host can turn on **AI companion** (Esc → Co-op game, the checkbox "AI companion (a second player, bot or AI agent)",
+or `coop_companion 1`). The game then starts a second, stripped-down copy of Crysis in the background. It joins your
+campaign like a friend, about a minute later (the level has to load), and plays the second soldier:
+
+* follows you, fires at the enemies it sees, revives you when you are down, gets into your vehicle;
+* lets you get up as usual: when everybody is down the team goes back to the last checkpoint.
+
+The copy is made to be light: it renders at 800x450 with the lowest settings, has no sound or microphone, is limited to
+20 frames a second, runs with a low priority on other CPU cores than your game, and its window stays out of sight (no
+taskbar button, never in front, never takes the mouse). It ends when you turn the checkbox off or close your game.
+Plan for about 800 MB of memory more.
+
+**An AI agent as the second player.** The same companion can be played by an AI model (Claude, or any program that
+speaks MCP, the Model Context Protocol). `CrysisCoop.exe -coop_mcp` is the MCP server (stdio); it talks to the
+companion's game on this PC. For Claude Desktop add to `claude_desktop_config.json`:
+
+```json
+{ "mcpServers": { "crysis-coop": { "command": "C:\\GOG Games\\Crysis\\CrysisCoop.exe", "args": ["-coop_mcp"] } } }
+```
+
+For Claude Code: `claude mcp add crysis-coop -- "C:\GOG Games\Crysis\CrysisCoop.exe" -coop_mcp`.
+
+Start the co-op game, turn the companion on, and tell the agent to play. Its tools: `observe` (the companion's state, the
+teammates, the enemies near it, vehicles, the chat and what happened since the last look), `screenshot` (what the companion
+sees, a small picture, only when text is not enough), `say` (the chat: you read it on your screen), `play_freely`,
+`follow`, `hold`, `go_to`, `move`, `attack`, `revive`, `fire_at_will`, `use`, `switch_weapon` and `suit_mode`. A text
+agent costs next to nothing: `observe` is a few hundred tokens, and the bot does the aiming, walking and driving by itself
+between the agent's orders.
+
 ## Saving
 
 The host's game saves the progress by itself, like the single player

@@ -14,6 +14,7 @@ History:
 #include "CoopAI.h"
 #include "ScriptBind_GameRules.h"
 #include "GameRules.h"
+#include "CoopAgent.h"
 #include "Game.h"
 #include "GameCVars.h"
 #include "Actor.h"
@@ -1257,6 +1258,13 @@ IMPLEMENT_RMI(CGameRules, SvCoopSync)
 	{
 		if (CActor* pActor = GetActorByChannelId(m_pGameFramework->GetGameChannelId(pNetChannel)))
 			CoopRevive::OnInputFromClient(pActor->GetEntityId(), params.name.c_str(), params.op == 1);
+		return true;
+	}
+	// the AI companion asks to catch up, to get into or out of a vehicle
+	if (params.kind == 15)
+	{
+		if (CActor* pActor = GetActorByChannelId(m_pGameFramework->GetGameChannelId(pNetChannel)))
+			CoopAgent::OnServerRequest(pActor->GetEntityId(), params.op, params.name.c_str());
 		return true;
 	}
 	CoopAI::OnSyncMirror(params.kind, params.op, params.entity, params.name.c_str(), params.text.c_str(), params.type, params.f, true);

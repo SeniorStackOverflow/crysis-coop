@@ -14,6 +14,7 @@
 #include "CoopAI.h"
 #include "ScriptBind_GameRules.h"
 #include "GameRules.h"
+#include "CoopAgent.h"
 #include "Game.h"
 #include "GameCVars.h"
 #include "Actor.h"
@@ -731,6 +732,7 @@ void CGameRules::OnTextMessage(ETextMessageType type, const char *msg,
 //------------------------------------------------------------------------
 void CGameRules::OnChatMessage(EChatMessageType type, EntityId sourceId, EntityId targetId, const char *msg, bool teamChatOnly)
 {
+	CoopAgent::OnChat(sourceId, msg);
 	//send chat message to hud
 	int teamFaction = 0;
 	if(IActor *pActor = gEnv->pGame->GetIGameFramework()->GetClientActor())

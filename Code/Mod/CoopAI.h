@@ -59,6 +59,8 @@ namespace CoopAI
 	// objects): enemy of the players? alertness 0 idle, 1 suspicious, 2 combat.
 	// false when unknown (and always on the server)
 	bool GetMirroredAI(EntityId id, bool& hostile, int& alertness, bool* pEnabled = 0);
+	// the host's player (on a client: as the server said; on the server: its own)
+	EntityId HostPlayerId();
 	// client: a living enemy sits in the vehicle (the vehicle's own check,
 	// which keeps the players out then, asks AI objects a client has not)
 	bool IsVehicleCrewHostile(IVehicle* pVehicle);

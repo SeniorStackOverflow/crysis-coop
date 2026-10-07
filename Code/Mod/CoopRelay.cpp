@@ -1483,7 +1483,9 @@ void CoopRelay::Update(float frameTime)
 	{
 		s_keyboardDone = true;
 		LoadPlayer();
-		if (s_pEnglishKeyboard && s_pEnglishKeyboard->GetIVal())
+		// not in a game nobody types into (a test, the AI companion's): the
+		// system's language indicator would change with it
+		if (s_pEnglishKeyboard && s_pEnglishKeyboard->GetIVal() && !strstr(GetCommandLineA(), "coop_test_free_cursor"))
 			LoadKeyboardLayoutA("00000409", KLF_ACTIVATE);
 	}
 	CoopCloud::Update();

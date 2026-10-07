@@ -19,11 +19,15 @@
 // (Update.cpp; -coop_noupdate skips it, -coop_update_only updates without
 // starting the game: exit code 0 up to date, 10 updated, 11 skipped, 12
 // failed).
+//
+// -coop_mcp: no game, an MCP server on stdio for AI agents who play the AI
+// companion (Mcp.h).
 #include <windows.h>
 
 #include <string>
 #include <vector>
 
+#include "Mcp.h"
 #include "Update.h"
 
 namespace
@@ -156,6 +160,9 @@ namespace
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR args, int)
 {
 	const std::wstring extra = args ? args : L"";
+	// an MCP server for AI agents (stdio), no game: see Mcp.h
+	if (HasArg(extra, L"-coop_mcp"))
+		return Mcp::Run(extra);
 	s_quiet = HasArg(extra, L"-coop_check");
 	const std::wstring game = FindGame();
 	if (game.empty())

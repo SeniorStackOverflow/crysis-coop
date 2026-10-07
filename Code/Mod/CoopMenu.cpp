@@ -7,6 +7,7 @@
 #include "StdAfx.h"
 #include "CoopMenu.h"
 #include "CoopAI.h"
+#include "CoopAgent.h"
 #include "CoopCloud.h"
 #include "CoopRelay.h"
 #include "CoopSave.h"
@@ -41,7 +42,7 @@ namespace
 		ID_CLOUD, ID_DIRECT, ID_KEYBOARD,
 		ID_NAME_FIELD, ID_CODE_FIELD, ID_JOIN, ID_LEAVE,
 		ID_LIST_UP, ID_LIST_DOWN, ID_REFRESH, ID_CAMPAIGN_CONTINUE, ID_CAMPAIGN_PREV, ID_CAMPAIGN_DELETE,
-		ID_SAVE, ID_LOAD, ID_LOAD_PREV, ID_GAME_CAMPAIGNS,
+		ID_SAVE, ID_LOAD, ID_LOAD_PREV, ID_GAME_CAMPAIGNS, ID_COMPANION,
 		ID_LEVEL = 100,     // + level index
 		ID_ROW = 200,       // + campaign index
 	};
@@ -317,6 +318,9 @@ namespace
 	{
 		Toggle(ID_CLOUD, PX + 30, y, "Keep my checkpoints in the cloud", CVarOn("coop_cloud"));
 		Toggle(ID_DIRECT, PX + 30, y + 24, "Connect directly when possible (lower latency)", CVarOn("coop_direct"));
+		// no friend at hand: a second player played by the game, or by an AI
+		// agent (MCP), in a light copy of the game in the background
+		Toggle(ID_COMPANION, PX + 30, y + 48, "AI companion (a second player, bot or AI agent)", CVarOn("coop_companion"));
 	}
 
 	void DrawMain()
@@ -446,6 +450,13 @@ namespace
 			text.Format("Friends in the game: %d%s", friends, friends ? string().Format(" (%d directly)", direct).c_str() : "");
 			Text(x, y, 15, text.c_str());
 			y += 22;
+			if (CVarOn("coop_companion"))
+			{
+				const int state = CoopAgent::CompanionState();
+				Text(x, y, 13, state == 2 ? "AI companion: in the game (AI agents: CrysisCoop.exe -coop_mcp)"
+					: state == 1 ? "AI companion: joining..." : "AI companion: starting...", 0.7f, 0.85f, 0.95f);
+				y += 18;
+			}
 			const char* campaign = CoopSave::CurrentCampaign();
 			text.Format("Campaign: %s", campaign[0] ? campaign : "(saved at the first checkpoint)");
 			Text(x, y, 15, text.c_str());
@@ -484,7 +495,7 @@ namespace
 			Button(ID_LEAVE, x, y, w, 36, "Leave the game");
 			y += 60;
 		}
-		DrawSettings(PY + PH - 110);
+		DrawSettings(PY + PH - 134);
 		StatusLine(x, PY + PH - 62);
 	}
 
@@ -554,6 +565,11 @@ namespace
 			FlipCVar("coop_cloud");
 		else if (id == ID_DIRECT)
 			FlipCVar("coop_direct");
+		else if (id == ID_COMPANION)
+		{
+			FlipCVar("coop_companion");
+			Note(CVarOn("coop_companion") ? "AI companion on: it joins your game in a moment" : "AI companion off");
+		}
 		else if (id == ID_NAME_FIELD || id == ID_CODE_FIELD)
 			s_focus = id;
 		else if (id == ID_JOIN)

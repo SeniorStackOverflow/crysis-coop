@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.15)
 ################################################################################
 
 project(Coop
-	VERSION 0.9.0.0
+	VERSION 0.10.0.0
 	DESCRIPTION "Crysis co-op campaign"
 	HOMEPAGE_URL "https://github.com/SeniorStackOverflow/crysis-coop"
 	LANGUAGES CXX RC
@@ -59,6 +59,8 @@ add_library(${CMAKE_PROJECT_NAME} MODULE
 	Code/Mod/CoopMenu.cpp
 	Code/Mod/CoopRelay.cpp
 	Code/Mod/CoopRevive.cpp
+	Code/Mod/CoopAgent.cpp
+	Code/Mod/CoopJpeg.cpp
 	Code/Mod/CoopSave.cpp
 	Code/Mod/CoopWebSocket.cpp
 	Code/Mod/CompatibilityAlienMovementController.cpp
@@ -268,6 +270,7 @@ add_executable(CrysisCoop WIN32
 	Launcher/Launcher.cpp
 	Launcher/Launcher.rc
 	Launcher/Update.cpp
+	Launcher/Mcp.cpp
 )
 
 set_source_files_properties(Launcher/Launcher.rc PROPERTIES OBJECT_DEPENDS
@@ -277,4 +280,4 @@ target_include_directories(CrysisCoop PRIVATE ${PROJECT_BINARY_DIR})
 target_compile_definitions(CrysisCoop PRIVATE UNICODE _UNICODE)
 # the Russian messages are UTF-8
 target_compile_options(CrysisCoop PRIVATE /utf-8)
-target_link_libraries(CrysisCoop PRIVATE version winhttp bcrypt)
+target_link_libraries(CrysisCoop PRIVATE version winhttp bcrypt ws2_32)
