@@ -150,6 +150,7 @@ namespace
 			*f.value = s_maxPlayers;
 			++restored;
 		}
+		CoopAI::ResetHitchTimer();
 		CryLogAlways("[CoopSave] after the load: player limit %d %s (%d candidates); game clock of the save %.1f s, before the load %.1f s", s_maxPlayers,
 			restored == 1 ? "restored" : restored ? "restored in several places" : "NOT FOUND", (int)s_fields.size(), gameTime, s_gameTimeBefore);
 		s_fields.clear();

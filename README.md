@@ -61,12 +61,12 @@ Crysis 1 has no co-op. The mod runs the single player levels as network maps.
   menu's mouse and keys before the Flash menu does. The HUD shows the host's code for a while.
 * **AI companion.** With the checkbox on (`coop_companion 1`), the host's game starts a second `Crysis.exe` with its
   own profile (`CoopAgent.cpp`). It is a normal client: it joins the host through a small UDP relay on this PC, and
-  the host sees it as a player. The game is made light (800x450, lowest settings, no sound, 20 fps, low priority, other
-  CPU cores, window out of sight) and ends with the host. A bot plays its soldier: it steers the player's input, so
+  the host sees it as a player. The game is made light (no renderer at all: `r_Driver NULL`, no sound, 20 fps, low CPU,
+  I/O and memory priority, other CPU cores, no window) and ends with the host. A bot plays its soldier: it steers the player's input, so
   the stock game code does the walking, shooting, vehicles and revive. `CrysisCoop.exe -coop_mcp` (`Launcher/Mcp.cpp`) is
   an MCP server over stdio that turns an AI agent's tool calls into requests to a small TCP bridge in the companion's
-  game (`127.0.0.1`, the port is in `%LOCALAPPDATA%\CrysisCoop\companiongent.port`). The agent sees text (`observe`)
-  and, when needed, a small picture (`screenshot`); the bot does the aiming and walking between its orders.
+  game (`127.0.0.1`, the port is in `%LOCALAPPDATA%\CrysisCoop\companion\agent.port`). The agent sees text (`observe`;
+  `screenshot` only when the companion's game renders); the bot does the aiming and walking between its orders.
 * **Players and codes.** Every player has a random key made once. The relay keeps only its hash and gives each host
   a permanent code. The host tells the relay when his game restarts, and the friends' tunnels wait and reconnect
   their games (`CoopRelay.cpp`).

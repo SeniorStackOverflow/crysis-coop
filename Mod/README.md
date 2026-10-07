@@ -97,10 +97,11 @@ campaign like a friend, about a minute later (the level has to load), and plays 
 * follows you, fires at the enemies it sees, revives you when you are down, gets into your vehicle;
 * lets you get up as usual: when everybody is down the team goes back to the last checkpoint.
 
-The copy is made to be light: it renders at 800x450 with the lowest settings, has no sound or microphone, is limited to
-20 frames a second, runs with a low priority on other CPU cores than your game, and its window stays out of sight (no
-taskbar button, never in front, never takes the mouse). It ends when you turn the checkbox off or close your game.
-Plan for about 800 MB of memory more.
+The copy is made to be light: it draws nothing (no graphics at all, so it also works next to your fullscreen game),
+has no sound or microphone, is limited to 20 frames a second, runs with a low priority on other CPU cores than your
+game, and shows no window (no taskbar button, never in front, never takes the mouse). It ends when you turn the
+checkbox off or close your game. Plan for about 700 MB of memory more. If its game does not start, the co-op menu
+says so; turn the checkbox off and on to try again.
 
 **An AI agent as the second player.** The same companion can be played by an AI model (Claude, or any program that
 speaks MCP, the Model Context Protocol). `CrysisCoop.exe -coop_mcp` is the MCP server (stdio); it talks to the
@@ -113,8 +114,8 @@ companion's game on this PC. For Claude Desktop add to `claude_desktop_config.js
 For Claude Code: `claude mcp add crysis-coop -- "C:\GOG Games\Crysis\CrysisCoop.exe" -coop_mcp`.
 
 Start the co-op game, turn the companion on, and tell the agent to play. Its tools: `observe` (the companion's state, the
-teammates, the enemies near it, vehicles, the chat and what happened since the last look), `screenshot` (what the companion
-sees, a small picture, only when text is not enough), `say` (the chat: you read it on your screen), `play_freely`,
+teammates, the enemies near it, vehicles, the chat and what happened since the last look), `screenshot` (a picture of what the companion
+sees: not available while its game runs without graphics, which is the default), `say` (the chat: you read it on your screen), `play_freely`,
 `follow`, `hold`, `go_to`, `move`, `attack`, `revive`, `fire_at_will`, `use`, `switch_weapon` and `suit_mode`. A text
 agent costs next to nothing: `observe` is a few hundred tokens, and the bot does the aiming, walking and driving by itself
 between the agent's orders.

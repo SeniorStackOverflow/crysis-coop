@@ -1819,6 +1819,7 @@ namespace
 
 void CoopAI::OnLoadingComplete()
 {
+	ResetHitchTimer();
 	static bool s_breakTrace = false;
 	if (!s_breakTrace && gEnv->pPhysicalWorld)
 	{
@@ -2361,11 +2362,14 @@ namespace
 			if (r.t <= 0.0f)
 			{
 				if (CGameRules* pRules = g_pGame->GetGameRules())
-					if (pRules->GetActorByChannelId(r.channel))
-					{
-						pRules->CoopSendObjectives(r.channel);
-						SendSyncHistory(r.channel);
-					}
+					if (CActor* pActor = pRules->GetActorByChannelId(r.channel))
+						// not the host's own player: it has all of this (the
+						// whole world, a thousand messages, every 10 s)
+						if (!pActor->IsClient())
+						{
+							pRules->CoopSendObjectives(r.channel);
+							SendSyncHistory(r.channel);
+						}
 				if (--r.left > 0)
 				{
 					r.t = 10.0f;
@@ -2732,8 +2736,31 @@ namespace
 	}
 }
 
+namespace
+{
+	// a frame that took long (a freeze): in the log with the time it took,
+	// so a player's report of a freeze can be found (not while loading)
+	CTimeValue s_hitchLast;
+	void LogHitch()
+	{
+		CTimeValue& s_last = s_hitchLast;
+		const CTimeValue now = gEnv->pTimer->GetAsyncTime();
+		const float ms = s_last.GetValue() ? (now - s_last).GetMilliSeconds() : 0.0f;
+		s_last = now;
+		if (ms > 300.0f && !s_inLoading && g_pGame && g_pGame->GetIGameFramework()->GetClientActor())
+			CryLogAlways("[CoopHitch] a frame took %.0f ms", ms);
+	}
+}
+
+// a level or a save was loaded: that time is no freeze
+void CoopAI::ResetHitchTimer()
+{
+	s_hitchLast.SetValue(0);
+}
+
 void CoopAI::Update(float frameTime)
 {
+	LogHitch();
 	UpdateTestCursor();
 	UpdateTestCmdFile();
 	CoopRelay::Update(frameTime);
@@ -5446,6 +5473,8 @@ namespace
 				{
 					pRules->CoopSendSync(eSync_Sequence, eSeq_Start, 0, name.c_str(), "", pSeq->GetFlags(), t, 0);
 					CoopAI::Trace("SYNC> cutscene start %s t=%.2f", name.c_str(), t);
+					if (pSeq->GetFlags() & IAnimSequence::CUT_SCENE)
+						CryLogAlways("[CoopCutscene] %s started (%.1f s long)", name.c_str(), pSeq->GetTimeRange().end);
 				}
 				else if (sendTimes)
 					pRules->CoopSendSync(eSync_Sequence, eSeq_Time, 0, name.c_str(), "", 0, t, 0);
@@ -5457,6 +5486,14 @@ namespace
 			{
 				pRules->CoopSendSync(eSync_Sequence, eSeq_Stop, 0, it->first.c_str(), "", 0, 0.0f, 0);
 				CoopAI::Trace("SYNC> cutscene stop %s", it->first.c_str());
+				// cut short (skipped, aborted) or played to the end
+				if (IAnimSequence* pSeq = gEnv->pMovieSystem->FindSequence(it->first.c_str()))
+					if (pSeq->GetFlags() & IAnimSequence::CUT_SCENE)
+					{
+						const float len = pSeq->GetTimeRange().end;
+						CryLogAlways("[CoopCutscene] %s ended at %.1f of %.1f s%s", it->first.c_str(), it->second, len,
+							it->second < len - 1.0f ? " (cut short)" : "");
+					}
 			}
 		s_seqServer.swap(now);
 	}
@@ -6616,6 +6653,10 @@ void CoopAI::SendFlowHistory(int channelId)
 	CGameRules* pRules = g_pGame ? g_pGame->GetGameRules() : 0;
 	if (!pRules || !gEnv->bServer)
 		return;
+	// the host's own player has seen all of it
+	if (CActor* pActor = pRules->GetActorByChannelId(channelId))
+		if (pActor->IsClient())
+			return;
 	for (size_t i = 0; i < s_flowHistory.size(); ++i)
 	{
 		const SFlowMsg& m = s_flowHistory[i];

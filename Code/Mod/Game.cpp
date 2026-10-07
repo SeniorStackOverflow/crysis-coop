@@ -607,6 +607,7 @@ void CGame::OnSaveGame(ISaveGame* pSaveGame)
 
 void CGame::OnLoadGame(ILoadGame* pLoadGame)
 {
+	CoopAI::ResetHitchTimer();
 	int difficulty = g_pGameCVars->g_difficultyLevel;
 	pLoadGame->GetMetadata("sp_difficulty", difficulty);
 	if(difficulty != g_pGameCVars->g_difficultyLevel)

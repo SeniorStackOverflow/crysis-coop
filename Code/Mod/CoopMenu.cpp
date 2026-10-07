@@ -454,7 +454,8 @@ namespace
 			{
 				const int state = CoopAgent::CompanionState();
 				Text(x, y, 13, state == 2 ? "AI companion: in the game (AI agents: CrysisCoop.exe -coop_mcp)"
-					: state == 1 ? "AI companion: joining..." : "AI companion: starting...", 0.7f, 0.85f, 0.95f);
+					: state == 1 ? "AI companion: joining..." : state == 3 ? "AI companion: its game did not start (companion.log). Turn it off and on to try again"
+					: "AI companion: starting...", 0.7f, 0.85f, 0.95f);
 				y += 18;
 			}
 			const char* campaign = CoopSave::CurrentCampaign();

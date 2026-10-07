@@ -502,7 +502,7 @@ namespace
 			"{\"type\":\"object\",\"properties\":{\"weapon\":{\"type\":\"string\",\"description\":\"empty = the next one\"}}}" },
 		{ "suit_mode", "Set the nanosuit mode.",
 			"{\"type\":\"object\",\"properties\":{\"mode\":{\"type\":\"string\",\"enum\":[\"armor\",\"speed\",\"strength\",\"cloak\"]}},\"required\":[\"mode\"]}" },
-		{ "screenshot", "What the companion sees now, as a small picture (its game renders small to stay light).",
+		{ "screenshot", "What the companion sees now, as a small picture. Its game usually runs without graphics to stay light: then there is no picture, and observe is the way to look.",
 			"{\"type\":\"object\",\"properties\":{}}" },
 	};
 

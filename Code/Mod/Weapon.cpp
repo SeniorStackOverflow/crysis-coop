@@ -660,8 +660,12 @@ void CWeapon::FullSerialize( TSerialize ser )
 			if(numFiremodes != GetNumOfFireModes())
 				CryWarning(VALIDATOR_MODULE_GAME, VALIDATOR_ERROR, "Num of firemodes changed - loading will be corrupted.");
 		}
+		// Crysis Coop: a save made with other weapon settings (the network
+		// game's, before 0.10.1) has another number of fire modes: the ones
+		// this weapon has are read, the others left (a save is read by name)
 		for(int i = 0; i < numFiremodes; ++i)
-			m_firemodes[i]->Serialize(ser);
+			if (i < (int)m_firemodes.size() && m_firemodes[i])
+				m_firemodes[i]->Serialize(ser);
     
 		bool hasZoom = (m_zm)?true:false;
 		ser.Value("hasZoom", hasZoom);
@@ -776,12 +780,16 @@ void CWeapon::SerializeLTL(TSerialize ser)
 			if(numFiremodes != GetNumOfFireModes())
 				CryWarning(VALIDATOR_MODULE_GAME, VALIDATOR_ERROR, "Num of firemodes changed - loading will be corrupted.");
 		}
+		// Crysis Coop: a save made with other weapon settings (the network
+		// game's, before 0.10.1) has another number of fire modes: the ones
+		// this weapon has are read, the others left (a save is read by name)
 		for(int i = 0; i < numFiremodes; ++i)
-			m_firemodes[i]->Serialize(ser);
+			if (i < (int)m_firemodes.size() && m_firemodes[i])
+				m_firemodes[i]->Serialize(ser);
 		int currentFireMode = GetCurrentFireMode();
 		ser.Value("currentFireMode", currentFireMode);
 		if(ser.IsReading())
-			SetCurrentFireMode(currentFireMode);
+			SetCurrentFireMode((currentFireMode >= 0 && currentFireMode < GetNumOfFireModes()) ? currentFireMode : 0);
 
 		bool hasZoom = (m_zm)?true:false;
 		ser.Value("hasZoom", hasZoom);
@@ -2076,6 +2084,9 @@ void CWeapon::SetCurrentZoomMode(int idx)
 {
 	if (m_zoommodes.empty())
 		return;
+	// Crysis Coop: a save made with other weapon settings may name a zoom mode this weapon has not
+	if (idx < 0 || idx >= (int)m_zoommodes.size())
+		idx = 0;
 
 	m_zm = m_zoommodes[idx];
 	m_zmId = idx;

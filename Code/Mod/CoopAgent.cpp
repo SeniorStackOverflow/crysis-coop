@@ -1081,6 +1081,8 @@ namespace
 		{
 			if (!s_shotId.empty())
 				Reply(id.c_str(), Fail("a screenshot is being taken"));
+			else if (!gEnv->pRenderer || gEnv->pRenderer->GetRenderType() == eRT_Null)
+				Reply(id.c_str(), Fail("the companion's game runs without graphics (to stay light and next to a fullscreen game): no picture, observe tells what it sees"));
 			else
 			{
 				gEnv->pRenderer->EnableSwapBuffers(false);
@@ -1470,25 +1472,9 @@ namespace
 	PROCESS_INFORMATION s_proc = {};
 	float s_notWantedSince = -1.0f, s_restartAt = 0.0f, s_startedAt = 0.0f, s_lockUntil = 0.0f;
 	int s_starts = 0;
-	bool s_windowDone = false;
 	HANDLE s_hookStop = 0;              // ends the window hook's thread
 	volatile LONG s_hookMs = -1;        // when the hook was set, ms after the start (-2: never)
 	bool s_hookLogged = false;
-
-	struct SFind { DWORD pid; HWND hWnd; };
-	BOOL CALLBACK FindProcessWindow(HWND hWnd, LPARAM lParam)
-	{
-		SFind* f = (SFind*)lParam;
-		DWORD pid = 0;
-		GetWindowThreadProcessId(hWnd, &pid);
-		RECT r;
-		if (pid == f->pid && !GetParent(hWnd) && GetWindowRect(hWnd, &r) && r.right - r.left > 100)
-		{
-			f->hWnd = hWnd;
-			return FALSE;
-		}
-		return TRUE;
-	}
 
 	// The engine makes its window before this DLL is loaded into that game.
 	// A hook on its main thread has Windows load the DLL at the first window,
@@ -1588,7 +1574,7 @@ namespace
 				while (*p == ' ' || *p == '\t')
 					++p;
 				if (!_strnicmp(p, "r_Fullscreen", 12) || !_strnicmp(p, "r_Width", 7) || !_strnicmp(p, "r_Height", 8)
-					|| !_strnicmp(p, "s_SoundEnable", 13) || !_strnicmp(p, "s_DummySound", 12))
+					|| !_strnicmp(p, "s_SoundEnable", 13) || !_strnicmp(p, "s_DummySound", 12) || !_strnicmp(p, "r_Driver", 8))
 					continue;
 				kept += line;
 			}
@@ -1599,7 +1585,11 @@ namespace
 		// and no sound system at all: it opened the microphone as it started
 		// (Windows' "microphone in use" icon came and went in the taskbar);
 		// on the command line it is set too late for that
-		kept += "r_Fullscreen = 0\nr_Width = 480\nr_Height = 270\ns_SoundEnable = 0\ns_DummySound = 1\n";
+		// no renderer at all (the dedicated server's): the companion's game
+		// crashed making its Direct3D device next to the host's fullscreen
+		// game, and a bot needs no picture. Read before the renderer starts
+		// (the command line comes after)
+		kept += "r_Driver = \"NULL\"\nr_Fullscreen = 0\nr_Width = 800\nr_Height = 450\ns_SoundEnable = 0\ns_DummySound = 1\n";
 		if (FILE* f = _wfopen(path.c_str(), L"wb"))
 		{
 			fwrite(kept.data(), 1, kept.size(), f);
@@ -1636,8 +1626,31 @@ namespace
 		CloseHandle(h);
 	}
 
+	// The companion's game reads its paks while it starts, a lot of disk at
+	// once: the host's game, which streams from the same disk, stood still up
+	// to 2 s. Its reads and its memory come last (very low I/O priority, low
+	// memory priority), set before it runs.
+	void LowerCompanionPriority(HANDLE process)
+	{
+		typedef LONG (WINAPI *TNtSetInformationProcess)(HANDLE, ULONG, PVOID, ULONG);
+		static TNtSetInformationProcess pSet = (TNtSetInformationProcess)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtSetInformationProcess");
+		if (pSet)
+		{
+			ULONG ioPriority = 0;    // ProcessIoPriority (33): very low
+			pSet(process, 33, &ioPriority, sizeof(ioPriority));
+		}
+		typedef BOOL (WINAPI *TSetProcessInformation)(HANDLE, int, LPVOID, DWORD);
+		static TSetProcessInformation pInfo = (TSetProcessInformation)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetProcessInformation");
+		if (pInfo)
+		{
+			ULONG memoryPriority = 2;    // ProcessMemoryPriority (0): MEMORY_PRIORITY_LOW
+			pInfo(process, 0, &memoryPriority, sizeof(memoryPriority));
+		}
+	}
+
 	void StartCompanion()
 	{
+		const DWORD t0 = GetTickCount();
 		StopLeftover();
 		wchar_t exe[MAX_PATH], dll[MAX_PATH];
 		GetModuleFileNameW(NULL, exe, MAX_PATH);
@@ -1680,7 +1693,7 @@ namespace
 		MultiByteToWideChar(CP_UTF8, 0, tail, -1, wtail, 512);
 		// the host's own mode (a server refuses a client whose -devmode differs)
 		const bool devmode = wcsstr(GetCommandLineW(), L"-devmode") != 0;
-		std::wstring line = L"\"" + std::wstring(exe) + L"\" -mod " + mod + L" -dx9" + (devmode ? L" -devmode" : L"") + L" -userpath \"" + profile + L"\" -logfile companion.log" + wtail;
+		std::wstring line = L"\"" + std::wstring(exe) + L"\" -mod " + mod + (devmode ? L" -devmode" : L"") + L" -userpath \"" + profile + L"\" -logfile companion.log" + wtail;
 		std::vector<wchar_t> buf(line.begin(), line.end());
 		buf.push_back(0);
 		STARTUPINFOW si = {};
@@ -1697,7 +1710,7 @@ namespace
 		// the host's game (a new window takes it when the player has not
 		// touched a key for a while; the host's fullscreen game would go)
 		if (LockSetForegroundWindow(LSFW_LOCK))
-			s_lockUntil = Now() + 20.0f;
+			s_lockUntil = Now() + 10.0f;
 		if (!CreateProcessW(exe, &buf[0], 0, 0, FALSE, CREATE_SUSPENDED | BELOW_NORMAL_PRIORITY_CLASS, 0, root.c_str(), &si, &s_proc))
 		{
 			CryLogAlways("[CoopAgent] the AI companion's game could not be started (error %u)", (unsigned)GetLastError());
@@ -1707,6 +1720,7 @@ namespace
 		}
 		if (const DWORD_PTR cpus = CompanionCpus())
 			SetProcessAffinityMask(s_proc.hProcess, cpus);
+		LowerCompanionPriority(s_proc.hProcess);
 		UnhookWindows();
 		SHookJob* job = new SHookJob();
 		job->thread = s_proc.dwThreadId;
@@ -1729,9 +1743,8 @@ namespace
 		}
 		++s_starts;
 		s_startedAt = Now();
-		s_windowDone = false;
-		CryLogAlways("[CoopAgent] AI companion started (process %u, joins 127.0.0.1:%d, agents on 127.0.0.1:%d)",
-			(unsigned)s_proc.dwProcessId, pPort ? pPort->GetIVal() : 64087, s_pPort->GetIVal());
+		CryLogAlways("[CoopAgent] AI companion started (process %u, joins 127.0.0.1:%d, agents on 127.0.0.1:%d) in %u ms",
+			(unsigned)s_proc.dwProcessId, pPort ? pPort->GetIVal() : 64087, s_pPort->GetIVal(), (unsigned)(GetTickCount() - t0));
 	}
 
 	void StopCompanion(const char* why)
@@ -1749,19 +1762,10 @@ namespace
 
 	void UpdateHost()
 	{
-		// the companion's window, the moment it is there: no taskbar button
-		// (a button that came and went made the taskbar's icons jump), out of
-		// sight
-		if (s_proc.hProcess && !s_windowDone && Now() - s_startedAt < 60.0f)
-		{
-			SFind f = { s_proc.dwProcessId, 0 };
-			EnumWindows(FindProcessWindow, (LPARAM)&f);
-			if (f.hWnd)
-			{
-				PutAway(f.hWnd);
-				s_windowDone = true;
-			}
-		}
+		// The companion's window is made a tool window out of sight inside its
+		// own game (the window hook, GameDll.cpp). Not from here: styling or
+		// moving another process's window waits for that process's thread,
+		// and the host's game stood still 2 s while the companion loaded.
 		if (!s_hookLogged && s_hookMs != -1)
 		{
 			s_hookLogged = true;
@@ -1770,7 +1774,7 @@ namespace
 			else
 				CryLogAlways("[CoopAgent] no window hook on the companion's game: its window may show for a moment");
 		}
-		if (s_lockUntil > 0.0f && (s_windowDone || Now() > s_lockUntil))
+		if (s_lockUntil > 0.0f && Now() > s_lockUntil)
 		{
 			LockSetForegroundWindow(LSFW_UNLOCK);
 			s_lockUntil = 0.0f;
@@ -1987,7 +1991,7 @@ void CoopAgent::OnServerRequest(EntityId agent, int op, const char* name)
 int CoopAgent::CompanionState()
 {
 	if (!s_proc.hProcess)
-		return 0;
+		return s_starts >= 5 ? 3 : 0;      // 3: its game would not start (tries used up)
 	IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
 	while (IActor* pActor = it->Next())
 		if (pActor->IsPlayer() && !stricmp(pActor->GetEntity()->GetName(), s_pName->GetString()))
