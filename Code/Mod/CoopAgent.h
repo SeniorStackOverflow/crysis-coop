@@ -41,9 +41,15 @@ namespace CoopAgent
 	// the player "name", 2 leave the vehicle, 3 get into the vehicle "name"
 	void OnServerRequest(EntityId agent, int op, const char* name);
 
-	// host: the companion's state for the co-op menu (0 off, 1 starting,
-	// 2 in the game), and whether an AI agent commands it
+	// host: the companion's state for the co-op menu (0 not started yet,
+	// 1 joining, 2 in the game, 3 its game would not start, 4 waiting for
+	// the host's game, 5 its game closed and is started again)
 	int CompanionState();
+	// how many times its game was started
+	int CompanionTries();
+	// seconds after which a companion still not in the game counts as
+	// failed (it joins in about 45 s; the menu and the HUD say so)
+	const int JOIN_TIMEOUT = 90;
 	// seconds since the companion's game was started (0: none)
 	float CompanionSeconds();
 }

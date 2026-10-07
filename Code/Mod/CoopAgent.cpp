@@ -1839,6 +1839,7 @@ namespace
 	}
 
 	float s_readySince = -1.0f;    // when the host's game became ready (-1: not ready)
+	float s_lastInGame = -1.0f;    // when the companion's player was last seen in the host's game
 
 	void SetHostReady(bool ready)
 	{
@@ -1857,6 +1858,34 @@ namespace
 		}
 		else
 			DeleteFileW(ReadyFile().c_str());
+	}
+
+	// the host is told on the screen when the companion cannot join (not
+	// only in the co-op menu), once per failure
+	void TellFailure()
+	{
+		static float s_nextCheck = 0.0f;
+		static bool s_told = false;
+		if (Now() < s_nextCheck)
+			return;
+		s_nextCheck = Now() + 1.0f;
+		const int state = CoopAgent::CompanionState();
+		const bool failed = state == 3 || (state == 1 && CoopAgent::CompanionSeconds() >= CoopAgent::JOIN_TIMEOUT);
+		if (!failed)
+		{
+			if (state == 2)
+				s_told = false;
+			return;
+		}
+		if (s_told)
+			return;
+		s_told = true;
+		const char* text = state == 3
+			? "AI companion cannot join: its game did not start. Esc > Co-op game: turn it off and on"
+			: "AI companion cannot join your game. Esc > Co-op game: turn it off and on";
+		CryLogAlways("[CoopAgent] told the host: %s", text);
+		if (CHUD* pHUD = g_pGame->GetHUD())
+			pHUD->DisplayTempFlashText(text, 10.0f, ColorF(1.0f, 0.5f, 0.35f));
 	}
 
 	void UpdateHost()
@@ -1889,6 +1918,7 @@ namespace
 			// just joined was thrown out
 			if (!Running() && Now() >= s_restartAt && s_starts < 5)
 				StartCompanion();
+			TellFailure();
 			return;
 		}
 		if (!Running())
@@ -2111,20 +2141,31 @@ void CoopAgent::OnServerRequest(EntityId agent, int op, const char* name)
 float CoopAgent::CompanionSeconds()
 {
 	// since it could join: its start, or the host's game being ready
+	// or its last moment in the game (it drops and comes back after a
+	// checkpoint load)
 	if (!s_proc.hProcess)
 		return 0.0f;
-	return Now() - (s_readySince > s_startedAt ? s_readySince : s_startedAt);
+	return Now() - std::max(std::max(s_readySince, s_startedAt), s_lastInGame);
+}
+
+int CoopAgent::CompanionTries()
+{
+	return s_starts;
 }
 
 int CoopAgent::CompanionState()
 {
 	if (!s_proc.hProcess)
-		return s_starts >= 5 ? 3 : 0;      // 3: its game would not start (tries used up)
+		return s_starts >= 5 ? 3           // 3: its game would not start (tries used up)
+			: s_starts > 0 ? 5 : 0;        // 5: its game closed, started again soon
 	if (s_readySince < 0.0f)
 		return 4;                          // 4: it waits for the host's game to be ready
 	IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
 	while (IActor* pActor = it->Next())
 		if (pActor->IsPlayer() && !stricmp(pActor->GetEntity()->GetName(), s_pName->GetString()))
+		{
+			s_lastInGame = Now();
 			return 2;
+		}
 	return 1;
 }

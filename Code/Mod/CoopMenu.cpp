@@ -455,19 +455,33 @@ namespace
 				const int state = CoopAgent::CompanionState();
 				const int secs = (int)CoopAgent::CompanionSeconds();
 				string status;
+				bool failed = false;
 				if (state == 2)
 					status = "AI companion: in the game (AI agents: CrysisCoop.exe -coop_mcp)";
-				else if (state == 1 && secs < 180)
+				else if (state == 1 && secs < CoopAgent::JOIN_TIMEOUT)
 					status.Format("AI companion: joining (%d s, under a minute)", secs);
 				else if (state == 1)
-					status.Format("AI companion: NOT in the game after %d s (see companion.log). Turn it off and on to try again", secs);
+				{
+					status.Format("AI companion CANNOT JOIN: not in the game after %d s (companion.log). Turn it off and on to try again", secs);
+					failed = true;
+				}
 				else if (state == 3)
-					status = "AI companion: its game did not start (companion.log). Turn it off and on to try again";
+				{
+					status = "AI companion CANNOT JOIN: its game did not start, 5 tries (companion.log). Turn it off and on to try again";
+					failed = true;
+				}
 				else if (state == 4)
 					status = "AI companion: started; joins when your game is ready (after the intro or a checkpoint load)";
+				else if (state == 5)
+					status.Format("AI companion: its game closed; starting it again (try %d of 5)", CoopAgent::CompanionTries() + 1);
 				else
-					status = "AI companion: waits until your game is ready (after the intro or a checkpoint load)";
-				Text(x, y, 13, status.c_str(), 0.7f, 0.85f, 0.95f);
+					status = "AI companion: starting...";
+				if (failed)
+					WrappedText(x, y, 13, status.c_str(), 70, 1.0f, 0.45f, 0.35f);
+				else
+					Text(x, y, 13, status.c_str(), 0.7f, 0.85f, 0.95f);
+				if (failed)
+					y += 18;
 				y += 18;
 			}
 			const char* campaign = CoopSave::CurrentCampaign();
