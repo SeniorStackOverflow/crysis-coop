@@ -1479,7 +1479,10 @@ function TeamInstantAction:CoopReviveInput(reviverId, targetId, press)
 	if (running or not CoopInGame(reviver) or not CoopInGame(target) or reviver:IsDead() or not target:IsDead()) then
 		return;
 	end
-	if (CoopDistance(reviver, target) > C.REVIVE_RANGE) then
+	-- the reviver's own game checked the range (4 m); the server's idea of
+	-- where he stands may be a few metres off (an obstacle only one has)
+	if (CoopDistance(reviver, target) > C.REVIVE_RANGE_SERVER) then
+		CoopLog(string.format("%s too far to revive %s here (%.1f m)", tostring(reviver:GetName()), tostring(target:GetName()), CoopDistance(reviver, target)));
 		return;
 	end
 	self.coopRevives[target.id] = { by = reviver.id, t0 = _time };
@@ -1495,7 +1498,7 @@ function TeamInstantAction:CoopUpdateRevives()
 	for targetId, r in pairs(self.coopRevives) do
 		local target, reviver = System.GetEntity(targetId), System.GetEntity(r.by);
 		if (not target or not reviver or not CoopInGame(target) or not target:IsDead() or reviver:IsDead()
-			or CoopDistance(reviver, target) > C.REVIVE_RANGE + 1) then
+			or CoopDistance(reviver, target) > C.REVIVE_RANGE_SERVER + 1) then
 			self.coopRevives[targetId] = nil;
 			HUD.CoopReviveState(2, targetId, r.by, 0);
 		elseif (_time - r.t0 >= C.REVIVE_TIME) then

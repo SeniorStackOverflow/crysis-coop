@@ -1622,8 +1622,8 @@ void CItem::PickUp(EntityId pickerId, bool sound, bool select, bool keepHistory)
 
 		PlayAction(g_pItemStrings->pickedup);
 
-		//AI back weapon attachments
-		if(!gEnv->bMultiplayer && !IsSelected())
+		//AI back weapon attachments (Crysis Coop: in the campaign too)
+		if((!gEnv->bMultiplayer || CoopAI::IsCoopSession()) && !IsSelected())
 		{
 			AttachToBack(true);
 		}
@@ -2317,7 +2317,11 @@ bool CItem::AttachToHand(bool attach, bool checkAttachment)
 //------------------------------------------------------------------------
 bool CItem::AttachToBack(bool attach)
 {
-	if (gEnv->bMultiplayer || !m_params.attach_to_back)
+	// Crysis Coop: the campaign's weapons go on the back as in single player.
+	// The server loads a level in single player mode (coop_sp_world), where
+	// soldiers get their weapon put on the back; back in network mode a
+	// weapon they drew could not come off it: they aimed with empty hands
+	if ((gEnv->bMultiplayer && !CoopAI::IsCoopSession()) || !m_params.attach_to_back)
 		return false;
 
 	IEntity *pOwner = GetOwner();

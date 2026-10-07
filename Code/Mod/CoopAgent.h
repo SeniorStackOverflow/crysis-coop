@@ -44,4 +44,6 @@ namespace CoopAgent
 	// host: the companion's state for the co-op menu (0 off, 1 starting,
 	// 2 in the game), and whether an AI agent commands it
 	int CompanionState();
+	// seconds since the companion's game was started (0: none)
+	float CompanionSeconds();
 }

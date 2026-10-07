@@ -12,6 +12,7 @@ CoopConfig =
 	RESPAWN_DELAY = 8,                  -- seconds dead before auto-respawn (coop_auto_respawn 1)
 	REVIVE_TIME = 3,                    -- seconds a teammate holds the use key next to a downed player
 	REVIVE_RANGE = 4.5,                 -- m between them (Coop.dll's use key: 4)
+	REVIVE_RANGE_SERVER = 10,           -- m the server allows: a friend's game may have him a few metres off
 	REVIVE_HEALTH = 0.5,                -- part of his health a revived player gets back
 	ALL_DOWN_DELAY = 6,                 -- seconds everybody is down before the team is back at the last checkpoint
 	BACK_FADE_TIME = 1.5,               -- seconds the screen takes to come out of black there

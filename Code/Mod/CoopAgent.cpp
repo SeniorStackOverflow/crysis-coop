@@ -11,6 +11,9 @@
 #include "Game.h"
 #include "GameActions.h"
 #include "GameRules.h"
+#include "CoopSave.h"
+#include "CoopRevive.h"
+#include "HUD/HUD.h"
 #include "IPlayerInput.h"
 #include "Player.h"
 #include "NanoSuit.h"
@@ -558,6 +561,13 @@ namespace
 				{
 					HoldUse(pMe, false, 0);
 					HoldUse(pMe, true, pDowned->GetEntityId());
+				}
+				else if (Now() - s_bot.useSince > 4.0f && !CoopRevive::IsBeingRevived(pDowned->GetEntityId()))
+				{
+					// the host's game has it somewhere else (an obstacle there,
+					// not here): it puts it next to the body, then again
+					Ask(4, pDowned->GetEntity()->GetName());
+					HoldUse(pMe, false, 0);
 				}
 				else if (Now() - s_bot.useSince > 6.0f)
 					HoldUse(pMe, false, 0);    // pressed again next frame
@@ -1118,6 +1128,30 @@ namespace
 	// %LOCALAPPDATA%\CrysisCoop\companion\agent.port: "<port> <process>" of the
 	// companion's game, for CrysisCoop.exe -coop_mcp to find it (the system may
 	// keep the usual port from this program: a block of ports is reserved)
+	// %LOCALAPPDATA%\CrysisCoop\companion\host_ready: the host's process id,
+	// there while the host's game is ready for the companion to join (not
+	// while it loads a level or a checkpoint). The companion's game starts
+	// with the host's level and waits for it, so its own start (half a
+	// minute) is done by then.
+	// seconds since this game's process started (for the companion's log)
+	float Uptime()
+	{
+		FILETIME created, exited, kernel, user, now;
+		if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user))
+			return 0.0f;
+		GetSystemTimeAsFileTime(&now);
+		const ULONGLONG a = ((ULONGLONG)created.dwHighDateTime << 32) | created.dwLowDateTime;
+		const ULONGLONG b = ((ULONGLONG)now.dwHighDateTime << 32) | now.dwLowDateTime;
+		return (float)((b - a) / 10000000.0);
+	}
+
+	std::wstring ReadyFile()
+	{
+		wchar_t local[MAX_PATH] = L"";
+		GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
+		return std::wstring(local) + L"\\CrysisCoop\\companion\\host_ready";
+	}
+
 	std::wstring PortFile()
 	{
 		wchar_t local[MAX_PATH] = L"";
@@ -1414,10 +1448,13 @@ namespace
 				PutAway(hWnd);
 			}
 		}
-		// the first connect a while after the start (the game's network is
-		// not ready at once)
+		// the first connect once the network service and the host are ready
+		// (both are checked below)
 		if (s_nextConnect < 0)
-			s_nextConnect = Now() + 15.0f;
+		{
+			s_nextConnect = Now();
+			CryLogAlways("[CoopAgent] the game is up, %.0f s after its start", Uptime());
+		}
 		// the host's game is gone: so is this one, at once. A thread waits for
 		// it: the game's own loop hung two minutes over the lost connection
 		// first, and a second companion found the first still there
@@ -1453,16 +1490,43 @@ namespace
 		if (pService && serviceReady && !s_serviceLogged)
 		{
 			s_serviceLogged = true;
-			CryLogAlways("[CoopAgent] the network service is ready (state %d)", (int)pService->GetState());
+			CryLogAlways("[CoopAgent] the network service is ready (state %d), %.0f s after the start", (int)pService->GetState(), Uptime());
 		}
-		if (port > 0 && serviceReady && !pFramework->GetClientChannel() && !pFramework->GetClientActor() && Now() >= s_nextConnect)
+		// thrown out (the host loaded a checkpoint, its server restarted): in
+		// again soon, not after the handshake's long wait
+		static bool s_wasIn = false;
+		const bool in = pFramework->GetClientChannel() != 0;
+		if (s_wasIn && !in)
+		{
+			CryLogAlways("[CoopAgent] out of the host's game: joining again in 5 s");
+			s_nextConnect = Now() + 5.0f;
+		}
+		s_wasIn = in;
+		bool hostReady = true;
+		if (const int parent = s_pParent->GetIVal())
+		{
+			hostReady = false;
+			if (FILE* f = _wfopen(ReadyFile().c_str(), L"rb"))
+			{
+				int pid = 0;
+				hostReady = fscanf(f, "%d", &pid) == 1 && pid == parent;
+				fclose(f);
+			}
+			static bool s_waitLogged = false;
+			if (!hostReady && !s_waitLogged && serviceReady)
+			{
+				s_waitLogged = true;
+				CryLogAlways("[CoopAgent] ready, %.0f s after the start; waiting for the host's game (its level, a checkpoint)", Uptime());
+			}
+		}
+		if (port > 0 && serviceReady && hostReady && !pFramework->GetClientChannel() && !pFramework->GetClientActor() && Now() >= s_nextConnect)
 		{
 			// the handshake (the key check) takes a while: a new connect would cut it
 			s_nextConnect = Now() + 45.0f;
 			const int local = ProxyPort(port);
 			string cmd;
 			cmd.Format("connect 127.0.0.1 %d", local ? local : port);
-			CryLogAlways("[CoopAgent] joining the host: %s", cmd.c_str());
+			CryLogAlways("[CoopAgent] joining the host: %s (%.0f s after the start)", cmd.c_str(), Uptime());
 			gEnv->pConsole->ExecuteString(cmd.c_str());
 		}
 	}
@@ -1626,19 +1690,11 @@ namespace
 		CloseHandle(h);
 	}
 
-	// The companion's game reads its paks while it starts, a lot of disk at
-	// once: the host's game, which streams from the same disk, stood still up
-	// to 2 s. Its reads and its memory come last (very low I/O priority, low
-	// memory priority), set before it runs.
+	// The companion's memory comes last (low memory priority), set before it
+	// runs. (Its disk reads stay normal: at a very low I/O priority its level
+	// took 65 s to load instead of 29.)
 	void LowerCompanionPriority(HANDLE process)
 	{
-		typedef LONG (WINAPI *TNtSetInformationProcess)(HANDLE, ULONG, PVOID, ULONG);
-		static TNtSetInformationProcess pSet = (TNtSetInformationProcess)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtSetInformationProcess");
-		if (pSet)
-		{
-			ULONG ioPriority = 0;    // ProcessIoPriority (33): very low
-			pSet(process, 33, &ioPriority, sizeof(ioPriority));
-		}
 		typedef BOOL (WINAPI *TSetProcessInformation)(HANDLE, int, LPVOID, DWORD);
 		static TSetProcessInformation pInfo = (TSetProcessInformation)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetProcessInformation");
 		if (pInfo)
@@ -1760,6 +1816,49 @@ namespace
 		memset(&s_proc, 0, sizeof(s_proc));
 	}
 
+	// the host's game is in the level for good: no checkpoint being loaded
+	// (Continue), no cutscene playing, its player there for a few seconds.
+	// (A join during the fullscreen intro crashed the host's game in the
+	// engine's file streaming, CCachedFileData::GetData; and the companion
+	// would only stand there anyway.)
+	bool HostWorldReady()
+	{
+		static float s_since = -1.0f;
+		CHUD* pHUD = g_pGame->GetHUD();
+		const bool now = !CoopSave::IsBusy() && g_pGame->GetIGameFramework()->GetClientActor() != 0
+			&& g_pGame->GetIGameFramework()->GetClientActor()->GetHealth() > 0
+			&& !(pHUD && pHUD->IsCutscenePlaying());
+		if (!now)
+		{
+			s_since = -1.0f;
+			return false;
+		}
+		if (s_since < 0.0f)
+			s_since = Now();
+		return Now() - s_since > 3.0f;
+	}
+
+	float s_readySince = -1.0f;    // when the host's game became ready (-1: not ready)
+
+	void SetHostReady(bool ready)
+	{
+		static int s_written = -1;
+		if ((int)ready == s_written)
+			return;
+		s_written = ready;
+		s_readySince = ready ? Now() : -1.0f;
+		if (ready)
+		{
+			if (FILE* f = _wfopen(ReadyFile().c_str(), L"wb"))
+			{
+				fprintf(f, "%u", (unsigned)GetCurrentProcessId());
+				fclose(f);
+			}
+		}
+		else
+			DeleteFileW(ReadyFile().c_str());
+	}
+
 	void UpdateHost()
 	{
 		// The companion's window is made a tool window out of sight inside its
@@ -1781,9 +1880,13 @@ namespace
 		}
 		const bool hosting = gEnv->bServer && gEnv->bMultiplayer && CoopAI::IsCoopSession();
 		const bool want = s_pCompanion->GetIVal() != 0 && hosting;
+		SetHostReady(want && HostWorldReady());
 		if (want)
 		{
 			s_notWantedSince = -1.0f;
+			// not before the host's world is ready: a checkpoint loaded by
+			// Continue restarts the host's server, and a companion that had
+			// just joined was thrown out
 			if (!Running() && Now() >= s_restartAt && s_starts < 5)
 				StartCompanion();
 			return;
@@ -1976,6 +2079,23 @@ void CoopAgent::OnServerRequest(EntityId agent, int op, const char* name)
 		}
 		return;
 	}
+	// next to a downed teammate whom it could not revive: the host's game had
+	// it a few metres off, behind something that is not there in its own game
+	if (op == 4 && !pMine)
+	{
+		IActor* pDowned = ActorByName(name);
+		if (pDowned && pDowned->GetHealth() <= 0)
+		{
+			const Vec3 body = pDowned->GetEntity()->GetWorldPos();
+			Vec3 from = pAgent->GetEntity()->GetWorldPos() - body;
+			from.z = 0;
+			const Vec3 at = body + from.GetNormalizedSafe(Vec3(1, 0, 0)) * 1.2f + Vec3(0, 0, 0.5f);
+			const Vec3 look = body - at;
+			pRules->MovePlayer(static_cast<CActor*>(pAgent), at, Ang3(0, 0, atan2f(-look.x, look.y)));
+			CryLogAlways("[CoopAgent] %s put next to %s, who is down", pAgent->GetEntity()->GetName(), pDowned->GetEntity()->GetName());
+		}
+		return;
+	}
 	if (op == 1 && pLeader && !pMine && pLeader->GetHealth() > 0)
 	{
 		// next to the leader, a little behind
@@ -1988,10 +2108,20 @@ void CoopAgent::OnServerRequest(EntityId agent, int op, const char* name)
 	}
 }
 
+float CoopAgent::CompanionSeconds()
+{
+	// since it could join: its start, or the host's game being ready
+	if (!s_proc.hProcess)
+		return 0.0f;
+	return Now() - (s_readySince > s_startedAt ? s_readySince : s_startedAt);
+}
+
 int CoopAgent::CompanionState()
 {
 	if (!s_proc.hProcess)
 		return s_starts >= 5 ? 3 : 0;      // 3: its game would not start (tries used up)
+	if (s_readySince < 0.0f)
+		return 4;                          // 4: it waits for the host's game to be ready
 	IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
 	while (IActor* pActor = it->Next())
 		if (pActor->IsPlayer() && !stricmp(pActor->GetEntity()->GetName(), s_pName->GetString()))

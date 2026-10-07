@@ -20,6 +20,7 @@ History:
 #include <time.h>
 
 #include "FlashMenuObject.h"
+#include "CoopSave.h"
 #include "FlashMenuScreen.h"
 #include "CoopAI.h"
 #include "IGameFramework.h"
@@ -3624,7 +3625,11 @@ void CFlashMenuObject::OnSaveGame(ISaveGame* pSaveGame)
 		{
 			// check if it ends with '_levelstart.CRYSISJMSF'
 			const size_t len = strlen(saveGameName);
-			if (len > LEVELSTART_POSTFIX_LEN && strnicmp(saveGameName + len - LEVELSTART_POSTFIX_LEN, LEVELSTART_POSTFIX, LEVELSTART_POSTFIX_LEN) == 0)
+			// Crysis Coop: a co-op checkpoint takes the level's picture too: reading
+			// the screen back stalled the host's fullscreen game (2.4 s), and the
+			// co-op menu shows no thumbnails
+			if ((len > LEVELSTART_POSTFIX_LEN && strnicmp(saveGameName + len - LEVELSTART_POSTFIX_LEN, LEVELSTART_POSTFIX, LEVELSTART_POSTFIX_LEN) == 0)
+				|| CoopSave::IsCoopSaveName(saveGameName))
 			{
 				CryFixedStringT<256> path (pLevelInfo->GetPath());
 				path+='/';
@@ -3634,6 +3639,8 @@ void CFlashMenuObject::OnSaveGame(ISaveGame* pSaveGame)
 					bUseScreenShot = false;
 			}
 		}
+		if (CoopSave::IsCoopSaveName(saveGameName))
+			bUseScreenShot = false;
 	}
 
 	if (bUseScreenShot)

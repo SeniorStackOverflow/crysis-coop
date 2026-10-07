@@ -453,9 +453,21 @@ namespace
 			if (CVarOn("coop_companion"))
 			{
 				const int state = CoopAgent::CompanionState();
-				Text(x, y, 13, state == 2 ? "AI companion: in the game (AI agents: CrysisCoop.exe -coop_mcp)"
-					: state == 1 ? "AI companion: joining..." : state == 3 ? "AI companion: its game did not start (companion.log). Turn it off and on to try again"
-					: "AI companion: starting...", 0.7f, 0.85f, 0.95f);
+				const int secs = (int)CoopAgent::CompanionSeconds();
+				string status;
+				if (state == 2)
+					status = "AI companion: in the game (AI agents: CrysisCoop.exe -coop_mcp)";
+				else if (state == 1 && secs < 180)
+					status.Format("AI companion: joining (%d s, under a minute)", secs);
+				else if (state == 1)
+					status.Format("AI companion: NOT in the game after %d s (see companion.log). Turn it off and on to try again", secs);
+				else if (state == 3)
+					status = "AI companion: its game did not start (companion.log). Turn it off and on to try again";
+				else if (state == 4)
+					status = "AI companion: started; joins when your game is ready (after the intro or a checkpoint load)";
+				else
+					status = "AI companion: waits until your game is ready (after the intro or a checkpoint load)";
+				Text(x, y, 13, status.c_str(), 0.7f, 0.85f, 0.95f);
 				y += 18;
 			}
 			const char* campaign = CoopSave::CurrentCampaign();

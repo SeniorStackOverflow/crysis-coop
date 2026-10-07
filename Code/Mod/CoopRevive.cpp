@@ -295,6 +295,11 @@ void CoopRevive::OnCheckpoint(const char* name)
 		Script::CallMethod(pScript, "CoopOnCheckpoint", name ? name : "");
 }
 
+bool CoopRevive::IsBeingRevived(EntityId target)
+{
+	return FindRevive(target, 0) != 0;
+}
+
 EntityId CoopRevive::TeammateToWatch(EntityId downed)
 {
 	IEntity* pDowned = gEnv->pEntitySystem->GetEntity(downed);

@@ -956,7 +956,9 @@ namespace
 			const bool mp = gEnv->bMultiplayer;
 			gEnv->bMultiplayer = false;
 			NetLoadBegin();
+			const DWORD t0 = GetTickCount();
 			ok = pFramework->LoadGame(s_load.save.c_str(), true, true);
+			CryLogAlways("[CoopSave] the saved game took %.1f s to load", (GetTickCount() - t0) / 1000.0f);
 			limitRestored = NetLoadEnd();
 			gEnv->bMultiplayer = mp;
 		}

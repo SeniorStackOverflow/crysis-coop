@@ -51,4 +51,6 @@ namespace CoopRevive
 	// the player a downed one watches (through his eyes): the nearest
 	// teammate standing, 0 when nobody stands
 	EntityId TeammateToWatch(EntityId downed);
+	// a revive of this downed player is going on (as the server says)
+	bool IsBeingRevived(EntityId target);
 }

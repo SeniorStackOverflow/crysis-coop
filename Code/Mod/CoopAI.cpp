@@ -663,6 +663,7 @@ namespace
 
 	void CmdWeaponInfo(IConsoleCmdArgs*);   // below
 	void CmdTestSave(IConsoleCmdArgs*);
+	void CmdAIWeapons(IConsoleCmdArgs*);
 
 	void RegisterCommands()
 	{
@@ -670,6 +671,7 @@ namespace
 		if (s_added || !gEnv->pConsole)
 			return;
 		gEnv->pConsole->AddCommand("coop_aistats", CmdStats, 0, "Crysis Coop: log AI object statistics");
+		gEnv->pConsole->AddCommand("coop_ai_weapons", CmdAIWeapons, 0, "Crysis Coop: log what the soldiers near the local player hold");
 		gEnv->pConsole->AddCommand("coop_test_save", CmdTestSave, 0, "Crysis Coop testing: coop_test_save [name] saves as the single player menu does");
 		gEnv->pConsole->AddCommand("coop_weapon_info", CmdWeaponInfo, 0, "Crysis Coop: log the damage of the local player's weapon and the item settings in use");
 		gEnv->pConsole->AddCommand("coop_dump_entities", CmdDumpEntities, 0, "Crysis Coop: write all entities to coop_entities_<side>_<tag>.txt");
@@ -1639,6 +1641,49 @@ bool CoopAI::IsCoopLevelName(const char* levelName)
 
 namespace
 {
+	// testing: what the soldiers near the local player hold (a soldier who
+	// aims with empty hands while its weapon hangs on its back)
+	void CmdAIWeapons(IConsoleCmdArgs*)
+	{
+		IActor* pMe = g_pGame ? g_pGame->GetIGameFramework()->GetClientActor() : 0;
+		if (!pMe)
+			return;
+		const Vec3 me = pMe->GetEntity()->GetWorldPos();
+		int soldiers = 0, holding = 0, empty = 0;
+		string emptyNames;
+		IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+		while (IActor* pActor = it->Next())
+		{
+			if (pActor->IsPlayer() || pActor->GetHealth() <= 0)
+				continue;
+			if (pActor->GetEntity()->GetWorldPos().GetDistance(me) > 150.0f)
+				continue;
+			++soldiers;
+			IInventory* pInv = pActor->GetInventory();
+			CItem* pItem = static_cast<CItem*>(pActor->GetCurrentItem());
+			string items;
+			for (int i = 0; pInv && i < pInv->GetCount(); ++i)
+				if (IItem* p = g_pGame->GetIGameFramework()->GetIItemSystem()->GetItem(pInv->GetItem(i)))
+				{
+					const CItem* c = static_cast<CItem*>(p);
+					items += string(" ") + p->GetEntity()->GetClass()->GetName() + (c->GetStats().selected ? "*" : "")
+						+ (c->GetStats().backAttachment != CItem::eIBA_Unknown ? "(back)" : "");
+				}
+			if (pItem && pItem->GetStats().selected)
+				++holding;
+			else
+			{
+				++empty;
+				if (emptyNames.length() < 300)
+					emptyNames += string(" ") + pActor->GetEntity()->GetName();
+			}
+			CryLogAlways("[CoopAIWeap] %s%s (%.0f m): in hand %s%s; items:%s", pActor->GetEntity()->GetName(), pActor->GetEntity()->IsHidden() ? " (hidden)" : "",
+				pActor->GetEntity()->GetWorldPos().GetDistance(me),
+				pItem ? pItem->GetEntity()->GetClass()->GetName() : "nothing", pItem && !pItem->GetStats().selected ? " (not selected)" : "", items.c_str());
+		}
+		CryLogAlways("[CoopAIWeap] %d soldiers within 150 m: %d hold a weapon, %d hold nothing:%s", soldiers, holding, empty, emptyNames.c_str());
+	}
+
 	// testing: a save as the single player menu's "Save" makes it
 	void CmdTestSave(IConsoleCmdArgs* pArgs)
 	{
@@ -1998,9 +2043,18 @@ void CoopAI::GiveInventory(IActor* pTarget, const SInventory& inv, bool replace)
 			pItemSystem->GiveItem(pTarget, inv.items[i].c_str(), false, false, false);
 	if (!inv.current.empty() && pInv->GetCountOfClass(inv.current.c_str()) == 0)
 		currentGiven = pItemSystem->GiveItem(pTarget, inv.current.c_str(), false, true, false) != 0;
+	// the ammo: here, and on a friend's own machine, which reloads from its
+	// own inventory (the network game's weapons came with 60 bullets more
+	// and hid it; the campaign's come with none: a friend could not reload)
+	const bool remote = gEnv->bServer && pTarget != g_pGame->GetIGameFramework()->GetClientActor() && pTarget->GetChannelId();
 	for (size_t i = 0; i < inv.ammo.size(); ++i)
 		if (IEntityClass* pAmmo = gEnv->pEntitySystem->GetClassRegistry()->FindClass(inv.ammo[i].first.c_str()))
+		{
 			pInv->SetAmmoCount(pAmmo, inv.ammo[i].second);
+			if (remote)
+				pTarget->GetGameObject()->InvokeRMI(CActor::ClSetAmmo(), CActor::AmmoParams(pAmmo->GetName(), inv.ammo[i].second),
+					eRMI_ToClientChannel, pTarget->GetChannelId());
+		}
 	if (!inv.current.empty() && !currentGiven)
 		if (IScriptTable* pScript = pTarget->GetEntity()->GetScriptTable())
 		{
@@ -2747,8 +2801,26 @@ namespace
 		const CTimeValue now = gEnv->pTimer->GetAsyncTime();
 		const float ms = s_last.GetValue() ? (now - s_last).GetMilliSeconds() : 0.0f;
 		s_last = now;
-		if (ms > 300.0f && !s_inLoading && g_pGame && g_pGame->GetIGameFramework()->GetClientActor())
+		if (ms <= 0.0f || s_inLoading || !g_pGame || !g_pGame->GetIGameFramework()->GetClientActor())
+			return;
+		if (ms > 300.0f)
 			CryLogAlways("[CoopHitch] a frame took %.0f ms", ms);
+		// every minute: how smooth it was (short stutters show here)
+		static float s_sum = 0.0f, s_worst = 0.0f;
+		static int s_frames = 0, s_slow = 0;
+		s_sum += ms;
+		++s_frames;
+		if (ms > s_worst)
+			s_worst = ms;
+		if (ms > 100.0f)
+			++s_slow;
+		if (s_sum >= 60000.0f)
+		{
+			CryLogAlways("[CoopPerf] last minute: %.0f fps on average, worst frame %.0f ms, %d frames over 100 ms",
+				s_frames * 1000.0f / s_sum, s_worst, s_slow);
+			s_sum = s_worst = 0.0f;
+			s_frames = s_slow = 0;
+		}
 	}
 }
 
@@ -5461,6 +5533,23 @@ namespace
 		const bool sendTimes = s_seqTimeSync >= 2.0f;
 		if (sendTimes)
 			s_seqTimeSync = 0.0f;
+		// Continue: the checkpoint after the level's intro is about to load; the
+		// intro is not shown at all (as loading a save in single player)
+		if (CoopSave::IsBusy())
+		{
+			if (ISequenceIt* pIt = gEnv->pMovieSystem->GetSequences(true, true))
+			{
+				bool any = false;
+				for (IAnimSequence* pSeq = pIt->first(); pSeq; pSeq = pIt->next())
+				{
+					CryLogAlways("[CoopCutscene] %s not shown: a checkpoint is being loaded", pSeq->GetName());
+					any = true;
+				}
+				pIt->Release();
+				if (any)
+					gEnv->pMovieSystem->StopAllCutScenes();
+			}
+		}
 		std::map<string, float> now;
 		if (ISequenceIt* pIt = gEnv->pMovieSystem->GetSequences(true, false))
 		{
