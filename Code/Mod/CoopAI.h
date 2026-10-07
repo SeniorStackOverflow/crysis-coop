@@ -34,6 +34,8 @@ namespace CoopAI
 	// TIA/coop_*): the HUD then works as in the campaign (objectives, PDA
 	// map) for every player
 	bool IsCoopSession();
+	// a co-op campaign level (Levels/Multiplayer/TIA/coop_*)
+	bool IsCoopLevelName(const char* levelName);
 
 	// send the objective list to a client again a little later
 	void QueueObjectiveResend(int channelId);

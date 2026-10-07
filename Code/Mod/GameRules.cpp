@@ -926,7 +926,9 @@ void CGameRules::RevivePlayer(CActor *pActor, const Vec3 &pos, const Ang3 &angle
 		FreezeEntity(pActor->GetEntityId(), false, false);
 
 	int health = 100;
-	if(!gEnv->bMultiplayer && pActor->IsClient())
+	// Crysis Coop: every player of the campaign has the single player's health
+	// (g_playerHealthValue of the difficulty, 200), not only the host
+	if((!gEnv->bMultiplayer && pActor->IsClient()) || (CoopAI::IsCoopSession() && pActor->IsPlayer()))
 		health = g_pGameCVars->g_playerHealthValue;
 	pActor->SetMaxHealth(health);
 

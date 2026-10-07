@@ -173,6 +173,11 @@ blocked UDP), the game keeps going through the relay.
 
 ## Good to know
 
+* **Fights are the single player campaign's.** Weapons do their single player damage (the network game's ones did 2
+  to 5 times less), every player has the single player's health (200 on Normal), and the soldiers' fire is balanced
+  by the difficulty as in single player.
+* **Do not put Crysis Warhead's files into Crysis' folder** (`Game\Warhead_*.pak`, Warhead's levels): they replace
+  Crysis' own scripts, and the soldiers then took no damage at all. The game log warns about them.
 * **Nobody comes back by himself.** A player who dies is down and waits for a teammate: walk up to him and hold
   **F** (use) for 3 seconds, and he gets up where he fell, with half his health. The HUD shows who is down and how
   far, the "Hold F" prompt next to him, and the progress.

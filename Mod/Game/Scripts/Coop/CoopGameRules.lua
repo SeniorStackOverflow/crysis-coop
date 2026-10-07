@@ -544,6 +544,10 @@ function TeamInstantAction.Server:OnHit(hit)
 	local targetIsPlayer = target and target.actor and target.actor:IsPlayer();
 	if (targetIsPlayer and shooter and shooter.actor and (not shooter.actor:IsPlayer())) then
 		hit.damage = hit.damage * C.AI_DAMAGE_TO_PLAYER_MULT;
+		-- the single player campaign takes an AI's hit on the player as it is
+		-- (the network game's table for it lowers arms and legs): kept for
+		-- ProcessActorDamage below
+		hit.coopAIDamage = hit.damage;
 	end
 	-- coop_god 1: players take no damage (testing); the damage the hit would
 	-- have done is still logged
@@ -581,6 +585,27 @@ function TeamInstantAction:ProcessActorDamage(hit)
 				hit.damage or 0, tostring(target.actor:GetHealth()), tostring(target.actor:GetHealth())));
 		end
 		return false;
+	end
+	-- a player is hurt as in the single player campaign: an AI's damage goes
+	-- through the AI system's balance (the difficulty's rate of death: not
+	-- every enemy may hit him, mercy at low health), the suit's armor as in
+	-- single player (g_suitArmorHealthValue)
+	if (target and target.actor and target.actor:IsPlayer() and (hit.damage or 0) > 0) then
+		local damage = hit.damage;
+		local shooter = hit.shooter;
+		if (shooter and shooter.actor and (not shooter.actor:IsPlayer()) and AI and AI.ProcessBalancedDamage) then
+			local raw = hit.coopAIDamage or hit.damage;
+			damage = AI.ProcessBalancedDamage(shooter.id, target.id, raw, hit.type) or raw;
+		end
+		damage = damage * (1 - SinglePlayer.GetDamageAbsorption(self, target, hit));
+		local health = math.floor(target.actor:GetHealth() - damage);
+		if (C.DEBUG) then
+			CoopLog(string.format("DAMAGE player %s by %s type=%s hit=%.1f taken=%.1f hp %d->%d",
+				tostring(target:GetName()), tostring(shooter and shooter:GetName()), tostring(hit.type),
+				hit.damage or 0, damage, target.actor:GetHealth(), health));
+		end
+		target.actor:SetHealth(health);
+		return (health <= 0);
 	end
 	return stockProcessActorDamage(self, hit);
 end

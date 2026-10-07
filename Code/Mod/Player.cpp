@@ -4129,6 +4129,11 @@ bool CPlayer::NetSerialize( TSerialize ser, EEntityAspects aspect, uint8 profile
 	if (aspect == ASPECT_HEALTH)
 	{
 		ser.Value("health", m_health, 'hlth');
+		// Crysis Coop: the server gives every player the single player's
+		// health (200 on Normal); its maximum is not sent: more health than
+		// this side's maximum is the new maximum
+		if (ser.IsReading() && m_health > m_maxHealth && CoopAI::IsCoopSession())
+			m_maxHealth = (int)m_health;
 		bool isFrozen = m_stats.isFrozen;
 		ser.Value("frozen", isFrozen, 'bool');
 		ser.Value("frozenAmount", m_frozenAmount, 'frzn');

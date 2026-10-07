@@ -6,6 +6,8 @@
 #include "IActorSystem.h"
 #include "IActionMapManager.h"
 #include "IItemSystem.h"
+#include "IWeapon.h"
+#include "WeaponSystem.h"
 #include "ILevelSystem.h"
 #include "IVehicleSystem.h"
 #include "Menus/FlashMenuObject.h"
@@ -659,12 +661,15 @@ namespace
 			gEnv->bMultiplayer = s_mpScopeSaved;
 	}
 
+	void CmdWeaponInfo(IConsoleCmdArgs*);   // below
+
 	void RegisterCommands()
 	{
 		static bool s_added = false;
 		if (s_added || !gEnv->pConsole)
 			return;
 		gEnv->pConsole->AddCommand("coop_aistats", CmdStats, 0, "Crysis Coop: log AI object statistics");
+		gEnv->pConsole->AddCommand("coop_weapon_info", CmdWeaponInfo, 0, "Crysis Coop: log the damage of the local player's weapon and the item settings in use");
 		gEnv->pConsole->AddCommand("coop_dump_entities", CmdDumpEntities, 0, "Crysis Coop: write all entities to coop_entities_<side>_<tag>.txt");
 		gEnv->pConsole->AddCommand("coop_vehicle_restore", CmdVehicleRestore, 0, "Crysis Coop: restore a destroyed vehicle by entity name (server)");
 		gEnv->pConsole->AddCommand("coop_vehtest", CmdVehTest, 0, "Crysis Coop: drive the local player's vehicle forward/up for N seconds and log its speed");
@@ -1624,6 +1629,27 @@ namespace
 }
 
 void CoopNetSerClearTrace();
+
+bool CoopAI::IsCoopLevelName(const char* levelName)
+{
+	return IsCoopLevel(levelName);
+}
+
+namespace
+{
+	// the local player's weapon: its fire mode's damage, and the item settings in use
+	void CmdWeaponInfo(IConsoleCmdArgs*)
+	{
+		IActor* pActor = g_pGame ? g_pGame->GetIGameFramework()->GetClientActor() : 0;
+		IItem* pItem = pActor ? pActor->GetCurrentItem() : 0;
+		IWeapon* pWeapon = pItem ? pItem->GetIWeapon() : 0;
+		IFireMode* pMode = pWeapon ? pWeapon->GetFireMode(pWeapon->GetCurrentFireMode()) : 0;
+		CryLogAlways("[Coop] weapon %s, fire mode %s, damage %d; item settings '%s', ammo settings '%s'",
+			pItem ? pItem->GetEntity()->GetClass()->GetName() : "-", pMode ? pMode->GetName() : "-", pMode ? pMode->GetDamage(0.0f) : 0,
+			g_pGame ? g_pGame->GetIGameFramework()->GetIItemSystem()->GetConfiguration() : "?",
+			g_pGame && g_pGame->GetWeaponSystem() ? g_pGame->GetWeaponSystem()->GetConfiguration() : "?");
+	}
+}
 
 void CoopAI::OnLoadingStart(const char* levelName)
 {

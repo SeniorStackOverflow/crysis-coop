@@ -18,6 +18,7 @@ History:
 #include "IGameObject.h"
 #include "Actor.h"
 #include "WeaponSystem.h"
+#include "CoopAI.h"
 
 #include "Projectile.h"
 #include "Bullet.h"
@@ -198,10 +199,16 @@ void CWeaponSystem::Reload()
 //------------------------------------------------------------------------
 void CWeaponSystem::OnLoadingStart(ILevelInfo *pLevel)
 {
-	if (gEnv->bMultiplayer)
-		SetConfiguration("mp");
-	else
-		SetConfiguration("");
+	// Crysis Coop: the campaign is played with the single player weapons. The
+	// network game's ones ("mp") do 2 to 5 times less damage (SCAR 26 instead
+	// of 120 a bullet): the enemies took clip after clip
+	const bool coop = gEnv->bMultiplayer && pLevel && CoopAI::IsCoopLevelName(pLevel->GetName());
+	const char* config = (gEnv->bMultiplayer && !coop) ? "mp" : "";
+	SetConfiguration(config);
+	if (IItemSystem* pItems = g_pGame->GetIGameFramework()->GetIItemSystem())
+		pItems->SetConfiguration(config);
+	if (coop)
+		CryLogAlways("[Coop] the campaign's weapons: single player settings");
 
 	// force shared item params to be refreshed
 	g_pGame->GetItemSharedParamsList()->Reset();

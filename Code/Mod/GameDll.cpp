@@ -182,11 +182,42 @@ void CoopKeepTestWindowBehind(bool windowExists)
 	}
 }
 
+// Crysis Coop: Crysis Warhead's paks copied into this game's Game folder
+// (Warhead_*.pak) replace a thousand of Crysis' own files: AI and entity
+// scripts, animations, objects. Warhead's soldier script calls a function
+// this game has not, and a soldier took no damage from bullets. The campaign
+// is Crysis': the log says so (the player should take those paks away).
+static void CoopWarnForeignPaks()
+{
+	if (!gEnv || !gEnv->pCryPak)
+		return;
+	std::vector<string> foreign;
+	if (ICryPak::PakInfo* pInfo = gEnv->pCryPak->GetPakInfo())
+	{
+		for (unsigned i = 0; i < pInfo->numOpenPaks; ++i)
+		{
+			const char* path = pInfo->arrPaks[i].szFilePath;
+			if (!path)
+				continue;
+			const char* base = path;
+			for (const char* c = path; *c; ++c)
+				if (*c == '\\' || *c == '/')
+					base = c + 1;
+			if (strnicmp(base, "Warhead_", 8) == 0)
+				foreign.push_back(path);
+		}
+		gEnv->pCryPak->FreePakInfo(pInfo);
+	}
+	for (size_t i = 0; i < foreign.size(); ++i)
+		CryLogAlways("[Coop] WARNING: %s is a Crysis Warhead file in Crysis' folder: it replaces Crysis' own scripts and the enemies may take no damage. Remove it from Crysis\\Game.",foreign[i].c_str());
+}
+
 extern "C"
 {
 	GAME_API IGame *CreateGame(IGameFramework* pGameFramework)
 	{
 		ModuleInitISystem(pGameFramework->GetISystem());
+		CoopWarnForeignPaks();
 		CoopKeepTestWindowBehind(true);
 
 		static char pGameBuffer[sizeof(CGame)];
