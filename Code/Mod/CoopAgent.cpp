@@ -26,6 +26,9 @@
 
 #include <algorithm>
 #include <deque>
+#include <map>
+#include <queue>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -277,9 +280,26 @@ namespace
 		float lastHealth;
 		bool wasDown;
 		bool named;
+		// weapons: when it looks again, the one it goes to pick up
+		float weaponAt;
+		EntityId loot;
+		float lootSince, useAt;
+		std::set<EntityId> lootFailed;
+		// a way around what is in the way (from the host's game: its AI
+		// navigation), and where to
+		std::vector<Vec3> path;
+		Vec3 pathGoal;
+		float pathAt, pathAskAt;
+		float reviveSince;      // at the body of whom it revives, since
+		// staying alive in a fight: a side step, a crouch; falling back hurt
+		float dodgeUntil, dodgeSide;
+		bool retreating;
+		float hitAt;            // when it was last hit
 		SBrain(): order(eO_Free), spot(ZERO), haveSpot(false), fireAtWill(true), enemy(0), burstUntil(0), pauseUntil(0), reloadAt(0),
 			switchAt(0), attackHeld(false), checkPos(ZERO), checkAt(0), stuck(0), strafeUntil(0), strafeSide(1), jump(false),
-			farSince(-1), askAt(0), useHeld(false), useFor(0), useSince(0), lastHealth(-1), wasDown(false), named(false) {}
+			farSince(-1), askAt(0), useHeld(false), useFor(0), useSince(0), lastHealth(-1), wasDown(false), named(false),
+			weaponAt(0), loot(0), lootSince(0), useAt(0), pathGoal(ZERO), pathAt(-100), pathAskAt(0), reviveSince(-1),
+			dodgeUntil(0), dodgeSide(1), retreating(false), hitAt(-100) {}
 	} s_bot;
 
 	// what SteerInput hands the player input
@@ -291,7 +311,8 @@ namespace
 		float turnRate;         // radians a second
 		bool sprint;
 		bool jump;
-		SControl(): moveDir(ZERO), look(false), yaw(0), pitch(0), turnRate(6.0f), sprint(false), jump(false) {}
+		bool crouch;
+		SControl(): moveDir(ZERO), look(false), yaw(0), pitch(0), turnRate(6.0f), sprint(false), jump(false), crouch(false) {}
 	} s_ctl;
 
 	void Press(CPlayer* pPlayer, const ActionId& action, bool press)
@@ -410,6 +431,66 @@ namespace
 		return pBest;
 	}
 
+	// nothing in the way at knee and chest height (a walk straight there)
+	bool ClearWay(CPlayer* pMe, const Vec3& from, const Vec3& to)
+	{
+		IPhysicalEntity* pSkip = pMe->GetEntity()->GetPhysics();
+		for (int i = 0; i < 2; ++i)
+		{
+			const Vec3 up(0, 0, i ? 1.2f : 0.5f);
+			ray_hit hit;
+			if (gEnv->pPhysicalWorld->RayWorldIntersection(from + up, to - from, ent_static | ent_terrain | ent_rigid | ent_sleeping_rigid,
+				rwi_stop_at_pierceable | rwi_colltype_any, &hit, 1, &pSkip, pSkip ? 1 : 0))
+				return false;
+		}
+		return true;
+	}
+
+	// asks the host's game for a way there (its AI navigation knows the
+	// walls, rocks, houses); the answer comes as OnPath
+	void AskPath(const Vec3& goal)
+	{
+		if (Now() < s_bot.pathAskAt)
+			return;
+		s_bot.pathAskAt = Now() + 3.0f;
+		string where;
+		where.Format("%.1f %.1f %.1f", goal.x, goal.y, goal.z);
+		if (CGameRules* pRules = g_pGame->GetGameRules())
+			pRules->CoopSendSyncToServer(15, 5, 0, where.c_str(), "", 0, 0.0f);
+	}
+
+	// the point of the way to walk to now (or the goal itself)
+	Vec3 Waypoint(CPlayer* pMe, const Vec3& pos, const Vec3& to, float dist, bool blocked)
+	{
+		std::vector<Vec3>& path = s_bot.path;
+		const bool fresh = !path.empty() && Now() - s_bot.pathAt < 12.0f && Dist2D(s_bot.pathGoal, to) < 4.0f;
+		if (!fresh)
+		{
+			path.clear();
+			if (blocked && dist > 3.0f)
+				AskPath(to);
+			return to;
+		}
+		// the way starts where the host's game has it (a little off, maybe):
+		// from the point nearest to it, and on past every one reached
+		size_t nearest = 0;
+		for (size_t i = 1; i < path.size(); ++i)
+			if (Dist2D(path[i], pos) < Dist2D(path[nearest], pos))
+				nearest = i;
+		path.erase(path.begin(), path.begin() + nearest);
+		while (!path.empty() && Dist2D(path[0], pos) < 1.3f)
+			path.erase(path.begin());
+		// a later point in plain sight: straight there
+		while (path.size() > 1 && Dist2D(path[1], pos) < 25.0f && ClearWay(pMe, pos, path[1]))
+			path.erase(path.begin());
+		if (path.empty() || (!blocked && dist < 6.0f))
+			return to;
+		// a fresh way now and then (it moves on, so does the one it goes to)
+		if (Now() - s_bot.pathAt > 4.0f)
+			AskPath(to);
+		return path[0];
+	}
+
 	// walk toward a point; true when there
 	bool MoveTo(CPlayer* pMe, const Vec3& to, float stopAt, bool mayRun, bool mayCatchUp, const char* toName)
 	{
@@ -426,8 +507,14 @@ namespace
 			s_bot.farSince = -1;
 			return true;
 		}
-		Vec3 dir = d / dist;
-		// stuck: jump, then step aside, then ask to be put next to the one it follows
+		// around what is in the way, by the host's navigation
+		const bool blocked = s_bot.stuck > 0 || (dist > 3.0f && !ClearWay(pMe, pos, to));
+		Vec3 next = Waypoint(pMe, pos, to, dist, blocked);
+		Vec3 dn = next - pos;
+		dn.z = 0;
+		Vec3 dir = dn.GetLength() > 0.1f ? dn.GetNormalized() : d / dist;
+		// stuck: jump, step aside, a way around; only when nothing helps for
+		// long, ask to be put next to the one it follows
 		if (Now() >= s_bot.checkAt)
 		{
 			const float moved = (pos - s_bot.checkPos).GetLength2D();
@@ -436,12 +523,14 @@ namespace
 			s_bot.checkAt = Now() + 1.0f;
 			if (s_bot.stuck == 1 || s_bot.stuck == 3)
 				s_ctl.jump = true;
-			if (s_bot.stuck == 2 || s_bot.stuck == 4)
+			if (s_bot.stuck == 2 || s_bot.stuck == 4 || s_bot.stuck == 8)
 			{
 				s_bot.strafeUntil = Now() + 1.2f;
 				s_bot.strafeSide = -s_bot.strafeSide;
 			}
-			if (s_bot.stuck >= 6 && mayCatchUp && dist > 8.0f)
+			if (s_bot.stuck == 5)
+				s_bot.pathAt = -100.0f;    // the way it had led nowhere: a new one
+			if (s_bot.stuck >= 15 && mayCatchUp && dist > 8.0f)
 			{
 				Ask(1, toName);
 				s_bot.stuck = 0;
@@ -479,6 +568,329 @@ namespace
 		s_ctl.turnRate = rate;
 	}
 
+	// ------------------------------------------------------------------
+	// weapons: the best one with ammo in the hands; more from the ground
+
+	// how good a weapon is to fight with (0: not one: fists, rockets,
+	// explosives, tools)
+	int WeaponRank(const char* cls)
+	{
+		static const struct { const char* name; int rank; } s_ranks[] = {
+			{ "SCAR", 9 }, { "FY71", 9 }, { "GaussRifle", 8 }, { "SMG", 8 }, { "Shotgun", 7 }, { "Hurricane", 7 },
+			{ "MOAC", 7 }, { "MOAR", 6 }, { "DSG1", 6 }, { "SOCOM", 3 },
+		};
+		for (size_t i = 0; i < sizeof(s_ranks) / sizeof(s_ranks[0]); ++i)
+			if (!stricmp(cls, s_ranks[i].name))
+				return s_ranks[i].rank;
+		return 0;
+	}
+
+	// shots it has for a weapon: the clip and what it carries for it
+	int WeaponShots(CPlayer* pMe, IItem* pItem)
+	{
+		IWeapon* pWeapon = pItem ? pItem->GetIWeapon() : 0;
+		IFireMode* pMode = pWeapon ? pWeapon->GetFireMode(pWeapon->GetCurrentFireMode()) : 0;
+		if (!pMode)
+			return 0;
+		int shots = pMode->GetAmmoCount();
+		if (pMode->GetAmmoType() && pMe->GetInventory())
+			shots += pMe->GetInventory()->GetAmmoCount(pMode->GetAmmoType());
+		return shots;
+	}
+
+	// the best weapon it carries that can shoot (0 rank: none)
+	IItem* BestWeapon(CPlayer* pMe, int* pRank = 0)
+	{
+		IInventory* pInventory = pMe->GetInventory();
+		IItemSystem* pItems = g_pGame->GetIGameFramework()->GetIItemSystem();
+		IItem* pBest = 0;
+		int bestRank = 0, bestShots = 0;
+		for (int i = 0; pInventory && i < pInventory->GetCount(); ++i)
+		{
+			IItem* pItem = pItems->GetItem(pInventory->GetItem(i));
+			if (!pItem || !pItem->CanSelect())
+				continue;
+			const int rank = WeaponRank(pItem->GetEntity()->GetClass()->GetName());
+			const int shots = rank ? WeaponShots(pMe, pItem) : 0;
+			if (shots > 0 && (rank > bestRank || (rank == bestRank && shots > bestShots)))
+			{
+				pBest = pItem;
+				bestRank = rank;
+				bestShots = shots;
+			}
+		}
+		if (pRank)
+			*pRank = bestRank;
+		return pBest;
+	}
+
+	// the best weapon in the hands (not in the middle of a reload)
+	void ChooseWeapon(CPlayer* pMe, bool now)
+	{
+		if (!now && Now() < s_bot.weaponAt)
+			return;
+		s_bot.weaponAt = Now() + 1.0f;
+		if (Now() < s_bot.reloadAt || Now() < s_bot.switchAt)
+			return;
+		IItem* pCurrent = pMe->GetCurrentItem();
+		const int currentRank = pCurrent ? WeaponRank(pCurrent->GetEntity()->GetClass()->GetName()) : 0;
+		const int currentShots = currentRank ? WeaponShots(pMe, pCurrent) : 0;
+		int bestRank = 0;
+		IItem* pBest = BestWeapon(pMe, &bestRank);
+		if (!pBest || pBest == pCurrent || (currentShots > 0 && currentRank >= bestRank))
+			return;
+		const char* cls = pBest->GetEntity()->GetClass()->GetName();
+		Fire(pMe, false);
+		pMe->SelectItemByName(cls, true);
+		s_bot.switchAt = Now() + 1.5f;
+		Event("takes the %s%s", cls, currentRank && !currentShots ? " (no ammo left for the other one)" : "");
+	}
+
+	// a weapon or ammo on the ground worth going for: a better weapon than
+	// it has, or ammo for one it has when it runs low
+	IEntity* FindLoot(CPlayer* pMe, const Vec3& pos, float range)
+	{
+		int bestRank = 0;
+		IItem* pBest = BestWeapon(pMe, &bestRank);
+		const int shots = pBest ? WeaponShots(pMe, pBest) : 0;
+		const bool low = !pBest || bestRank < 6 || shots < 60;
+		SEntityProximityQuery query;
+		query.box = AABB(pos - Vec3(range, range, 4.0f), pos + Vec3(range, range, 4.0f));
+		gEnv->pEntitySystem->QueryProximity(query);
+		IItemSystem* pItems = g_pGame->GetIGameFramework()->GetIItemSystem();
+		IInventory* pInventory = pMe->GetInventory();
+		IEntity* pFound = 0;
+		float foundDist = range;
+		for (int i = 0; i < query.nCount; ++i)
+		{
+			IEntity* pEntity = query.pEntities[i];
+			if (!pEntity || pEntity->IsHidden() || s_bot.lootFailed.count(pEntity->GetId()))
+				continue;
+			IItem* pItem = pItems->GetItem(pEntity->GetId());
+			if (!pItem || pItem->GetOwnerId())
+				continue;
+			const char* cls = pEntity->GetClass()->GetName();
+			const int rank = WeaponRank(cls);
+			const bool have = pInventory && pInventory->GetItemByClass(pEntity->GetClass()) != 0;
+			const bool ammoBox = !stricmp(cls, "CustomAmmoPickup");
+			// better than its own; or more ammo (the same weapon again, a
+			// box) when it runs low
+			if (!(rank > bestRank && !have) && !(low && ((have && rank) || ammoBox)))
+				continue;
+			const float d = Dist2D(pEntity->GetWorldPos(), pos);
+			if (d < foundDist && fabsf(pEntity->GetWorldPos().z - pos.z) < 3.0f)
+			{
+				foundDist = d;
+				pFound = pEntity;
+			}
+		}
+		return pFound;
+	}
+
+	// goes to what it found on the ground, looks at it, takes it (the use
+	// key, as a player: the hand reaches for it); true while busy with it
+	bool Loot(CPlayer* pMe, const Vec3& pos, const Vec3& eye, bool fighting)
+	{
+		IEntity* pLoot = s_bot.loot ? gEnv->pEntitySystem->GetEntity(s_bot.loot) : 0;
+		IItem* pItem = pLoot ? g_pGame->GetIGameFramework()->GetIItemSystem()->GetItem(pLoot->GetId()) : 0;
+		if (s_bot.loot && (!pItem || pItem->GetOwnerId() || pLoot->IsHidden()))
+		{
+			// taken (by it, or by someone)
+			if (pItem && pItem->GetOwnerId() == pMe->GetEntityId())
+				Event("picked up the %s", pLoot->GetClass()->GetName());
+			s_bot.loot = 0;
+			pLoot = 0;
+			ChooseWeapon(pMe, true);
+		}
+		if (!pLoot)
+		{
+			// not with an enemy close by, unless it has nothing to shoot with
+			int rank = 0;
+			const bool armed = BestWeapon(pMe, &rank) != 0;
+			if (fighting && armed)
+				return false;
+			pLoot = FindLoot(pMe, pos, armed ? 20.0f : 45.0f);
+			if (!pLoot)
+				return false;
+			s_bot.loot = pLoot->GetId();
+			s_bot.lootSince = Now();
+			Event("goes to pick up the %s (%.0f m)", pLoot->GetClass()->GetName(), Dist2D(pLoot->GetWorldPos(), pos));
+		}
+		if (Now() - s_bot.lootSince > 20.0f)
+		{
+			// out of reach: something else
+			s_bot.lootFailed.insert(s_bot.loot);
+			s_bot.loot = 0;
+			return false;
+		}
+		const Vec3 at = pLoot->GetWorldPos();
+		Fire(pMe, false);
+		if (!MoveTo(pMe, at, 1.0f, !fighting, false, ""))
+		{
+			if (Dist2D(at, pos) < 4.0f)
+				LookAt(eye, at, 6.0f);
+		}
+		else
+		{
+			LookAt(eye, at, 6.0f);
+			if (Now() >= s_bot.useAt)
+			{
+				Press(pMe, g_pGame->Actions().use, true);
+				Press(pMe, g_pGame->Actions().use, false);
+				s_bot.useAt = Now() + 1.2f;
+			}
+		}
+		s_bot.doing.Format("picking up the %s", pLoot->GetClass()->GetName());
+		return true;
+	}
+
+	// hurt in a fight: away from the enemy, out of its sight, down low until
+	// the suit has healed it (it would die standing there); true meanwhile
+	bool Survive(CPlayer* pMe, const Vec3& pos, const Vec3& eye, IActor* pEnemy)
+	{
+		const float health = (float)pMe->GetHealth() / (float)max(1, pMe->GetMaxHealth());
+		const bool underFire = Now() - s_bot.hitAt < 2.0f;
+		// shot by someone it does not see (through leaves, from afar), or
+		// recovering: the nearest enemy is the danger
+		if (!pEnemy && (s_bot.retreating || Now() - s_bot.hitAt < 4.0f))
+		{
+			float best = 70.0f;
+			IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+			while (IActor* pActor = it->Next())
+				if (Hostile(pActor) && pActor->GetEntity()->GetWorldPos().GetDistance(pos) < best)
+				{
+					best = pActor->GetEntity()->GetWorldPos().GetDistance(pos);
+					pEnemy = pActor;
+				}
+		}
+		if (!pEnemy)
+		{
+			s_bot.retreating = false;
+			return false;
+		}
+		if (!s_bot.retreating && health < 0.6f)
+		{
+			s_bot.retreating = true;
+			s_bot.dodgeSide = cry_frand() < 0.5f ? -1.0f : 1.0f;
+			Event("hurt (health %d): falls back to recover", pMe->GetHealth());
+		}
+		else if (s_bot.retreating && health > 0.9f)
+		{
+			s_bot.retreating = false;
+			Event("recovered (health %d): back to it", pMe->GetHealth());
+		}
+		if (!s_bot.retreating)
+			return false;
+		Fire(pMe, false);
+		const Vec3 enemyAim = AimPoint(pEnemy->GetEntity());
+		if (underFire || Visible(pMe, eye, pEnemy->GetEntity(), enemyAim))
+		{
+			// away from it, a little aside, running
+			Vec3 away = pos - pEnemy->GetEntity()->GetWorldPos();
+			away.z = 0;
+			away.NormalizeSafe(Vec3(0, 1, 0));
+			const float side = s_bot.dodgeSide ? s_bot.dodgeSide : 1.0f;
+			s_ctl.moveDir = (away + Vec3(away.y * side, -away.x * side, 0) * 0.7f).GetNormalized();
+			s_ctl.sprint = true;
+			s_ctl.look = true;
+			s_ctl.yaw = Yaw(s_ctl.moveDir);
+			s_ctl.pitch = 0.0f;
+			s_ctl.turnRate = 6.0f;
+			s_bot.doing.Format("falling back to recover (health %d)", pMe->GetHealth());
+		}
+		else
+		{
+			// out of its sight: down low while the suit heals it
+			s_ctl.crouch = true;
+			LookAt(eye, enemyAim, 3.0f);
+			s_bot.doing.Format("recovering in cover (health %d)", pMe->GetHealth());
+		}
+		return true;
+	}
+
+	// standing its ground in a fight: side steps now and then, crouched in
+	// between (a harder target than one standing still)
+	void Dodge(const Vec3& pos, IActor* pEnemy)
+	{
+		if (s_ctl.moveDir.GetLengthSquared() > 0.01f)
+			return;    // on its way somewhere anyway
+		const float now = Now();
+		if (now >= s_bot.dodgeUntil)
+		{
+			if (s_bot.dodgeSide != 0.0f)
+			{
+				s_bot.dodgeSide = 0.0f;
+				s_bot.dodgeUntil = now + 1.5f + cry_frand();
+			}
+			else
+			{
+				s_bot.dodgeSide = cry_frand() < 0.5f ? -1.0f : 1.0f;
+				s_bot.dodgeUntil = now + 0.7f + cry_frand() * 0.7f;
+			}
+		}
+		if (s_bot.dodgeSide != 0.0f)
+		{
+			Vec3 to = pEnemy->GetEntity()->GetWorldPos() - pos;
+			to.z = 0;
+			to.NormalizeSafe(Vec3(0, 1, 0));
+			s_ctl.moveDir = Vec3(to.y * s_bot.dodgeSide, -to.x * s_bot.dodgeSide, 0);
+		}
+		else
+			s_ctl.crouch = true;
+	}
+
+	// one step of a fight with an enemy: turn to it, the weapon ready, fire
+	// in bursts when on target
+	void FightStep(CPlayer* pMe, const Vec3& eye, IActor* pEnemy)
+	{
+		const Vec3 aim = AimPoint(pEnemy->GetEntity());
+		const bool seen = Visible(pMe, eye, pEnemy->GetEntity(), aim);
+		LookAt(eye, aim, 5.0f);
+		float yaw, pitch;
+		ViewAngles(pMe, yaw, pitch);
+		const float off = fabsf(Wrap(s_ctl.yaw - yaw)) + fabsf(s_ctl.pitch - pitch);
+		int clip = -1, reserve = -1;
+		IWeapon* pWeapon = CurrentWeapon(pMe, &clip, &reserve);
+		IItem* pCurrent = pMe->GetCurrentItem();
+		const bool fightsWithIt = pWeapon && pCurrent && WeaponRank(pCurrent->GetEntity()->GetClass()->GetName()) > 0;
+		if (!fightsWithIt)
+		{
+			// fists, nothing, a tool: the best weapon it has
+			Fire(pMe, false);
+			ChooseWeapon(pMe, true);
+		}
+		else if (clip == 0 && Now() > s_bot.reloadAt)
+		{
+			Fire(pMe, false);
+			if (reserve > 0)
+			{
+				Press(pMe, g_pGame->Actions().reload, true);
+				Press(pMe, g_pGame->Actions().reload, false);
+				s_bot.reloadAt = Now() + 2.5f;
+			}
+			else
+				ChooseWeapon(pMe, true);    // none left for it: another weapon
+		}
+		else if (seen && off < 0.06f && clip != 0)
+		{
+			// bursts: held a while, then let go (single shot weapons fire again)
+			const float now = Now();
+			if (now >= s_bot.pauseUntil && now < s_bot.burstUntil)
+				Fire(pMe, true);
+			else if (now >= s_bot.burstUntil)
+			{
+				Fire(pMe, false);
+				s_bot.pauseUntil = now + 0.15f + cry_frand() * 0.2f;
+				s_bot.burstUntil = s_bot.pauseUntil + 0.3f + cry_frand() * 0.4f;
+			}
+			else
+				Fire(pMe, false);
+		}
+		else
+			Fire(pMe, false);
+		s_bot.doing.Format("fighting %s (%.0f m%s)", pEnemy->GetEntity()->GetName(), aim.GetDistance(eye), seen ? "" : ", out of sight");
+	}
+
 	void Think(float frameTime)
 	{
 		CPlayer* pMe = LocalPlayer();
@@ -486,6 +898,7 @@ namespace
 		s_ctl.look = false;
 		s_ctl.sprint = false;
 		s_ctl.jump = false;
+		s_ctl.crouch = false;
 		if (!pMe || !InGame(pMe))
 		{
 			s_bot.doing = pMe ? "waiting to spawn" : "not in a game";
@@ -500,7 +913,10 @@ namespace
 			s_bot.wasDown = down;
 		}
 		if (!down && s_bot.lastHealth > 0 && pMe->GetHealth() < s_bot.lastHealth - 5)
+		{
 			Event("you were hit: health %d", pMe->GetHealth());
+			s_bot.hitAt = Now();
+		}
 		s_bot.lastHealth = (float)pMe->GetHealth();
 		{
 			IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
@@ -544,18 +960,55 @@ namespace
 		IActor* pDowned = (s_bot.order == eO_Hold || s_bot.order == eO_Goto) ? 0 : DownedTeammate(pMe, pos, 80.0f);
 		if (pDowned && !pMyVehicle)
 		{
-			Fire(pMe, false);
+			// it makes its way there (around walls and rocks, by the host's
+			// navigation), shooting back at whoever shoots at it; at the body
+			// an enemy close by is dealt with first (it would kill both)
 			const Vec3 body = pDowned->GetEntity()->GetWorldPos();
 			const float d = Dist2D(body, pos);
-			if (!MoveTo(pMe, body, 1.6f, true, false, pDowned->GetEntity()->GetName()))
+			ChooseWeapon(pMe, false);
+			EntityId enemy = s_bot.fireAtWill ? PickEnemy(pMe, eye, d > 3.0f ? 60.0f : 18.0f) : 0;
+			IActor* pEnemy = ActorOf(enemy);
+			if (enemy != s_bot.enemy)
 			{
+				if (enemy)
+					Event("fighting %s on the way to %s", NameOf(enemy), pDowned->GetEntity()->GetName());
+				s_bot.enemy = enemy;
+			}
+			if (pEnemy)
 				HoldUse(pMe, false, 0);
-				LookAt(eye, body + Vec3(0, 0, 1.2f), 6.0f);
-				s_bot.doing.Format("running to revive %s (%.0f m)", pDowned->GetEntity()->GetName(), d);
+			// badly hurt: out of the fire first (dead it revives nobody)
+			if (Survive(pMe, pos, eye, pEnemy))
+				return;
+			if (d > 1.6f)
+			{
+				MoveTo(pMe, body, 1.6f, !pEnemy, false, pDowned->GetEntity()->GetName());
+				s_bot.reviveSince = -1;
+				if (pEnemy)
+				{
+					FightStep(pMe, eye, pEnemy);
+					s_bot.doing.Format("making its way to %s (%.0f m), fighting %s", pDowned->GetEntity()->GetName(), d, pEnemy->GetEntity()->GetName());
+				}
+				else
+				{
+					Fire(pMe, false);
+					HoldUse(pMe, false, 0);
+					LookAt(eye, body + Vec3(0, 0, 1.2f), 6.0f);
+					s_bot.doing.Format("running to revive %s (%.0f m)", pDowned->GetEntity()->GetName(), d);
+				}
+			}
+			else if (pEnemy)
+			{
+				s_ctl.moveDir.zero();
+				s_ctl.crouch = true;
+				FightStep(pMe, eye, pEnemy);
+				s_bot.doing.Format("at %s, fighting %s first", pDowned->GetEntity()->GetName(), pEnemy->GetEntity()->GetName());
 			}
 			else
 			{
+				Fire(pMe, false);
 				LookAt(eye, body, 6.0f);
+				if (s_bot.reviveSince < 0)
+					s_bot.reviveSince = Now();
 				// the use key goes to the nearest downed teammate within reach
 				if (!s_bot.useHeld || s_bot.useFor != pDowned->GetEntityId())
 				{
@@ -564,10 +1017,16 @@ namespace
 				}
 				else if (Now() - s_bot.useSince > 4.0f && !CoopRevive::IsBeingRevived(pDowned->GetEntityId()))
 				{
-					// the host's game has it somewhere else (an obstacle there,
-					// not here): it puts it next to the body, then again
-					Ask(4, pDowned->GetEntity()->GetName());
+					// the host's game has it a little elsewhere (something in
+					// the way there, not here): a step closer, then again.
+					// Put next to the body only when nothing helps for long.
 					HoldUse(pMe, false, 0);
+					s_ctl.moveDir = Vec3(body.x - pos.x, body.y - pos.y, 0).GetNormalizedSafe(Vec3(0, 1, 0));
+					if (Now() - s_bot.reviveSince > 30.0f)
+					{
+						Ask(4, pDowned->GetEntity()->GetName());
+						s_bot.reviveSince = Now();
+					}
 				}
 				else if (Now() - s_bot.useSince > 6.0f)
 					HoldUse(pMe, false, 0);    // pressed again next frame
@@ -575,6 +1034,7 @@ namespace
 			}
 			return;
 		}
+		s_bot.reviveSince = -1;
 		HoldUse(pMe, false, 0);
 		if (s_bot.order == eO_Revive)
 			s_bot.order = eO_Free;
@@ -623,57 +1083,18 @@ namespace
 		}
 		IActor* pEnemy = ActorOf(enemy);
 		bool aiming = false;
+		// the best weapon in the hands (a rifle, not the pistol it may have
+		// been given)
+		ChooseWeapon(pMe, false);
+		// out of ammo, or a better weapon lying close: it picks it up
+		if (s_bot.order != eO_Hold && Loot(pMe, pos, eye, pEnemy != 0))
+			return;
+		if (Survive(pMe, pos, eye, pEnemy))
+			return;
 		if (pEnemy)
 		{
-			const Vec3 aim = AimPoint(pEnemy->GetEntity());
-			const bool seen = Visible(pMe, eye, pEnemy->GetEntity(), aim);
-			LookAt(eye, aim, 5.0f);
+			FightStep(pMe, eye, pEnemy);
 			aiming = true;
-			float yaw, pitch;
-			ViewAngles(pMe, yaw, pitch);
-			const float off = fabsf(Wrap(s_ctl.yaw - yaw)) + fabsf(s_ctl.pitch - pitch);
-			int clip = -1, reserve = -1;
-			IWeapon* pWeapon = CurrentWeapon(pMe, &clip, &reserve);
-			if (!pWeapon && Now() > s_bot.switchAt)
-			{
-				// fists or nothing: the next weapon
-				Press(pMe, g_pGame->Actions().nextitem, true);
-				Press(pMe, g_pGame->Actions().nextitem, false);
-				s_bot.switchAt = Now() + 1.5f;
-			}
-			else if (pWeapon && clip == 0 && Now() > s_bot.reloadAt)
-			{
-				Fire(pMe, false);
-				if (reserve > 0)
-				{
-					Press(pMe, g_pGame->Actions().reload, true);
-					Press(pMe, g_pGame->Actions().reload, false);
-				}
-				else
-				{
-					Press(pMe, g_pGame->Actions().nextitem, true);
-					Press(pMe, g_pGame->Actions().nextitem, false);
-				}
-				s_bot.reloadAt = Now() + 2.5f;
-			}
-			else if (pWeapon && seen && off < 0.06f)
-			{
-				// bursts: held a while, then let go (single shot weapons fire again)
-				const float now = Now();
-				if (now >= s_bot.pauseUntil && now < s_bot.burstUntil)
-					Fire(pMe, true);
-				else if (now >= s_bot.burstUntil)
-				{
-					Fire(pMe, false);
-					s_bot.pauseUntil = now + 0.15f + cry_frand() * 0.2f;
-					s_bot.burstUntil = s_bot.pauseUntil + 0.3f + cry_frand() * 0.4f;
-				}
-				else
-					Fire(pMe, false);
-			}
-			else
-				Fire(pMe, false);
-			s_bot.doing.Format("fighting %s (%.0f m%s)", pEnemy->GetEntity()->GetName(), aim.GetDistance(eye), seen ? "" : ", out of sight");
 		}
 		else
 		{
@@ -733,6 +1154,8 @@ namespace
 				s_bot.doing = "waiting (nobody to follow)";
 			break;
 		}
+		if (aiming && pEnemy)
+			Dodge(pos, pEnemy);
 		// facing the way it walks when it has nobody to aim at
 		if (!aiming && s_ctl.moveDir.GetLengthSquared() > 0.01f)
 		{
@@ -1938,6 +2361,144 @@ namespace
 
 	// ------------------------------------------------------------------
 	// the server side of a companion's requests
+	// the AI navigation's way from one point to another, as the soldiers
+	// find theirs: A* over its graph (the outdoor triangles, the indoor
+	// waypoints), then straightened where a straight walk is valid
+	bool FindPath(const Vec3& from, const Vec3& to, std::vector<Vec3>& out)
+	{
+		out.clear();
+		IAISystem* pAI = gEnv->pAISystem;
+		IGraph* pGraph = pAI ? pAI->GetNodeGraph() : 0;
+		if (!pGraph)
+			return false;
+		const IAISystem::tNavCapMask mask = IAISystem::NAV_TRIANGULAR | IAISystem::NAV_WAYPOINT_HUMAN | IAISystem::NAV_ROAD;
+		const float radius = 0.4f;
+		const unsigned a = pGraph->GetEnclosing(from, mask, radius, 0, 0.0f, 0, true, "coop companion");
+		const unsigned b = pGraph->GetEnclosing(to, mask, radius, 0, 0.0f, 0, true, "coop companion");
+		GraphNode* pStart = a ? pGraph->GetNode(a) : 0;
+		GraphNode* pGoal = b ? pGraph->GetNode(b) : 0;
+		if (!pStart || !pGoal)
+			return false;
+		struct SOpen
+		{
+			float f;
+			GraphNode* pNode;
+			bool operator<(const SOpen& o) const { return f > o.f; }
+		};
+		struct SSeen
+		{
+			float g;
+			GraphNode* pFrom;
+			bool closed;
+		};
+		std::priority_queue<SOpen> open;
+		std::map<GraphNode*, SSeen> seen;
+		const Vec3 goalPos = pGraph->GetNodePos(pGoal);
+		const SSeen s0 = { 0.0f, 0, false };
+		seen[pStart] = s0;
+		const SOpen o0 = { pGraph->GetNodePos(pStart).GetDistance(goalPos), pStart };
+		open.push(o0);
+		bool found = false;
+		for (int n = 0; !open.empty() && n < 40000; ++n)
+		{
+			const SOpen cur = open.top();
+			open.pop();
+			SSeen& sc = seen[cur.pNode];
+			if (sc.closed)
+				continue;
+			sc.closed = true;
+			if (cur.pNode == pGoal)
+			{
+				found = true;
+				break;
+			}
+			const Vec3 p = pGraph->GetNodePos(cur.pNode);
+			const unsigned links = pGraph->GetNumNodeLinks(cur.pNode);
+			for (unsigned i = 0; i < links; ++i)
+			{
+				const unsigned link = pGraph->GetGraphLink(cur.pNode, i);
+				if (pGraph->GetRadiusFromLink(link) < radius)
+					continue;
+				GraphNode* pNext = pGraph->GetNextNode(link);
+				if (!pNext || !(pGraph->GetNavType(pNext) & mask))
+					continue;
+				const Vec3 q = pGraph->GetNodePos(pNext);
+				const float g = sc.g + p.GetDistance(q);
+				std::map<GraphNode*, SSeen>::iterator it = seen.find(pNext);
+				if (it != seen.end() && (it->second.closed || it->second.g <= g))
+					continue;
+				const SSeen sn = { g, cur.pNode, false };
+				seen[pNext] = sn;
+				const SOpen on = { g + q.GetDistance(goalPos), pNext };
+				open.push(on);
+			}
+		}
+		if (!found)
+			return false;
+		std::vector<Vec3> nodes;
+		for (GraphNode* pNode = pGoal; pNode; pNode = seen[pNode].pFrom)
+			nodes.push_back(pGraph->GetNodePos(pNode));
+		std::reverse(nodes.begin(), nodes.end());
+		nodes.push_back(to);
+		// straightened: from each point to the farthest one in a straight walk
+		Vec3 at = from;
+		for (size_t i = 0; i < nodes.size(); )
+		{
+			size_t reach = i;
+			for (size_t j = std::min(nodes.size() - 1, i + 12); j > i; --j)
+			{
+				Vec3 end = nodes[j];
+				IAISystem::ENavigationType type = IAISystem::NAV_UNSET;
+				if (pAI->IsSegmentValid(mask, radius, at, end, type))
+				{
+					reach = j;
+					break;
+				}
+			}
+			out.push_back(nodes[reach]);
+			at = nodes[reach];
+			i = reach + 1;
+		}
+		return !out.empty();
+	}
+
+	void CmdTestAmmo(IConsoleCmdArgs* pArgs)
+	{
+		IActor* pActor = pArgs->GetArgCount() > 3 && gEnv->bServer ? ActorByName(pArgs->GetArg(1)) : 0;
+		IEntityClass* pAmmo = pActor ? gEnv->pEntitySystem->GetClassRegistry()->FindClass(pArgs->GetArg(2)) : 0;
+		if (!pAmmo || !pActor->GetInventory())
+		{
+			CryLogAlways("[CoopTest] coop_test_ammo: no such player or ammo");
+			return;
+		}
+		const int count = atoi(pArgs->GetArg(3));
+		pActor->GetInventory()->SetAmmoCount(pAmmo, count);
+		CActor* pTarget = static_cast<CActor*>(pActor);
+		if (!pActor->IsClient() && pTarget->GetChannelId())
+			pTarget->GetGameObject()->InvokeRMI(CActor::ClSetAmmo(), CActor::AmmoParams(pAmmo->GetName(), count), eRMI_ToClientChannel, pTarget->GetChannelId());
+		CryLogAlways("[CoopTest] %s carries %d %s now", pActor->GetEntity()->GetName(), count, pAmmo->GetName());
+	}
+
+	void CmdTestPath(IConsoleCmdArgs* pArgs)
+	{
+		IEntity* pTo = pArgs->GetArgCount() > 1 ? gEnv->pEntitySystem->FindEntityByName(pArgs->GetArg(1)) : 0;
+		IActor* pFrom = g_pGame->GetIGameFramework()->GetClientActor();
+		if (!pTo || !pFrom || !gEnv->bServer)
+		{
+			CryLogAlways("[CoopTest] coop_test_path: no such entity (or not the server)");
+			return;
+		}
+		std::vector<Vec3> path;
+		const CTimeValue t0 = gEnv->pTimer->GetAsyncTime();
+		const bool ok = FindPath(pFrom->GetEntity()->GetWorldPos(), pTo->GetWorldPos(), path);
+		string text;
+		for (size_t i = 0; i < path.size(); ++i)
+			text += string().Format(" (%.0f %.0f %.0f)", path[i].x, path[i].y, path[i].z);
+		CryLogAlways("[CoopTest] way to %s (%.0f m): %s, %d points in %.1f ms:%s", pTo->GetName(),
+			pFrom->GetEntity()->GetWorldPos().GetDistance(pTo->GetWorldPos()), ok ? "found" : "NONE", (int)path.size(),
+			(gEnv->pTimer->GetAsyncTime() - t0).GetMilliSeconds(), text.c_str());
+	}
+
 	IVehicleSeat* FreeSeat(IVehicle* pVehicle)
 	{
 		IVehicleSeat* pAny = 0;
@@ -1975,6 +2536,10 @@ void CoopAgent::Init()
 	// the companion's game never takes the mouse (the host's value is 0)
 	if (ICVar* pFree = gEnv->pConsole->GetCVar("coop_test_free_cursor"))
 		pFree->SetFlags(pFree->GetFlags() | VF_NOT_NET_SYNCED);
+	gEnv->pConsole->AddCommand("coop_test_ammo", CmdTestAmmo, 0,
+		"Crysis Coop testing: coop_test_ammo <player> <ammo class> <count> sets what he carries of it (server)");
+	gEnv->pConsole->AddCommand("coop_test_path", CmdTestPath, 0,
+		"Crysis Coop testing: coop_test_path <entity name> logs the AI navigation's way from the host's player to it (server)");
 }
 
 bool CoopAgent::IsCompanion()
@@ -2050,6 +2615,10 @@ void CoopAgent::SteerInput(CPlayer* pPlayer, Ang3& deltaRotation, Vec3& deltaMov
 		actions |= ACTION_SPRINT;
 	else
 		actions &= ~ACTION_SPRINT;
+	if (s_ctl.crouch)
+		actions |= ACTION_CROUCH;
+	else
+		actions &= ~ACTION_CROUCH;
 	if (s_ctl.jump)
 	{
 		actions |= ACTION_JUMP;
@@ -2109,8 +2678,28 @@ void CoopAgent::OnServerRequest(EntityId agent, int op, const char* name)
 		}
 		return;
 	}
-	// next to a downed teammate whom it could not revive: the host's game had
-	// it a few metres off, behind something that is not there in its own game
+	// a way for it to walk: around what is in the way (the AI navigation of
+	// the host's game; the companion's own game has none), sent back to it
+	if (op == 5 && !pMine && name)
+	{
+		Vec3 goal;
+		if (sscanf(name, "%f %f %f", &goal.x, &goal.y, &goal.z) != 3)
+			return;
+		std::vector<Vec3> path;
+		const Vec3 from = pAgent->GetEntity()->GetWorldPos();
+		string text;
+		if (FindPath(from, goal, path))
+		{
+			for (size_t i = 0; i < path.size() && i < 20; ++i)
+				text += string().Format("%s%.1f %.1f %.1f", i ? ";" : "", path[i].x, path[i].y, path[i].z);
+		}
+		CryLogAlways("[CoopAgent] a way for %s: %d points over %.0f m%s", pAgent->GetEntity()->GetName(), (int)path.size(),
+			from.GetDistance(goal), text.empty() ? " (none found: it goes straight)" : "");
+		pRules->CoopSendSync(16, 0, 0, name, text.c_str(), 0, 0.0f, static_cast<CActor*>(pAgent)->GetChannelId());
+		return;
+	}
+	// next to a downed teammate whom it could not revive for long: the host's
+	// game had it a few metres off, behind something not there in its own game
 	if (op == 4 && !pMine)
 	{
 		IActor* pDowned = ActorByName(name);
@@ -2136,6 +2725,29 @@ void CoopAgent::OnServerRequest(EntityId agent, int op, const char* name)
 		pRules->MovePlayer(static_cast<CActor*>(pAgent), at, pLeader->GetEntity()->GetWorldAngles());
 		CryLogAlways("[CoopAgent] %s caught up with %s", pAgent->GetEntity()->GetName(), pLeader->GetEntity()->GetName());
 	}
+}
+
+void CoopAgent::OnPath(const char* goal, const char* text)
+{
+	if (!IsCompanion())
+		return;
+	std::vector<Vec3>& path = s_bot.path;
+	path.clear();
+	for (const char* p = text; p && *p; )
+	{
+		Vec3 v;
+		if (sscanf(p, "%f %f %f", &v.x, &v.y, &v.z) == 3)
+			path.push_back(v);
+		p = strchr(p, ';');
+		if (p)
+			++p;
+	}
+	Vec3 g(ZERO);
+	if (goal && sscanf(goal, "%f %f %f", &g.x, &g.y, &g.z) == 3)
+		s_bot.pathGoal = g;
+	s_bot.pathAt = Now();
+	if (!path.empty())
+		CoopAI::Trace("AGENT way: %d points to %s", (int)path.size(), goal ? goal : "");
 }
 
 float CoopAgent::CompanionSeconds()

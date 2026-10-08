@@ -883,7 +883,6 @@ void CPlayerView::ViewSpectatorTarget(SViewParams &viewParams)
 	// cutscene played from the host's own eyes, without a camera of its own).
 	if (CoopAI::IsCoopSession() && pTarget->IsPlayer() && !pTarget->GetLinkedVehicle())
 	{
-		CoopAI::OnEyeView(pTarget->GetEntityId());
 		viewParams.viewID = 3;
 		viewParams.nearplane = 0.1f;
 		const Matrix34& tm = pTarget->GetEntity()->GetWorldTM();
@@ -894,7 +893,56 @@ void CPlayerView::ViewSpectatorTarget(SViewParams &viewParams)
 		SMovementState state;
 		if (IMovementController* pMC = pTarget->GetMovementController())
 			pMC->GetMovementState(state);
-		if (head >= 0 && pHUD && pHUD->IsCutscenePlaying())
+		const bool cutscene = pHUD && pHUD->IsCutscenePlaying();
+		if (m_in.stats_spectatorMode == 0 && !cutscene)
+		{
+			// a downed player follows his teammate from behind, over the
+			// shoulder: the teammate's body in sight, looking where he looks
+			// (not from inside his head)
+			const Vec3 pivot = tm.GetTranslation() + Vec3(0, 0, 1.75f);
+			Vec3 look = state.eyeDirection.GetLengthSquared() > 0.01f ? state.eyeDirection : tm.GetColumn1();
+			Vec3 flat(look.x, look.y, 0);
+			flat.NormalizeSafe(tm.GetColumn1());
+			const Vec3 right(flat.y, -flat.x, 0);
+			const float pitch = clamp_tpl(look.z, -0.6f, 0.6f);
+			Vec3 goal = pivot - flat * 3.2f + right * 0.55f + Vec3(0, 0, 0.35f - pitch * 1.2f);
+			// not into a wall: the camera stops short of what is between
+			IPhysicalEntity* pSkip[2];
+			int nSkip = 0;
+			if (IPhysicalEntity* p = pTarget->GetEntity()->GetPhysics())
+				pSkip[nSkip++] = p;
+			if (IItem* pItem = pTarget->GetCurrentItem())
+				if (IPhysicalEntity* p = pItem->GetEntity()->GetPhysics())
+					pSkip[nSkip++] = p;
+			primitives::sphere sphere;
+			sphere.center = pivot;
+			sphere.r = 0.25f;
+			geom_contact* pContact = 0;
+			const Vec3 dir = goal - pivot;
+			const float hitDist = gEnv->pPhysicalWorld->PrimitiveWorldIntersection(sphere.type, &sphere, dir,
+				ent_static | ent_terrain | ent_rigid | ent_sleeping_rigid, &pContact, 0,
+				(geom_colltype_player << rwi_colltype_bit) | rwi_stop_at_pierceable, 0, 0, 0, pSkip, nSkip);
+			if (hitDist > 0 && pContact)
+				goal = pivot + dir.GetNormalizedSafe() * MAX(0.4f, hitDist - 0.1f);
+			// smooth, but never far behind (a jump of the target resets it)
+			static Vec3 s_cam(goal);
+			static EntityId s_camFor = 0;
+			static int s_camFrame = 0;
+			const int frame = gEnv->pRenderer->GetFrameID();
+			if (s_camFor != pTarget->GetEntityId() || frame - s_camFrame > 5 || (s_cam - goal).GetLengthSquared() > 64.0f)
+				s_cam = goal;
+			s_camFor = pTarget->GetEntityId();
+			s_camFrame = frame;
+			Interpolate(s_cam, goal, 10.0f, viewParams.frameTime);
+			viewParams.position = s_cam;
+			// he stays in the picture when he looks down (at a body) or up
+			const Vec3 at = pivot + flat * 10.0f + Vec3(0, 0, pitch * 6.0f - 1.2f);
+			viewParams.rotation = Quat::CreateRotationVDir((at - s_cam).GetNormalizedSafe(flat));
+			return;
+		}
+		// through his eyes: his own body is not drawn (it filled the view)
+		CoopAI::OnEyeView(pTarget->GetEntityId());
+		if (head >= 0 && cutscene)
 		{
 			// scripted: the head the animation moves (as the host's own view)
 			const QuatT& joint = pPose->GetAbsJointByID(head);

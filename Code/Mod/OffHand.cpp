@@ -26,6 +26,7 @@ History:
 #include "HUD/HUDCrosshair.h"
 #include "WeaponSystem.h"
 #include "Projectile.h"
+#include "CoopAI.h"
 
 #define KILL_NPC_TIMEOUT	7.25f
 #define TIME_TO_UPDATE_CH 0.25f
@@ -2452,8 +2453,8 @@ void COffHand::StartPickUpItem()
 		}
 	}
 
-	//No animation in MP
-	if(gEnv->bMultiplayer)
+	//No animation in MP (Crysis Coop: the campaign's hand reaching for it, as in single player)
+	if(gEnv->bMultiplayer && !CoopAI::IsCoopSession())
 	{
 		m_currentState = eOHS_PICKING_ITEM2;
 		pPlayer->PickUpItem(m_preHeldEntityId,true);

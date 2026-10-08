@@ -40,6 +40,9 @@ namespace CoopAgent
 	// server: a companion's request (SvCoopSync kind 15): 1 catch up with
 	// the player "name", 2 leave the vehicle, 3 get into the vehicle "name"
 	void OnServerRequest(EntityId agent, int op, const char* name);
+	// the companion: the host's answer to op 5, a way to walk to "goal"
+	// ("x y z;x y z;..." in text; empty: none found)
+	void OnPath(const char* goal, const char* text);
 
 	// host: the companion's state for the co-op menu (0 not started yet,
 	// 1 joining, 2 in the game, 3 its game would not start, 4 waiting for
