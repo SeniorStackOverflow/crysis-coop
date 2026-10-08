@@ -157,6 +157,7 @@ m_heldEntityId(0),
 m_pickingTimer(-1.0f),
 m_coopStuckTime(0.0f),
 m_coopOneHandTime(0.0f),
+m_coopHandUpTime(0.0f),
 m_resetTimer(-1.0f),
 m_preHeldEntityId(0),
 m_grabbedNPCSpecies(eGCT_UNKNOWN),
@@ -2546,6 +2547,26 @@ void COffHand::CoopWatchStuck(float frameTime)
 	}
 	else
 		m_coopOneHandTime = 0.0f;
+	// the body keeps the left hand up at the head, ready to throw (the
+	// "hold_grenade" upper body), with nothing in it: the throw or drop that
+	// ends it never reached this game's animation of him. Signals do not end
+	// it, a new "Action" does
+	IAnimationGraphState* pGraph = (m_currentState == eOHS_INIT_STATE && GetOwnerActor()) ? GetOwnerActor()->GetAnimationGraphState() : 0;
+	const char* graphState = pGraph ? pGraph->GetCurrentStateName() : 0;
+	if (graphState && strstr(graphState, "toThrowGrenade"))
+	{
+		m_coopHandUpTime += frameTime;
+		if (m_coopHandUpTime >= 2.0f)
+		{
+			m_coopHandUpTime = 0.0f;
+			CryLogAlways("[Coop] %s's left hand was up at the head with nothing in it (%s): down again",
+				GetOwnerActor()->GetEntity()->GetName(), graphState);
+			pGraph->SetInput(pGraph->GetInputId("Action"), "none");
+			pGraph->SetInput(pGraph->GetInputId("Action"), "idle");
+		}
+	}
+	else
+		m_coopHandUpTime = 0.0f;
 	if (!(m_currentState & (eOHS_PICKING_ITEM | eOHS_PICKING_ITEM2)))
 	{
 		m_coopStuckTime = 0.0f;

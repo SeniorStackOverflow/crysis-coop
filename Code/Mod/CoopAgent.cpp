@@ -3169,9 +3169,51 @@ namespace
 			CryLogAlways("[CoopTest] coop_test_onehand: no such player or nothing in his hands");
 			return;
 		}
+		// "grab": his body as if the left hand held something up (what holding
+		// a grenade or a caught object plays)
+		if (pArgs->GetArgCount() > 2 && !stricmp(pArgs->GetArg(2), "grab"))
+		{
+			static_cast<CActor*>(pActor)->PlayAction("hold_grenade", "ignore", true);
+			CryLogAlways("[CoopTest] %s holds his left hand up", pActor->GetEntity()->GetName());
+			return;
+		}
 		pItem->PlayAction(g_pItemStrings->offhand_on);
 		pItem->SetActionSuffix("akimbo_");
 		CryLogAlways("[CoopTest] %s's %s in one hand", pActor->GetEntity()->GetName(), pItem->GetEntity()->GetClass()->GetName());
+	}
+
+	// coop_test_anim <player>: his animation graph as this game plays it (the
+	// inputs that are not at their defaults), his weapon's action suffix and
+	// his left hand's state
+	void CmdTestAnim(IConsoleCmdArgs* pArgs)
+	{
+		IActor* pActor = pArgs->GetArgCount() > 1 ? ActorByName(pArgs->GetArg(1)) : 0;
+		IAnimationGraphState* pState = pActor ? pActor->GetAnimationGraphState() : 0;
+		if (!pState)
+		{
+			CryLogAlways("[CoopTest] coop_test_anim: no such player or no animation graph");
+			return;
+		}
+		// coop_test_anim <player> <input> <value>: sets it first
+		if (pArgs->GetArgCount() > 3)
+			pState->SetInput(pState->GetInputId(pArgs->GetArg(2)), pArgs->GetArg(3));
+		string inputs;
+		for (int i = 0; i < 256; ++i)
+		{
+			const char* name = pState->GetInputName((IAnimationGraphState::InputID)i);
+			if (!name)
+				break;
+			if (pState->IsDefaultInputValue((IAnimationGraphState::InputID)i))
+				continue;
+			char value[256] = "";
+			pState->GetInput((IAnimationGraphState::InputID)i, value);
+			inputs += string().Format(" %s=%s", name, value);
+		}
+		CItem* pItem = static_cast<CItem*>(pActor->GetCurrentItem());
+		COffHand* pOffHand = static_cast<COffHand*>(static_cast<CActor*>(pActor)->GetWeaponByClass(CItem::sOffHandClass));
+		CryLogAlways("[CoopTest] anim %s: state %s;%s; item %s suffix '%s'; left hand 0x%x", pActor->GetEntity()->GetName(),
+			pState->GetCurrentStateName(), inputs.c_str(), pItem ? pItem->GetEntity()->GetClass()->GetName() : "-",
+			pItem ? pItem->GetActionSuffix(0) : "", pOffHand ? (unsigned)pOffHand->GetOffHandState() : 0u);
 	}
 
 	// coop_test_enter <vehicle> <seat id>: the host's player gets in (server)
@@ -3295,7 +3337,8 @@ void CoopAgent::Init()
 		"Crysis Coop testing: coop_test_ammo <player> <ammo class> <count> sets what he carries of it (server)");
 	gEnv->pConsole->AddCommand("coop_test_vehicles", CmdTestVehicles, 0, "Crysis Coop testing: logs the vehicles near the host's player");
 	gEnv->pConsole->AddCommand("coop_test_silencer", CmdTestSilencer, 0, "Crysis Coop testing: coop_test_silencer <player> [0]: a silencer on (off) his weapon (server)");
-	gEnv->pConsole->AddCommand("coop_test_onehand", CmdTestOneHand, 0, "Crysis Coop testing: coop_test_onehand <player>: his weapon in the one-hand pose (this game)");
+	gEnv->pConsole->AddCommand("coop_test_onehand", CmdTestOneHand, 0, "Crysis Coop testing: coop_test_onehand <player> [grab]: his weapon in the one-hand pose, or (grab) his left hand held up (this game)");
+	gEnv->pConsole->AddCommand("coop_test_anim", CmdTestAnim, 0, "Crysis Coop testing: coop_test_anim <player>: logs his animation graph inputs as this game plays them");
 	gEnv->pConsole->AddCommand("coop_test_enter", CmdTestEnter, 0, "Crysis Coop testing: coop_test_enter <vehicle> <seat id>: the host's player gets in (server)");
 	gEnv->pConsole->AddCommand("coop_test_path", CmdTestPath, 0,
 		"Crysis Coop testing: coop_test_path <entity name> logs the AI navigation's way from the host's player to it (server)");
