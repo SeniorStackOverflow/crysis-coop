@@ -725,8 +725,9 @@ void CPlayer::Update(SEntityUpdateContext& ctx, int updateSlot)
 	if (pEnt->IsHidden() && !(GetEntity()->GetFlags() & ENTITY_FLAG_UPDATE_HIDDEN))
 		return;
 
-	// Crysis Coop: the own player's left hand never stays stuck in a pick-up
-	if (IsClient() && CoopAI::IsCoopSession() && updateSlot == 0)
+	// Crysis Coop: no player's left hand stays stuck in a pick-up (the own
+	// one, and the others as this game shows them)
+	if (CoopAI::IsCoopSession() && updateSlot == 0)
 		if (COffHand* pOffHand = static_cast<COffHand*>(GetWeaponByClass(CItem::sOffHandClass)))
 			pOffHand->CoopWatchStuck(ctx.fFrameTime);
 

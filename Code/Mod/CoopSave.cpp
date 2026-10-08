@@ -181,7 +181,8 @@ namespace
 		string host;        // the host's player key (CoopAI::PlayerKey)
 		string hostname;
 		std::map<string, CoopAI::SInventory> players;   // by player key, the host too
-		SProgress() : stamp(0) {}
+		bool aiQuiet;       // saved with the other players' AI off (0.11.3+)
+		SProgress() : stamp(0), aiQuiet(false) {}
 	};
 
 	string UserPath(const char* path)
@@ -226,9 +227,9 @@ namespace
 	string ProgressText(const SProgress& p)
 	{
 		string text;
-		text.Format("version=2\ncampaign=%s\nname=%s\nlevel=%s\nsave=%s\ncheckpoint=%s\ntime=%s\nstamp=%u\nhost=%s\nhostname=%s\n",
+		text.Format("version=2\ncampaign=%s\nname=%s\nlevel=%s\nsave=%s\ncheckpoint=%s\ntime=%s\nstamp=%u\nhost=%s\nhostname=%s\naiquiet=%d\n",
 			p.campaign.c_str(), p.name.c_str(), p.level.c_str(), p.save.c_str(), p.checkpoint.c_str(), p.time.c_str(), p.stamp,
-			p.host.c_str(), p.hostname.c_str());
+			p.host.c_str(), p.hostname.c_str(), p.aiQuiet ? 1 : 0);
 		for (std::map<string, CoopAI::SInventory>::const_iterator it = p.players.begin(); it != p.players.end(); ++it)
 		{
 			const CoopAI::SInventory& inv = it->second;
@@ -279,6 +280,8 @@ namespace
 				p.host = value;
 			else if (key == "hostname")
 				p.hostname = value;
+			else if (key == "aiquiet")
+				p.aiQuiet = atoi(value.c_str()) != 0;
 			else if (key == "player")
 			{
 				// version 1 (mod 0.3): name current items ammo
@@ -637,6 +640,7 @@ namespace
 		progress.level = s_readyLevel;
 		progress.save = save;
 		progress.checkpoint = name;
+		progress.aiQuiet = true;
 		char stamp[64];
 		const time_t now = time(0);
 		strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", localtime(&now));
@@ -1017,6 +1021,15 @@ namespace
 		}
 		if (!limitRestored)
 			TellHost("Friends may not be able to join this game: if they cannot, host it again with coop_continue");
+		// saved before 0.11.3 with other players in the game: a soldier who
+		// had one of them as his target came back with an empty target and
+		// the AI system crashed on its first update. The AI starts afresh
+		// instead (the soldiers where they were saved, their alarm forgotten)
+		if (!s_load.aiQuiet && s_load.players.size() > 1)
+		{
+			CryLogAlways("[CoopSave] an older checkpoint saved with %d players: the AI starts afresh (it crashed otherwise)", (int)s_load.players.size());
+			gEnv->pAISystem->Reset(IAISystem::RESET_ENTER_GAME);
+		}
 		// whoever hosts now gets his own equipment (the save has the one of
 		// the player who hosted then, who gets his back when he joins)
 		std::map<string, CoopAI::SInventory> carry = s_load.players;

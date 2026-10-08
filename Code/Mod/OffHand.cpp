@@ -2514,6 +2514,19 @@ void COffHand::StartPickUpItem()
 //=========================================================================================================
 void COffHand::CoopWatchStuck(float frameTime)
 {
+	// for the log: a left hand busy with anything for long
+	static std::map<EntityId, float> s_busy;
+	const EntityId owner = GetOwnerId();
+	if (m_currentState != eOHS_INIT_STATE)
+	{
+		float& busy = s_busy[owner];
+		const float before = busy;
+		busy += frameTime;
+		if (before < 5.0f && busy >= 5.0f)
+			CryLogAlways("[Coop] %s's left hand busy for 5 s (state 0x%x)", GetOwnerActor() ? GetOwnerActor()->GetEntity()->GetName() : "?", (unsigned)m_currentState);
+	}
+	else
+		s_busy.erase(owner);
 	if (!(m_currentState & (eOHS_PICKING_ITEM | eOHS_PICKING_ITEM2)))
 	{
 		m_coopStuckTime = 0.0f;

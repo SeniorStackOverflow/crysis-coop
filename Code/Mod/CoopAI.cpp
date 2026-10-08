@@ -1013,7 +1013,7 @@ namespace
 				s_pFilter->Filter(ActionId("save"));
 				s_pFilter->Filter(ActionId("load"));
 				s_pFilter->Filter(ActionId("loadLastSave"));
-				s_pFilter->Filter(ActionId("reload"));
+				// not "reload": that is the weapon's reload (R), not a game load
 			}
 		}
 		if (s_pFilter)
