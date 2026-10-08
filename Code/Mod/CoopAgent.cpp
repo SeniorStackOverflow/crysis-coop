@@ -158,11 +158,14 @@ namespace
 		if (IVehicle* pVehicle = pFrom->GetLinkedVehicle())
 			if (IPhysicalEntity* p = pVehicle->GetEntity()->GetPhysics())
 				skip[n++] = p;
-		ray_hit hit;
+		// leaves and grass do not hide anyone (bullets go through them, the
+		// soldiers shoot through them): only what is solid counts
+		ray_hit hits[4];
 		const Vec3 dir = to - eye;
-		const int hits = gEnv->pPhysicalWorld->RayWorldIntersection(eye, dir, ent_all, rwi_stop_at_pierceable | rwi_colltype_any, &hit, 1, skip, n);
-		if (!hits)
+		if (!gEnv->pPhysicalWorld->RayWorldIntersection(eye, dir, ent_all, rwi_pierceability0 | rwi_colltype_any, hits, 4, skip, n)
+			|| hits[0].dist < 0.0f || !hits[0].pCollider)
 			return true;
+		const ray_hit& hit = hits[0];
 		IPhysicalEntity* pTargetPhys = pTarget->GetPhysics();
 		if (hit.pCollider && hit.pCollider == pTargetPhys)
 			return true;
@@ -295,11 +298,23 @@ namespace
 		float dodgeUntil, dodgeSide;
 		bool retreating;
 		float hitAt;            // when it was last hit
+		EntityId lastFought;    // the last one it said it fights (no repeats)
+		float enemySeenAt;      // when its enemy was last in sight
+		// falling back: to cover the host's game found (out of the enemy's
+		// sight), since when, and when it may fall back again
+		Vec3 cover;
+		bool haveCover;
+		float coverAskAt, retreatSince, recoveredAt;
+		float coverAt;          // when the host's game named that cover
+		float peekUntil;        // fighting from cover: up shooting / down
+		bool peekUp;
 		SBrain(): order(eO_Free), spot(ZERO), haveSpot(false), fireAtWill(true), enemy(0), burstUntil(0), pauseUntil(0), reloadAt(0),
 			switchAt(0), attackHeld(false), checkPos(ZERO), checkAt(0), stuck(0), strafeUntil(0), strafeSide(1), jump(false),
 			farSince(-1), askAt(0), useHeld(false), useFor(0), useSince(0), lastHealth(-1), wasDown(false), named(false),
 			weaponAt(0), loot(0), lootSince(0), useAt(0), pathGoal(ZERO), pathAt(-100), pathAskAt(0), reviveSince(-1),
-			dodgeUntil(0), dodgeSide(1), retreating(false), hitAt(-100) {}
+			dodgeUntil(0), dodgeSide(1), retreating(false), hitAt(-100), lastFought(0), enemySeenAt(-100),
+			cover(ZERO), haveCover(false), coverAskAt(0), retreatSince(-100), recoveredAt(-100),
+			coverAt(-100), peekUntil(0), peekUp(true) {}
 	} s_bot;
 
 	// what SteerInput hands the player input
@@ -388,6 +403,20 @@ namespace
 			IActor* pTarget = ActorByName(s_bot.target.c_str());
 			return pTarget && pTarget->GetHealth() > 0 ? pTarget->GetEntityId() : 0;
 		}
+		// the one it fights stays its target while it is alive and was seen
+		// a moment ago (a branch passing between them is no reason to turn
+		// to another one and back)
+		if (IActor* pCurrent = s_bot.enemy ? ActorOf(s_bot.enemy) : 0)
+		{
+			const Vec3 aim = AimPoint(pCurrent->GetEntity());
+			if (Hostile(pCurrent) && aim.GetDistance(eye) < range)
+			{
+				if (Visible(pMe, eye, pCurrent->GetEntity(), aim))
+					s_bot.enemySeenAt = Now();
+				if (Now() - s_bot.enemySeenAt < 2.5f)
+					return s_bot.enemy;
+			}
+		}
 		EntityId best = 0;
 		float bestScore = 1e9f;
 		IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
@@ -434,16 +463,41 @@ namespace
 	// nothing in the way at knee and chest height (a walk straight there)
 	bool ClearWay(CPlayer* pMe, const Vec3& from, const Vec3& to)
 	{
+		// walls, rocks, trunks, crates: what is solid (leaves and grass are
+		// walked through; the ground's slopes are walked up)
 		IPhysicalEntity* pSkip = pMe->GetEntity()->GetPhysics();
 		for (int i = 0; i < 2; ++i)
 		{
-			const Vec3 up(0, 0, i ? 1.2f : 0.5f);
-			ray_hit hit;
-			if (gEnv->pPhysicalWorld->RayWorldIntersection(from + up, to - from, ent_static | ent_terrain | ent_rigid | ent_sleeping_rigid,
-				rwi_stop_at_pierceable | rwi_colltype_any, &hit, 1, &pSkip, pSkip ? 1 : 0))
+			const Vec3 up(0, 0, i ? 1.2f : 0.6f);
+			ray_hit hits[4];
+			if (gEnv->pPhysicalWorld->RayWorldIntersection(from + up, to - from, ent_static | ent_rigid | ent_sleeping_rigid,
+				rwi_pierceability0 | rwi_colltype_any, hits, 4, &pSkip, pSkip ? 1 : 0) && hits[0].dist >= 0.0f && hits[0].pCollider)
 				return false;
 		}
 		return true;
+	}
+
+	// the way to go when something is in the way right ahead: the nearest
+	// direction to the wanted one that is free for a few metres (the same
+	// side as last time first: no dithering left and right)
+	Vec3 Steer(CPlayer* pMe, const Vec3& pos, const Vec3& dir)
+	{
+		static float s_side = 1.0f;
+		static const float s_angles[] = { 0.0f, 0.5f, 1.0f, 1.5f, 2.0f };
+		for (int i = 0; i < 5; ++i)
+			for (int k = 0; k < (i ? 2 : 1); ++k)
+			{
+				const float a = s_angles[i] * (k ? -s_side : s_side);
+				const float c = cosf(a), sn = sinf(a);
+				const Vec3 d(dir.x * c - dir.y * sn, dir.x * sn + dir.y * c, 0);
+				if (ClearWay(pMe, pos, pos + d * 2.5f))
+				{
+					if (i)
+						s_side = k ? -s_side : s_side;
+					return d;
+				}
+			}
+		return dir;
 	}
 
 	// asks the host's game for a way there (its AI navigation knows the
@@ -457,6 +511,17 @@ namespace
 		where.Format("%.1f %.1f %.1f", goal.x, goal.y, goal.z);
 		if (CGameRules* pRules = g_pGame->GetGameRules())
 			pRules->CoopSendSyncToServer(15, 5, 0, where.c_str(), "", 0, 0.0f);
+	}
+
+	// asks the host's game for cover from an enemy: a place close by out of
+	// its sight that it can walk to (the answer comes as OnPath, op 1)
+	void AskCover(IActor* pThreat)
+	{
+		if (Now() < s_bot.coverAskAt || !pThreat)
+			return;
+		s_bot.coverAskAt = Now() + 4.0f;
+		if (CGameRules* pRules = g_pGame->GetGameRules())
+			pRules->CoopSendSyncToServer(15, 6, 0, pThreat->GetEntity()->GetName(), "", 0, 0.0f);
 	}
 
 	// the point of the way to walk to now (or the goal itself)
@@ -528,6 +593,8 @@ namespace
 				s_bot.strafeUntil = Now() + 1.2f;
 				s_bot.strafeSide = -s_bot.strafeSide;
 			}
+			if (s_bot.stuck == 3)
+				Event("stuck on the way (%.0f m to go): around it", dist);
 			if (s_bot.stuck == 5)
 				s_bot.pathAt = -100.0f;    // the way it had led nowhere: a new one
 			if (s_bot.stuck >= 15 && mayCatchUp && dist > 8.0f)
@@ -554,7 +621,7 @@ namespace
 		}
 		else
 			s_bot.farSince = -1;
-		s_ctl.moveDir = dir;
+		s_ctl.moveDir = Steer(pMe, pos, dir);
 		s_ctl.sprint = mayRun && dist > 15.0f;
 		return false;
 	}
@@ -750,8 +817,8 @@ namespace
 	{
 		const float health = (float)pMe->GetHealth() / (float)max(1, pMe->GetMaxHealth());
 		const bool underFire = Now() - s_bot.hitAt < 2.0f;
-		// shot by someone it does not see (through leaves, from afar), or
-		// recovering: the nearest enemy is the danger
+		// shot by someone it does not see (from afar), or recovering: the
+		// nearest enemy is the danger
 		if (!pEnemy && (s_bot.retreating || Now() - s_bot.hitAt < 4.0f))
 		{
 			float best = 70.0f;
@@ -765,45 +832,115 @@ namespace
 		}
 		if (!pEnemy)
 		{
+			if (s_bot.retreating)
+			{
+				s_bot.recoveredAt = Now();
+				if (CNanoSuit* pSuit = pMe->GetNanoSuit())
+					if (pSuit->GetMode() == NANOMODE_CLOAK)
+						pSuit->SetMode(NANOMODE_DEFENSE);
+			}
 			s_bot.retreating = false;
 			return false;
 		}
-		if (!s_bot.retreating && health < 0.6f)
+		// falls back badly hurt (just back from it: only when worse still);
+		// back to it only healed and after a while (no running to and fro)
+		const float limit = Now() - s_bot.recoveredAt < 8.0f ? 0.35f : 0.6f;
+		if (!s_bot.retreating && health < limit)
 		{
+			// cloaked the soldiers lose sight of it, as of the player
+			CNanoSuit* pSuit = pMe->GetNanoSuit();
+			if (pSuit && pSuit->GetSuitEnergy() > 40.0f && pSuit->GetMode() != NANOMODE_CLOAK)
+			{
+				pSuit->SetMode(NANOMODE_CLOAK);
+				Event("cloaks to get away");
+			}
 			s_bot.retreating = true;
-			s_bot.dodgeSide = cry_frand() < 0.5f ? -1.0f : 1.0f;
-			Event("hurt (health %d): falls back to recover", pMe->GetHealth());
+			s_bot.retreatSince = Now();
+			s_bot.haveCover = false;
+			s_bot.coverAskAt = 0.0f;
+			Event("hurt (health %d): falls back to cover", pMe->GetHealth());
 		}
-		else if (s_bot.retreating && health > 0.9f)
+		else if (s_bot.retreating && health > 0.95f && Now() - s_bot.retreatSince > 6.0f)
 		{
+			if (CNanoSuit* pSuit = pMe->GetNanoSuit())
+				if (pSuit->GetMode() != NANOMODE_DEFENSE)
+					pSuit->SetMode(NANOMODE_DEFENSE);
 			s_bot.retreating = false;
+			s_bot.recoveredAt = Now();
 			Event("recovered (health %d): back to it", pMe->GetHealth());
 		}
 		if (!s_bot.retreating)
 			return false;
 		Fire(pMe, false);
 		const Vec3 enemyAim = AimPoint(pEnemy->GetEntity());
-		if (underFire || Visible(pMe, eye, pEnemy->GetEntity(), enemyAim))
+		const bool seen = Visible(pMe, eye, pEnemy->GetEntity(), enemyAim);
+		if (!s_bot.haveCover)
+			AskCover(pEnemy);
+		if (s_bot.haveCover)
 		{
-			// away from it, a little aside, running
-			Vec3 away = pos - pEnemy->GetEntity()->GetWorldPos();
-			away.z = 0;
+			if (!MoveTo(pMe, s_bot.cover, 0.8f, true, false, ""))
+			{
+				s_ctl.look = true;
+				s_ctl.yaw = Yaw(s_ctl.moveDir.GetLengthSquared() > 0.01f ? s_ctl.moveDir : s_bot.cover - pos);
+				s_ctl.pitch = 0.0f;
+				s_ctl.turnRate = 6.0f;
+				s_bot.doing.Format("running to cover (health %d, %.0f m)", pMe->GetHealth(), Dist2D(s_bot.cover, pos));
+			}
+			else
+			{
+				// in cover: down low, watching where the danger is
+				s_ctl.crouch = true;
+				LookAt(eye, enemyAim, 3.0f);
+				s_bot.doing.Format("in cover, recovering (health %d)", pMe->GetHealth());
+				if (underFire && seen)
+				{
+					// no cover at all from there: another one
+					s_bot.haveCover = false;
+					s_bot.coverAskAt = 0.0f;
+				}
+			}
+			return true;
+		}
+		if (underFire || seen)
+		{
+			// no cover known yet: away from all of them (not from one into
+			// the arms of the others), toward the one it follows
+			Vec3 away(ZERO);
+			IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+			while (IActor* pActor = it->Next())
+			{
+				if (!Hostile(pActor))
+					continue;
+				Vec3 d = pos - pActor->GetEntity()->GetWorldPos();
+				d.z = 0;
+				const float len = d.GetLength();
+				if (len > 0.1f && len < 70.0f)
+					away += d / (len * len);
+			}
 			away.NormalizeSafe(Vec3(0, 1, 0));
-			const float side = s_bot.dodgeSide ? s_bot.dodgeSide : 1.0f;
-			s_ctl.moveDir = (away + Vec3(away.y * side, -away.x * side, 0) * 0.7f).GetNormalized();
+			// toward the one it follows, if he is not closer to the danger
+			if (IActor* pLeader = HostPlayer())
+			{
+				Vec3 toLeader = pLeader->GetEntity()->GetWorldPos() - pos;
+				toLeader.z = 0;
+				const Vec3 danger = pEnemy->GetEntity()->GetWorldPos();
+				if (pLeader->GetHealth() > 0 && toLeader.GetLength() > 6.0f
+					&& Dist2D(pLeader->GetEntity()->GetWorldPos(), danger) > Dist2D(pos, danger))
+					away = (away + toLeader.GetNormalized() * 0.6f).GetNormalizedSafe(away);
+			}
+			s_ctl.moveDir = Steer(pMe, pos, away);
 			s_ctl.sprint = true;
 			s_ctl.look = true;
 			s_ctl.yaw = Yaw(s_ctl.moveDir);
 			s_ctl.pitch = 0.0f;
 			s_ctl.turnRate = 6.0f;
-			s_bot.doing.Format("falling back to recover (health %d)", pMe->GetHealth());
+			s_bot.doing.Format("falling back (health %d)", pMe->GetHealth());
 		}
 		else
 		{
-			// out of its sight: down low while the suit heals it
 			s_ctl.crouch = true;
 			LookAt(eye, enemyAim, 3.0f);
-			s_bot.doing.Format("recovering in cover (health %d)", pMe->GetHealth());
+			s_bot.doing.Format("out of sight, recovering (health %d)", pMe->GetHealth());
 		}
 		return true;
 	}
@@ -833,7 +970,21 @@ namespace
 			Vec3 to = pEnemy->GetEntity()->GetWorldPos() - pos;
 			to.z = 0;
 			to.NormalizeSafe(Vec3(0, 1, 0));
-			s_ctl.moveDir = Vec3(to.y * s_bot.dodgeSide, -to.x * s_bot.dodgeSide, 0);
+			Vec3 side(to.y * s_bot.dodgeSide, -to.x * s_bot.dodgeSide, 0);
+			CPlayer* pMe = LocalPlayer();
+			if (pMe && !ClearWay(pMe, pos, pos + side * 2.0f))
+			{
+				// a wall that side: the other one, or down low
+				side = -side;
+				s_bot.dodgeSide = -s_bot.dodgeSide;
+				if (!ClearWay(pMe, pos, pos + side * 2.0f))
+				{
+					s_bot.dodgeSide = 0.0f;
+					s_ctl.crouch = true;
+					return;
+				}
+			}
+			s_ctl.moveDir = side;
 		}
 		else
 			s_ctl.crouch = true;
@@ -970,8 +1121,10 @@ namespace
 			IActor* pEnemy = ActorOf(enemy);
 			if (enemy != s_bot.enemy)
 			{
-				if (enemy)
+				if (enemy && enemy != s_bot.lastFought)
 					Event("fighting %s on the way to %s", NameOf(enemy), pDowned->GetEntity()->GetName());
+				if (enemy)
+					s_bot.lastFought = enemy;
 				s_bot.enemy = enemy;
 			}
 			if (pEnemy)
@@ -1018,13 +1171,14 @@ namespace
 				else if (Now() - s_bot.useSince > 4.0f && !CoopRevive::IsBeingRevived(pDowned->GetEntityId()))
 				{
 					// the host's game has it a little elsewhere (something in
-					// the way there, not here): a step closer, then again.
-					// Put next to the body only when nothing helps for long.
+					// the way there, not here): a step closer, then again
 					HoldUse(pMe, false, 0);
 					s_ctl.moveDir = Vec3(body.x - pos.x, body.y - pos.y, 0).GetNormalizedSafe(Vec3(0, 1, 0));
-					if (Now() - s_bot.reviveSince > 30.0f)
+					// still not: a fresh way to the body (never put there: it walks)
+					if (Now() - s_bot.reviveSince > 12.0f)
 					{
-						Ask(4, pDowned->GetEntity()->GetName());
+						s_bot.pathAt = -100.0f;
+						AskPath(body);
 						s_bot.reviveSince = Now();
 					}
 				}
@@ -1077,8 +1231,10 @@ namespace
 				if (pOld && pOld->GetHealth() <= 0)
 					Event("%s is dead", NameOf(s_bot.enemy));
 			}
-			if (enemy)
+			if (enemy && enemy != s_bot.lastFought)
 				Event("fighting %s", NameOf(enemy));
+			if (enemy)
+				s_bot.lastFought = enemy;
 			s_bot.enemy = enemy;
 		}
 		IActor* pEnemy = ActorOf(enemy);
@@ -1091,10 +1247,17 @@ namespace
 			return;
 		if (Survive(pMe, pos, eye, pEnemy))
 			return;
+		// a cover is good for a while (the enemies move)
+		if (s_bot.haveCover && Now() - s_bot.coverAt > 20.0f)
+			s_bot.haveCover = false;
 		if (pEnemy)
 		{
 			FightStep(pMe, eye, pEnemy);
 			aiming = true;
+			// shot at: it takes cover close by and fights from there (it
+			// does not stand in the open)
+			if (Now() - s_bot.hitAt < 3.0f && !s_bot.haveCover)
+				AskCover(pEnemy);
 		}
 		else
 		{
@@ -1108,6 +1271,35 @@ namespace
 		}
 
 		// ---- moving
+		const bool fightsFromCover = aiming && pEnemy && s_bot.haveCover && s_bot.order != eO_Hold && s_bot.order != eO_Goto
+			&& (!pLeader || Dist2D(s_bot.cover, pLeader->GetEntity()->GetWorldPos()) < 30.0f);
+		if (fightsFromCover)
+		{
+			if (!MoveTo(pMe, s_bot.cover, 0.8f, false, false, ""))
+				s_bot.doing.Format("to cover (%.0f m), fighting %s", Dist2D(s_bot.cover, pos), pEnemy->GetEntity()->GetName());
+			else
+			{
+				// in cover: up and shooting a while, down a while
+				if (Now() >= s_bot.peekUntil)
+				{
+					s_bot.peekUp = !s_bot.peekUp;
+					s_bot.peekUntil = Now() + (s_bot.peekUp ? 1.4f + cry_frand() : 1.0f + cry_frand() * 0.8f);
+				}
+				if (!s_bot.peekUp)
+				{
+					s_ctl.crouch = true;
+					Fire(pMe, false);
+					// shot even down there: no cover from it here
+					if (Now() - s_bot.hitAt < 0.3f)
+					{
+						s_bot.haveCover = false;
+						s_bot.coverAskAt = 0.0f;
+					}
+				}
+				s_bot.doing.Format("in cover, fighting %s", pEnemy->GetEntity()->GetName());
+			}
+		}
+		else
 		switch (s_bot.order)
 		{
 		case eO_Hold:
@@ -1154,7 +1346,7 @@ namespace
 				s_bot.doing = "waiting (nobody to follow)";
 			break;
 		}
-		if (aiming && pEnemy)
+		if (aiming && pEnemy && !fightsFromCover)
 			Dodge(pos, pEnemy);
 		// facing the way it walks when it has nobody to aim at
 		if (!aiming && s_ctl.moveDir.GetLengthSquared() > 0.01f)
@@ -2462,6 +2654,137 @@ namespace
 		return !out.empty();
 	}
 
+	// solid between two points (leaves and grass are not)
+	bool SolidBetween(const Vec3& a, const Vec3& b, IPhysicalEntity** pSkip, int nSkip)
+	{
+		ray_hit hits[4];
+		return gEnv->pPhysicalWorld->RayWorldIntersection(a, b - a, ent_static | ent_terrain | ent_rigid | ent_sleeping_rigid,
+			rwi_pierceability0 | rwi_colltype_any, hits, 4, pSkip, nSkip) && hits[0].dist >= 0.0f && hits[0].pCollider;
+	}
+
+	// cover from a threat: of the places around the agent (up to 20 m),
+	// the nearest one the threat can not see a crouching head at, not
+	// toward the threat, and reachable (the AI navigation's way)
+	// the server: an AI that is after the agent (alive, in the world, hostile to it)
+	bool HostileTo(IActor* pActor, IActor* pAgent)
+	{
+		if (!pActor || pActor->IsPlayer() || pActor->GetHealth() <= 0 || pActor->GetEntity()->IsHidden())
+			return false;
+		IAIObject* pAI = pActor->GetEntity()->GetAI();
+		IAIObject* pTarget = pAgent->GetEntity()->GetAI();
+		return pAI && pTarget && pAI->IsHostile(pTarget, false);
+	}
+
+	// cover from the danger: of the places around the agent (up to 30 m),
+	// one that the nearest enemies (the one it fights first) can not see a
+	// crouching head at, not toward them, not away from the host, and that
+	// it can walk to (the AI navigation's way)
+	bool FindCover(IActor* pAgent, IActor* pThreat, std::vector<Vec3>& path, Vec3& cover)
+	{
+		const Vec3 from = pAgent->GetEntity()->GetWorldPos();
+		// the threats: the one named, and the nearest others (up to 4 in all)
+		std::vector<std::pair<float, IActor*> > others;
+		IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+		while (IActor* pActor = it->Next())
+			if (pActor != pThreat && HostileTo(pActor, pAgent))
+			{
+				const float d = pActor->GetEntity()->GetWorldPos().GetDistance(from);
+				if (d < 60.0f)
+					others.push_back(std::make_pair(d, pActor));
+			}
+		std::sort(others.begin(), others.end());
+		std::vector<Vec3> eyes;
+		eyes.push_back(EyePos(pThreat));
+		for (size_t i = 0; i < others.size() && eyes.size() < 4; ++i)
+			eyes.push_back(EyePos(others[i].second));
+		IActor* pHost = g_pGame->GetIGameFramework()->GetClientActor();
+		const Vec3 host = pHost ? pHost->GetEntity()->GetWorldPos() : from;
+		IPhysicalEntity* skip[2];
+		int nSkip = 0;
+		if (IPhysicalEntity* p = pAgent->GetEntity()->GetPhysics())
+			skip[nSkip++] = p;
+		struct SCandidate
+		{
+			float score;
+			Vec3 pos;
+			bool operator<(const SCandidate& o) const { return score < o.score; }
+		};
+		std::vector<SCandidate> candidates;
+		static const float s_radii[] = { 4.0f, 7.0f, 11.0f, 15.0f, 20.0f, 25.0f, 30.0f };
+		for (int r = 0; r < 7; ++r)
+			for (int k = 0; k < 24; ++k)
+			{
+				const float a = k * gf_PI2 / 24.0f;
+				Vec3 p = from + Vec3(cosf(a), sinf(a), 0) * s_radii[r];
+				// the ground there (not on a roof, not down a cliff)
+				ray_hit hit;
+				if (!gEnv->pPhysicalWorld->RayWorldIntersection(Vec3(p.x, p.y, from.z + 3.0f), Vec3(0, 0, -8.0f),
+					ent_static | ent_terrain, rwi_stop_at_pierceable | rwi_colltype_any, &hit, 1, skip, nSkip))
+					continue;
+				p = hit.pt;
+				if (fabsf(p.z - from.z) > 3.0f)
+					continue;
+				// hidden: solid between each of their eyes and a crouching
+				// head there (the first threat's must hide it; the others count)
+				int seenBy = 0;
+				for (size_t e = 0; e < eyes.size(); ++e)
+					if (!SolidBetween(eyes[e], p + Vec3(0, 0, 1.0f), skip, nSkip))
+					{
+						if (!e)
+							seenBy = 100;
+						++seenBy;
+					}
+				if (seenBy >= 100)
+					continue;
+				float closer = 0.0f;
+				for (size_t e = 0; e < eyes.size(); ++e)
+					closer += max(0.0f, Dist2D(from, eyes[e]) - Dist2D(p, eyes[e]));
+				const SCandidate c = { s_radii[r] + closer * 2.0f + seenBy * 12.0f + max(0.0f, Dist2D(p, host) - 20.0f) * 0.5f, p };
+				candidates.push_back(c);
+			}
+		// no hidden place close by: the one farthest from them it can get to
+		// (along the navigation, not into a wall or down a cliff)
+		if (candidates.empty())
+			for (int k = 0; k < 24; ++k)
+			{
+				const float a = k * gf_PI2 / 24.0f;
+				Vec3 p = from + Vec3(cosf(a), sinf(a), 0) * 22.0f;
+				ray_hit hit;
+				if (!gEnv->pPhysicalWorld->RayWorldIntersection(Vec3(p.x, p.y, from.z + 3.0f), Vec3(0, 0, -8.0f),
+					ent_static | ent_terrain, rwi_stop_at_pierceable | rwi_colltype_any, &hit, 1, skip, nSkip))
+					continue;
+				p = hit.pt;
+				if (fabsf(p.z - from.z) > 3.0f)
+					continue;
+				float nearest = 1e9f;
+				for (size_t e = 0; e < eyes.size(); ++e)
+					nearest = min(nearest, Dist2D(p, eyes[e]));
+				const SCandidate c = { -nearest + max(0.0f, Dist2D(p, host) - 25.0f) * 0.5f, p };
+				candidates.push_back(c);
+			}
+		std::sort(candidates.begin(), candidates.end());
+		for (size_t i = 0; i < candidates.size() && i < 8; ++i)
+		{
+			if (!FindPath(from, candidates[i].pos, path))
+				continue;
+			// the way there not much longer than the straight line
+			float length = 0.0f;
+			Vec3 at = from;
+			for (size_t j = 0; j < path.size(); ++j)
+			{
+				length += Dist2D(at, path[j]);
+				at = path[j];
+			}
+			if (length < Dist2D(from, candidates[i].pos) * 2.0f + 6.0f)
+			{
+				cover = candidates[i].pos;
+				return true;
+			}
+		}
+		path.clear();
+		return false;
+	}
+
 	void CmdTestAmmo(IConsoleCmdArgs* pArgs)
 	{
 		IActor* pActor = pArgs->GetArgCount() > 3 && gEnv->bServer ? ActorByName(pArgs->GetArg(1)) : 0;
@@ -2698,6 +3021,23 @@ void CoopAgent::OnServerRequest(EntityId agent, int op, const char* name)
 		pRules->CoopSendSync(16, 0, 0, name, text.c_str(), 0, 0.0f, static_cast<CActor*>(pAgent)->GetChannelId());
 		return;
 	}
+	// cover from an enemy for it: a place close by out of the enemy's sight,
+	// with the way there
+	if (op == 6 && !pMine && name)
+	{
+		IActor* pThreat = ActorByName(name);
+		std::vector<Vec3> path;
+		Vec3 cover(ZERO);
+		string text, goal;
+		if (pThreat && FindCover(pAgent, pThreat, path, cover))
+			for (size_t i = 0; i < path.size() && i < 20; ++i)
+				text += string().Format("%s%.1f %.1f %.1f", i ? ";" : "", path[i].x, path[i].y, path[i].z);
+		goal.Format("%.1f %.1f %.1f", cover.x, cover.y, cover.z);
+		CryLogAlways("[CoopAgent] cover for %s from %s: %s", pAgent->GetEntity()->GetName(), name,
+			text.empty() ? "none found" : string().Format("%.0f m away, %d points", cover.GetDistance(pAgent->GetEntity()->GetWorldPos()), (int)path.size()).c_str());
+		pRules->CoopSendSync(16, 1, 0, goal.c_str(), text.c_str(), 0, 0.0f, static_cast<CActor*>(pAgent)->GetChannelId());
+		return;
+	}
 	// next to a downed teammate whom it could not revive for long: the host's
 	// game had it a few metres off, behind something not there in its own game
 	if (op == 4 && !pMine)
@@ -2727,7 +3067,7 @@ void CoopAgent::OnServerRequest(EntityId agent, int op, const char* name)
 	}
 }
 
-void CoopAgent::OnPath(const char* goal, const char* text)
+void CoopAgent::OnPath(int op, const char* goal, const char* text)
 {
 	if (!IsCompanion())
 		return;
@@ -2746,6 +3086,16 @@ void CoopAgent::OnPath(const char* goal, const char* text)
 	if (goal && sscanf(goal, "%f %f %f", &g.x, &g.y, &g.z) == 3)
 		s_bot.pathGoal = g;
 	s_bot.pathAt = Now();
+	if (op == 1)
+	{
+		// cover: where it falls back to (none found: away, as it can)
+		s_bot.haveCover = !path.empty();
+		if (s_bot.haveCover)
+		{
+			s_bot.cover = g;
+			s_bot.coverAt = Now();
+		}
+	}
 	if (!path.empty())
 		CoopAI::Trace("AGENT way: %d points to %s", (int)path.size(), goal ? goal : "");
 }

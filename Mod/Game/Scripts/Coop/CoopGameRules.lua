@@ -549,10 +549,10 @@ function TeamInstantAction.Server:OnHit(hit)
 		-- ProcessActorDamage below
 		hit.coopAIDamage = hit.damage;
 	end
-	-- coop_god 1: players take no damage (testing); the damage the hit would
-	-- have done is still logged
+	-- coop_god 1: players take no damage (testing), 2: only the host's
+	-- player; the damage the hit would have done is still logged
 	local wanted = hit.damage;
-	local god = targetIsPlayer and (tonumber(System.GetCVar("coop_god")) or 0) ~= 0;
+	local god = targetIsPlayer and CoopGod(target);
 	if (god) then
 		hit.damage = 0;
 	end
@@ -575,10 +575,16 @@ end
 -- with coop_god the player keeps his health here too, else the script
 -- counts him dead (health <= 0), kills him and the C++ god clamp leaves him
 -- lying on the ground, weaponless, with full health and no revive
+-- coop_god (testing): 1 = no player takes damage, 2 = only the host's
+function CoopGod(target)
+	local god = tonumber(System.GetCVar("coop_god")) or 0;
+	return god == 1 or (god == 2 and target ~= nil and target.id == g_localActorId);
+end
+
 local stockProcessActorDamage = TeamInstantAction.ProcessActorDamage;
 function TeamInstantAction:ProcessActorDamage(hit)
 	local target = hit.target;
-	if (target and target.actor and target.actor:IsPlayer() and (tonumber(System.GetCVar("coop_god")) or 0) ~= 0) then
+	if (target and target.actor and target.actor:IsPlayer() and CoopGod(target)) then
 		if (C.DEBUG and hit.explosion and (hit.damage or 0) > 0) then
 			CoopLog(string.format("HIT player %s by %s explosion type=%s dmg=0.0 (god, would be %.1f) hp %s->%s",
 				tostring(target:GetName()), tostring(hit.shooter and hit.shooter:GetName()), tostring(hit.type),
@@ -598,6 +604,11 @@ function TeamInstantAction:ProcessActorDamage(hit)
 			damage = AI.ProcessBalancedDamage(shooter.id, target.id, raw, hit.type) or raw;
 		end
 		damage = damage * (1 - SinglePlayer.GetDamageAbsorption(self, target, hit));
+		-- the AI companion (started by this game) is a buddy: it takes less
+		if (shooter and shooter.actor and (not shooter.actor:IsPlayer()) and C.COMPANION_DAMAGE
+			and tonumber(System.GetCVar("coop_companion")) == 1 and target:GetName() == System.GetCVar("coop_agent_name")) then
+			damage = damage * C.COMPANION_DAMAGE;
+		end
 		local health = math.floor(target.actor:GetHealth() - damage);
 		if (C.DEBUG) then
 			CoopLog(string.format("DAMAGE player %s by %s type=%s hit=%.1f taken=%.1f hp %d->%d",

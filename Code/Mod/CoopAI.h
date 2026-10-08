@@ -94,7 +94,7 @@ namespace CoopAI
 	void LogUnbound(const char* what, EntityId a, EntityId b);
 
 	// coop_god: players take no damage
-	bool GodMode();
+	int GodMode();
 
 	// a player's equipment by item / ammo class, kept by player name from
 	// level to level and in the coop progress save

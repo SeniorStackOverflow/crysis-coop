@@ -3639,7 +3639,7 @@ void CPlayer::SetHealth(int health )
 		health -=1;  //Trigger automatic thrown
 
 	// coop_god: players never lose health (single player and coop)
-	if (health < m_health && m_health > 0 && IsPlayer() && CoopAI::GodMode())
+	if (health < m_health && m_health > 0 && IsPlayer() && CoopAI::GodMode() && (CoopAI::GodMode() == 1 || (IsClient() && gEnv->bServer)))
 		health = (int)m_health;
 
 	float oldHealth = m_health;

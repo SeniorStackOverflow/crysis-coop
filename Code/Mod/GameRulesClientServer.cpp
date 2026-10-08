@@ -1248,7 +1248,7 @@ IMPLEMENT_RMI(CGameRules, ClCoopSync)
 	// Crysis Coop: a way to walk for the AI companion (its op 5)
 	if (params.kind == 16)
 	{
-		CoopAgent::OnPath(params.name.c_str(), params.text.c_str());
+		CoopAgent::OnPath(params.op, params.name.c_str(), params.text.c_str());
 		return true;
 	}
 	CoopAI::OnSyncMirror(params.kind, params.op, params.entity, params.name.c_str(), params.text.c_str(), params.type, params.f, false);

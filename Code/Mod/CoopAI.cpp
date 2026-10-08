@@ -1409,12 +1409,12 @@ bool CoopAI::KeepFullUpdate(IEntity* pEntity)
 	return false;
 }
 
-bool CoopAI::GodMode()
+int CoopAI::GodMode()
 {
 	static ICVar* pGod = 0;
 	if (!pGod && gEnv->pConsole)
 		pGod = gEnv->pConsole->GetCVar("coop_god");
-	return pGod && pGod->GetIVal() != 0;
+	return pGod ? pGod->GetIVal() : 0;
 }
 
 bool CoopAI::TraceOn()
@@ -1557,7 +1557,7 @@ void CoopAI::Init()
 		gEnv->pConsole->RegisterString("coop_debug_token", "", 0, "Crysis Coop testing: game token logged every 5 s");
 	}
 	if (gEnv->pConsole)
-		gEnv->pConsole->RegisterInt("coop_god", 0, 0, "Crysis Coop testing: 1 = players take no damage");
+		gEnv->pConsole->RegisterInt("coop_god", 0, 0, "Crysis Coop testing: 1 = players take no damage, 2 = only the host's player");
 	if (gEnv->pConsole)
 		gEnv->pConsole->RegisterInt("coop_debug_autopilot", 0, 0, "Crysis Coop testing: local player walks to the active objective, one step every N s");
 	if (gEnv->pConsole)
