@@ -23,6 +23,7 @@
 #include "IWeapon.h"
 #include "ILevelSystem.h"
 #include "INetworkService.h"
+#include "ISurfaceType.h"
 
 #include <algorithm>
 #include <deque>
@@ -148,7 +149,60 @@ namespace
 		return c;
 	}
 
-	// nothing solid between the eye and the target
+	// what one walks through: leaves, grass, tree tops, twigs, water; and
+	// what one also sees (and shoots) through: wire mesh fences, barbed
+	// wire, grates, glass. Everything else is in the way: planks, sheet
+	// metal, walls, rocks (the bullets go through some; eyes and feet do not)
+	enum EThrough { eT_Walk = 1, eT_See = 2 };
+	int Through(int surfaceIdx)
+	{
+		static signed char s_known[1024];
+		static bool s_init = false;
+		if (!s_init)
+		{
+			memset(s_known, -1, sizeof(s_known));
+			s_init = true;
+		}
+		if (surfaceIdx >= 0 && surfaceIdx < 1024 && s_known[surfaceIdx] >= 0)
+			return s_known[surfaceIdx];
+		IMaterialManager* pMaterials = gEnv->p3DEngine ? gEnv->p3DEngine->GetMaterialManager() : 0;
+		ISurfaceTypeManager* pTypes = pMaterials ? pMaterials->GetSurfaceTypeManager() : 0;
+		ISurfaceType* pType = pTypes ? pTypes->GetSurfaceType(surfaceIdx) : 0;
+		const char* name = pType ? pType->GetName() : "";
+		int through = 0;
+		if (strstr(name, "leaves") || strstr(name, "grass") || strstr(name, "vegetation") || strstr(name, "canopy")
+			|| strstr(name, "twigs") || strstr(name, "bushes") || strstr(name, "water") || strstr(name, "raindrop"))
+			through = eT_Walk | eT_See;
+		else if (strstr(name, "chainlink") || strstr(name, "barbwire") || strstr(name, "grate")
+			|| (strstr(name, "glass") && !strstr(name, "bulletproof")))
+			through = eT_See;
+		if (surfaceIdx >= 0 && surfaceIdx < 1024)
+			s_known[surfaceIdx] = (signed char)through;
+		return through;
+	}
+
+	// the first thing in the way along a ray for the eyes (eT_See) or the
+	// feet (eT_Walk); false: nothing
+	bool FirstBlock(const Vec3& from, const Vec3& dir, int objects, IPhysicalEntity** pSkip, int nSkip, ray_hit& block, int mode = eT_See)
+	{
+		ray_hit hits[12];
+		for (int i = 0; i < 12; ++i)
+		{
+			hits[i].dist = -1.0f;
+			hits[i].pCollider = 0;
+		}
+		gEnv->pPhysicalWorld->RayWorldIntersection(from, dir, objects, rwi_pierceability0 | rwi_colltype_any, hits, 12, pSkip, nSkip);
+		bool found = false;
+		for (int i = 0; i < 12; ++i)
+			if (hits[i].dist >= 0.0f && hits[i].pCollider && !(Through(hits[i].surface_idx) & mode) && (!found || hits[i].dist < block.dist))
+			{
+				block = hits[i];
+				found = true;
+			}
+		return found;
+	}
+
+	// nothing in the way between the eye and the target
 	bool Visible(IActor* pFrom, const Vec3& eye, IEntity* pTarget, const Vec3& to)
 	{
 		IPhysicalEntity* skip[2];
@@ -158,14 +212,11 @@ namespace
 		if (IVehicle* pVehicle = pFrom->GetLinkedVehicle())
 			if (IPhysicalEntity* p = pVehicle->GetEntity()->GetPhysics())
 				skip[n++] = p;
-		// leaves and grass do not hide anyone (bullets go through them, the
-		// soldiers shoot through them): only what is solid counts
-		ray_hit hits[4];
+		// leaves and grass do not hide anyone; a wall, a fence, a plank does
+		ray_hit hit;
 		const Vec3 dir = to - eye;
-		if (!gEnv->pPhysicalWorld->RayWorldIntersection(eye, dir, ent_all, rwi_pierceability0 | rwi_colltype_any, hits, 4, skip, n)
-			|| hits[0].dist < 0.0f || !hits[0].pCollider)
+		if (!FirstBlock(eye, dir, ent_all, skip, n, hit))
 			return true;
-		const ray_hit& hit = hits[0];
 		IPhysicalEntity* pTargetPhys = pTarget->GetPhysics();
 		if (hit.pCollider && hit.pCollider == pTargetPhys)
 			return true;
@@ -299,6 +350,10 @@ namespace
 		bool retreating;
 		float hitAt;            // when it was last hit
 		EntityId lastFought;    // the last one it said it fights (no repeats)
+		int bursts, heldFire, stuckTimes, unseen, turning;   // for the log, now and then
+		EntityId downedFor;     // the downed teammate it goes to, since when
+		float downedSince;
+		float statsAt;
 		float enemySeenAt;      // when its enemy was last in sight
 		// falling back: to cover the host's game found (out of the enemy's
 		// sight), since when, and when it may fall back again
@@ -312,7 +367,7 @@ namespace
 			switchAt(0), attackHeld(false), checkPos(ZERO), checkAt(0), stuck(0), strafeUntil(0), strafeSide(1), jump(false),
 			farSince(-1), askAt(0), useHeld(false), useFor(0), useSince(0), lastHealth(-1), wasDown(false), named(false),
 			weaponAt(0), loot(0), lootSince(0), useAt(0), pathGoal(ZERO), pathAt(-100), pathAskAt(0), reviveSince(-1),
-			dodgeUntil(0), dodgeSide(1), retreating(false), hitAt(-100), lastFought(0), enemySeenAt(-100),
+			dodgeUntil(0), dodgeSide(1), retreating(false), hitAt(-100), lastFought(0), bursts(0), heldFire(0), stuckTimes(0), unseen(0), turning(0), statsAt(0), downedFor(0), downedSince(0), enemySeenAt(-100),
 			cover(ZERO), haveCover(false), coverAskAt(0), retreatSince(-100), recoveredAt(-100),
 			coverAt(-100), peekUntil(0), peekUp(true) {}
 	} s_bot;
@@ -463,15 +518,14 @@ namespace
 	// nothing in the way at knee and chest height (a walk straight there)
 	bool ClearWay(CPlayer* pMe, const Vec3& from, const Vec3& to)
 	{
-		// walls, rocks, trunks, crates: what is solid (leaves and grass are
-		// walked through; the ground's slopes are walked up)
+		// walls, fences, rocks, trunks, crates (leaves and grass are walked
+		// through; the ground's slopes are walked up)
 		IPhysicalEntity* pSkip = pMe->GetEntity()->GetPhysics();
 		for (int i = 0; i < 2; ++i)
 		{
 			const Vec3 up(0, 0, i ? 1.2f : 0.6f);
-			ray_hit hits[4];
-			if (gEnv->pPhysicalWorld->RayWorldIntersection(from + up, to - from, ent_static | ent_rigid | ent_sleeping_rigid,
-				rwi_pierceability0 | rwi_colltype_any, hits, 4, &pSkip, pSkip ? 1 : 0) && hits[0].dist >= 0.0f && hits[0].pCollider)
+			ray_hit hit;
+			if (FirstBlock(from + up, to - from, ent_static | ent_rigid | ent_sleeping_rigid, &pSkip, pSkip ? 1 : 0, hit, eT_Walk))
 				return false;
 		}
 		return true;
@@ -594,7 +648,10 @@ namespace
 				s_bot.strafeSide = -s_bot.strafeSide;
 			}
 			if (s_bot.stuck == 3)
+			{
 				Event("stuck on the way (%.0f m to go): around it", dist);
+				++s_bot.stuckTimes;
+			}
 			if (s_bot.stuck == 5)
 				s_bot.pathAt = -100.0f;    // the way it had led nowhere: a new one
 			if (s_bot.stuck >= 15 && mayCatchUp && dist > 8.0f)
@@ -990,8 +1047,66 @@ namespace
 			s_ctl.crouch = true;
 	}
 
+	// where it aims now, the first thing hit is the enemy (or his vehicle):
+	// no shots into a wall, a crate, a fence, a teammate
+	bool LineOfFire(CPlayer* pMe, const Vec3& eye, IActor* pEnemy)
+	{
+		IPhysicalEntity* skip[2];
+		int n = 0;
+		if (IPhysicalEntity* p = pMe->GetEntity()->GetPhysics())
+			skip[n++] = p;
+		if (IItem* pItem = pMe->GetCurrentItem())
+			if (IPhysicalEntity* p = pItem->GetEntity()->GetPhysics())
+				skip[n++] = p;
+		const Vec3 aim = AimPoint(pEnemy->GetEntity());
+		const Vec3 look = pMe->GetViewRotation().GetColumn1();
+		const float range = aim.GetDistance(eye) + 2.0f;
+		ray_hit hit;
+		if (!FirstBlock(eye, look * range, ent_all, skip, n, hit))
+			return false;    // aimed at nothing (the enemy is not where it aims)
+		IPhysicalEntity* pEnemyPhys = pEnemy->GetEntity()->GetPhysics();
+		if (hit.pCollider == pEnemyPhys)
+			return true;
+		if (IVehicle* pVehicle = pEnemy->GetLinkedVehicle())
+			if (hit.pCollider == pVehicle->GetEntity()->GetPhysics())
+				return true;
+		// the hit is right at him (his weapon, a part of him)
+		return hit.pt.GetDistance(aim) < 0.8f;
+	}
+
+	// fighting from cover: to it, then up shooting a while, down a while
+	// (FightStep aims and shoots first); false: no cover known
+	bool FightFromCover(CPlayer* pMe, const Vec3& pos, IActor* pEnemy)
+	{
+		if (!s_bot.haveCover)
+			return false;
+		if (!MoveTo(pMe, s_bot.cover, 0.8f, false, false, ""))
+		{
+			s_bot.doing.Format("to cover (%.0f m), fighting %s", Dist2D(s_bot.cover, pos), pEnemy->GetEntity()->GetName());
+			return true;
+		}
+		if (Now() >= s_bot.peekUntil)
+		{
+			s_bot.peekUp = !s_bot.peekUp;
+			s_bot.peekUntil = Now() + (s_bot.peekUp ? 1.4f + cry_frand() : 1.0f + cry_frand() * 0.8f);
+		}
+		if (!s_bot.peekUp)
+		{
+			s_ctl.crouch = true;
+			Fire(pMe, false);
+			// shot even down there: no cover from it here
+			if (Now() - s_bot.hitAt < 0.3f)
+			{
+				s_bot.haveCover = false;
+				s_bot.coverAskAt = 0.0f;
+			}
+		}
+		s_bot.doing.Format("in cover, fighting %s", pEnemy->GetEntity()->GetName());
+		return true;
+	}
+
 	// one step of a fight with an enemy: turn to it, the weapon ready, fire
-	// in bursts when on target
+	// in bursts when on target, seen, and nothing else in the line of fire
 	void FightStep(CPlayer* pMe, const Vec3& eye, IActor* pEnemy)
 	{
 		const Vec3 aim = AimPoint(pEnemy->GetEntity());
@@ -1022,12 +1137,32 @@ namespace
 			else
 				ChooseWeapon(pMe, true);    // none left for it: another weapon
 		}
+		else if (!seen && clip != 0)
+		{
+			Fire(pMe, false);
+			++s_bot.unseen;
+		}
+		else if (off >= 0.06f && clip != 0)
+		{
+			Fire(pMe, false);
+			++s_bot.turning;
+		}
+		else if (seen && off < 0.06f && clip != 0 && !LineOfFire(pMe, eye, pEnemy))
+		{
+			// something else in the way (a wall, a crate, a fence): no shot
+			Fire(pMe, false);
+			++s_bot.heldFire;
+		}
 		else if (seen && off < 0.06f && clip != 0)
 		{
 			// bursts: held a while, then let go (single shot weapons fire again)
 			const float now = Now();
 			if (now >= s_bot.pauseUntil && now < s_bot.burstUntil)
+			{
+				if (!s_bot.attackHeld)
+					++s_bot.bursts;
 				Fire(pMe, true);
+			}
 			else if (now >= s_bot.burstUntil)
 			{
 				Fire(pMe, false);
@@ -1054,6 +1189,14 @@ namespace
 		{
 			s_bot.doing = pMe ? "waiting to spawn" : "not in a game";
 			return;
+		}
+		if (Now() >= s_bot.statsAt)
+		{
+			if (s_bot.bursts || s_bot.heldFire || s_bot.stuckTimes || s_bot.unseen || s_bot.turning)
+				CryLogAlways("[CoopAgent] the last minute: %d bursts fired; no shot: %d frames something in the way, %d enemy not in sight, %d turning to him; stuck %d times",
+					s_bot.bursts, s_bot.heldFire, s_bot.unseen, s_bot.turning, s_bot.stuckTimes);
+			s_bot.bursts = s_bot.heldFire = s_bot.stuckTimes = s_bot.unseen = s_bot.turning = 0;
+			s_bot.statsAt = Now() + 60.0f;
 		}
 		IViewSystem* pView = g_pGame->GetIGameFramework()->GetIViewSystem();
 		const bool down = pMe->GetHealth() <= 0;
@@ -1116,6 +1259,11 @@ namespace
 			// an enemy close by is dealt with first (it would kill both)
 			const Vec3 body = pDowned->GetEntity()->GetWorldPos();
 			const float d = Dist2D(body, pos);
+			if (s_bot.downedFor != pDowned->GetEntityId())
+			{
+				s_bot.downedFor = pDowned->GetEntityId();
+				s_bot.downedSince = Now();
+			}
 			ChooseWeapon(pMe, false);
 			EntityId enemy = s_bot.fireAtWill ? PickEnemy(pMe, eye, d > 3.0f ? 60.0f : 18.0f) : 0;
 			IActor* pEnemy = ActorOf(enemy);
@@ -1132,7 +1280,20 @@ namespace
 			// badly hurt: out of the fire first (dead it revives nobody)
 			if (Survive(pMe, pos, eye, pEnemy))
 				return;
-			if (d > 1.6f)
+			if (d > 1.6f && pEnemy && d > 4.0f && Dist2D(pEnemy->GetEntity()->GetWorldPos(), pos) < 40.0f
+				&& Now() - s_bot.downedSince < 40.0f)
+			{
+				// an enemy close: the way is cleared first (from here or from
+				// cover close by), not walked into
+				s_bot.reviveSince = -1;
+				FightStep(pMe, eye, pEnemy);
+				if (Now() - s_bot.hitAt < 3.0f && !s_bot.haveCover)
+					AskCover(pEnemy);
+				if (!FightFromCover(pMe, pos, pEnemy))
+					Dodge(pos, pEnemy);
+				s_bot.doing.Format("clearing the way to %s (%.0f m): fighting %s", pDowned->GetEntity()->GetName(), d, pEnemy->GetEntity()->GetName());
+			}
+			else if (d > 1.6f)
 			{
 				MoveTo(pMe, body, 1.6f, !pEnemy, false, pDowned->GetEntity()->GetName());
 				s_bot.reviveSince = -1;
@@ -1189,6 +1350,7 @@ namespace
 			return;
 		}
 		s_bot.reviveSince = -1;
+		s_bot.downedFor = 0;
 		HoldUse(pMe, false, 0);
 		if (s_bot.order == eO_Revive)
 			s_bot.order = eO_Free;
@@ -1274,31 +1436,7 @@ namespace
 		const bool fightsFromCover = aiming && pEnemy && s_bot.haveCover && s_bot.order != eO_Hold && s_bot.order != eO_Goto
 			&& (!pLeader || Dist2D(s_bot.cover, pLeader->GetEntity()->GetWorldPos()) < 30.0f);
 		if (fightsFromCover)
-		{
-			if (!MoveTo(pMe, s_bot.cover, 0.8f, false, false, ""))
-				s_bot.doing.Format("to cover (%.0f m), fighting %s", Dist2D(s_bot.cover, pos), pEnemy->GetEntity()->GetName());
-			else
-			{
-				// in cover: up and shooting a while, down a while
-				if (Now() >= s_bot.peekUntil)
-				{
-					s_bot.peekUp = !s_bot.peekUp;
-					s_bot.peekUntil = Now() + (s_bot.peekUp ? 1.4f + cry_frand() : 1.0f + cry_frand() * 0.8f);
-				}
-				if (!s_bot.peekUp)
-				{
-					s_ctl.crouch = true;
-					Fire(pMe, false);
-					// shot even down there: no cover from it here
-					if (Now() - s_bot.hitAt < 0.3f)
-					{
-						s_bot.haveCover = false;
-						s_bot.coverAskAt = 0.0f;
-					}
-				}
-				s_bot.doing.Format("in cover, fighting %s", pEnemy->GetEntity()->GetName());
-			}
-		}
+			FightFromCover(pMe, pos, pEnemy);
 		else
 		switch (s_bot.order)
 		{
@@ -2657,9 +2795,8 @@ namespace
 	// solid between two points (leaves and grass are not)
 	bool SolidBetween(const Vec3& a, const Vec3& b, IPhysicalEntity** pSkip, int nSkip)
 	{
-		ray_hit hits[4];
-		return gEnv->pPhysicalWorld->RayWorldIntersection(a, b - a, ent_static | ent_terrain | ent_rigid | ent_sleeping_rigid,
-			rwi_pierceability0 | rwi_colltype_any, hits, 4, pSkip, nSkip) && hits[0].dist >= 0.0f && hits[0].pCollider;
+		ray_hit hit;
+		return FirstBlock(a, b - a, ent_static | ent_terrain | ent_rigid | ent_sleeping_rigid, pSkip, nSkip, hit);
 	}
 
 	// cover from a threat: of the places around the agent (up to 20 m),
