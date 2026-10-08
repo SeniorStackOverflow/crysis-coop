@@ -1403,7 +1403,20 @@ namespace
 			const float t = d / (v * cos_tpl(a));
 			if (t > 2.1f)
 				continue;
+			// it leaves the hand, lower and to the right of the eyes: nothing
+			// close in front there either (a pallet, a rock, the cover it
+			// stands behind would throw it back at its feet)
+			const Vec3 dir0 = flat * cos_tpl(a) + Vec3(0, 0, sin_tpl(a));
+			const Vec3 right(flat.y, -flat.x, 0);
 			bool clear = true;
+			static const float s_hand[4][2] = { { 0.35f, -0.35f }, { 0.35f, 0.0f }, { -0.25f, -0.2f }, { 0.0f, -0.5f } };
+			for (int h = 0; h < 4 && clear; ++h)
+			{
+				ray_hit hit;
+				const Vec3 from = eye + right * s_hand[h][0] + Vec3(0, 0, s_hand[h][1]) - flat * 0.2f;
+				if (FirstBlock(from, dir0 * 3.0f, ent_static | ent_terrain | ent_rigid | ent_sleeping_rigid, &pSkip, pSkip ? 1 : 0, hit, eT_Walk))
+					clear = false;
+			}
 			Vec3 prev = eye;
 			for (int i = 1; i <= 10 && clear; ++i)
 			{
@@ -1477,18 +1490,20 @@ namespace
 		}
 	}
 
-	// where to throw: enemies are few to waste one on, so where it goes off
-	// two or more of them (three for its last one) will be within 4.5 m
-	// (a grenade kills there, it only hurts farther), where they will be
-	// when it lands; 16 to 32 m away, a clear throw, none of its own close.
+	// where to throw: grenades are few to waste one on, so where it goes off
+	// two or more of them (three for its last one) will be within 3.5 m,
+	// standing (a grenade kills a soldier up to about 6 m in the open; its
+	// throw lands within 2 or 3 m; a running one is gone by then), where
+	// they will be when it lands; 16 to 32 m away, a clear throw, none of
+	// its own close.
 	// Told to (the AI agent): one will do. Known enemies only: seen now, or
 	// the one it fought hiding where it last saw him
 	bool PickGrenadeTarget(CPlayer* pMe, const Vec3& pos, const Vec3& eye, const string& name, bool ordered, int left)
 	{
-		const float LETHAL = 4.5f;
+		const float LETHAL = 3.5f;
 		const int need = ordered ? 1 : (left <= 1 ? 3 : 2);
 		// the enemies it knows of, where they will be (about 1.5 s on)
-		struct SFoe { IActor* pActor; Vec3 at; bool known; };
+		struct SFoe { IActor* pActor; Vec3 at; bool known; bool still; };
 		std::vector<SFoe> foes;
 		IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
 		while (IActor* pActor = it->Next())
@@ -1501,7 +1516,9 @@ namespace
 			const bool seen = Visible(pMe, eye, pEntity, AimPoint(pEntity));
 			const bool hiding = !seen && pActor->GetEntityId() == s_gren.hidden && Now() - s_gren.hiddenSeenAt < 8.0f
 				&& pEntity->GetWorldPos().GetDistance(s_gren.hiddenPos) < 4.0f;
-			SFoe f = { pActor, Predict(pActor, 1.5f), seen || hiding };
+			std::map<EntityId, STrack>::const_iterator tr = s_tracks.find(pActor->GetEntityId());
+			const bool still = tr != s_tracks.end() && tr->second.vel.GetLength() < 1.5f;
+			SFoe f = { pActor, Predict(pActor, 1.5f), seen || hiding, still };
 			foes.push_back(f);
 		}
 		float bestScore = 0.0f;
@@ -1529,7 +1546,7 @@ namespace
 			for (size_t k = 0; k < foes.size(); ++k)
 			{
 				const float d = foes[k].at.GetDistance(aim);
-				if (d < LETHAL)
+				if (d < LETHAL && foes[k].still)
 					++lethal;
 				else if (d < 8.0f)
 					++hurt;
@@ -1553,7 +1570,7 @@ namespace
 			s_gren.yaw = Yaw(aim - eye);
 			s_gren.pitch = pitch;
 			s_gren.flight = flight;
-			s_gren.why.Format("%d within %.1f m of where it lands, %d more close", lethal, LETHAL, hurt);
+			s_gren.why.Format("%d standing within %.1f m of where it lands, %d more close", lethal, LETHAL, hurt);
 		}
 		return bestScore > 0.0f;
 	}
@@ -3627,6 +3644,21 @@ namespace
 			pItem ? pItem->GetActionSuffix(0) : "", pOffHand ? (unsigned)pOffHand->GetOffHandState() : 0u);
 	}
 
+	// coop_test_key <action> <1|0>: this game's player presses (lets go of)
+	// a key's action, as the keyboard does (grenade, use, attack1...)
+	void CmdTestKey(IConsoleCmdArgs* pArgs)
+	{
+		CPlayer* pPlayer = static_cast<CPlayer*>(g_pGame->GetIGameFramework()->GetClientActor());
+		if (!pPlayer || pArgs->GetArgCount() < 3)
+		{
+			CryLogAlways("[CoopTest] coop_test_key: no player here, or no action and 1/0");
+			return;
+		}
+		const bool press = atoi(pArgs->GetArg(2)) != 0;
+		Press(pPlayer, ActionId(pArgs->GetArg(1)), press);
+		CryLogAlways("[CoopTest] %s %s %s", pPlayer->GetEntity()->GetName(), press ? "presses" : "lets go of", pArgs->GetArg(1));
+	}
+
 	// coop_test_enter <vehicle> <seat id>: the host's player gets in (server)
 	void CmdTestEnter(IConsoleCmdArgs* pArgs)
 	{
@@ -3750,6 +3782,7 @@ void CoopAgent::Init()
 	gEnv->pConsole->AddCommand("coop_test_silencer", CmdTestSilencer, 0, "Crysis Coop testing: coop_test_silencer <player> [0]: a silencer on (off) his weapon (server)");
 	gEnv->pConsole->AddCommand("coop_test_onehand", CmdTestOneHand, 0, "Crysis Coop testing: coop_test_onehand <player> [grab]: his weapon in the one-hand pose, or (grab) his left hand held up (this game)");
 	gEnv->pConsole->AddCommand("coop_test_anim", CmdTestAnim, 0, "Crysis Coop testing: coop_test_anim <player>: logs his animation graph inputs as this game plays them");
+	gEnv->pConsole->AddCommand("coop_test_key", CmdTestKey, 0, "Crysis Coop testing: coop_test_key <action> <1|0>: this game's player presses (lets go of) a key's action");
 	gEnv->pConsole->AddCommand("coop_test_enter", CmdTestEnter, 0, "Crysis Coop testing: coop_test_enter <vehicle> <seat id>: the host's player gets in (server)");
 	gEnv->pConsole->AddCommand("coop_test_path", CmdTestPath, 0,
 		"Crysis Coop testing: coop_test_path <entity name> logs the AI navigation's way from the host's player to it (server)");

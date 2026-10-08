@@ -2574,7 +2574,10 @@ void COffHand::CoopWatchStuck(float frameTime)
 	IAnimationGraphState* pGraph = (m_currentState == eOHS_INIT_STATE && GetOwnerActor()) ? GetOwnerActor()->GetAnimationGraphState() : 0;
 	const char* graphState = pGraph ? pGraph->GetCurrentStateName() : 0;
 	const char* upperBody = graphState ? strchr(graphState, '+') : 0;
-	if (upperBody && strstr(upperBody, "toThrow"))
+	// a grenade held (the pin out, a friend's on the host: its hand state
+	// stays at rest there) is no stuck hand
+	const bool holdingGrenade = m_fm && m_fm->IsFiring();
+	if (upperBody && strstr(upperBody, "toThrow") && !holdingGrenade)
 	{
 		m_coopHandUpTime += frameTime;
 		if (m_coopHandUpTime >= 2.0f)
