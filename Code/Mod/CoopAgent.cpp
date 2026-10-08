@@ -2808,8 +2808,12 @@ namespace
 			pHUD->DisplayTempFlashText(text, 10.0f, ColorF(1.0f, 0.5f, 0.35f));
 	}
 
+	void UpdatePendingEnters();
+
 	void UpdateHost()
 	{
+		if (gEnv->bServer)
+			UpdatePendingEnters();
 		// The companion's window is made a tool window out of sight inside its
 		// own game (the window hook, GameDll.cpp). Not from here: styling or
 		// moving another process's window waits for that process's thread,
@@ -3131,6 +3135,23 @@ namespace
 		}
 	}
 
+	// coop_test_silencer <player> [0]: a silencer on (off) the weapon in his hands (server)
+	void CmdTestSilencer(IConsoleCmdArgs* pArgs)
+	{
+		IActor* pActor = pArgs->GetArgCount() > 1 ? ActorByName(pArgs->GetArg(1)) : 0;
+		CItem* pItem = pActor ? static_cast<CItem*>(pActor->GetCurrentItem()) : 0;
+		if (!pItem || !gEnv->bServer)
+		{
+			CryLogAlways("[CoopTest] coop_test_silencer: no such player or nothing in his hands");
+			return;
+		}
+		const bool on = pArgs->GetArgCount() < 3 || atoi(pArgs->GetArg(2)) != 0;
+		const char* name = !stricmp(pItem->GetEntity()->GetClass()->GetName(), "SOCOM") ? "SOCOMSilencer" : "Silencer";
+		pItem->AttachAccessory(name, on, true, true);
+		CryLogAlways("[CoopTest] %s on %s's %s: %s", name, pActor->GetEntity()->GetName(), pItem->GetEntity()->GetClass()->GetName(),
+			pItem->GetAccessory(name) ? "attached" : "not attached");
+	}
+
 	// coop_test_enter <vehicle> <seat id>: the host's player gets in (server)
 	void CmdTestEnter(IConsoleCmdArgs* pArgs)
 	{
@@ -3174,6 +3195,37 @@ namespace
 		CryLogAlways("[CoopTest] way to %s (%.0f m): %s, %d points in %.1f ms:%s", pTo->GetName(),
 			pFrom->GetEntity()->GetWorldPos().GetDistance(pTo->GetWorldPos()), ok ? "found" : "NONE", (int)path.size(),
 			(gEnv->pTimer->GetAsyncTime() - t0).GetMilliSeconds(), text.c_str());
+	}
+
+	// the server: a companion put next to a vehicle gets in a moment later
+	struct SPendingEnter
+	{
+		EntityId agent, vehicle;
+		float at;
+		SPendingEnter(EntityId a, EntityId v, float t) : agent(a), vehicle(v), at(t) {}
+	};
+	std::vector<SPendingEnter> s_enters;
+	IVehicleSeat* FreeSeat(IVehicle* pVehicle);
+
+	void UpdatePendingEnters()
+	{
+		for (size_t i = 0; i < s_enters.size(); )
+		{
+			if (Now() < s_enters[i].at)
+			{
+				++i;
+				continue;
+			}
+			IActor* pAgent = ActorOf(s_enters[i].agent);
+			IVehicle* pVehicle = g_pGame->GetIGameFramework()->GetIVehicleSystem()->GetVehicle(s_enters[i].vehicle);
+			if (pAgent && pVehicle && pAgent->GetHealth() > 0 && !pAgent->GetLinkedVehicle() && !pVehicle->IsDestroyed())
+				if (IVehicleSeat* pSeat = FreeSeat(pVehicle))
+				{
+					pSeat->Enter(pAgent->GetEntityId(), false);
+					CryLogAlways("[CoopAgent] %s gets into %s", pAgent->GetEntity()->GetName(), pVehicle->GetEntity()->GetName());
+				}
+			s_enters.erase(s_enters.begin() + i);
+		}
 	}
 
 	IVehicleSeat* FreeSeat(IVehicle* pVehicle)
@@ -3220,6 +3272,7 @@ void CoopAgent::Init()
 	gEnv->pConsole->AddCommand("coop_test_ammo", CmdTestAmmo, 0,
 		"Crysis Coop testing: coop_test_ammo <player> <ammo class> <count> sets what he carries of it (server)");
 	gEnv->pConsole->AddCommand("coop_test_vehicles", CmdTestVehicles, 0, "Crysis Coop testing: logs the vehicles near the host's player");
+	gEnv->pConsole->AddCommand("coop_test_silencer", CmdTestSilencer, 0, "Crysis Coop testing: coop_test_silencer <player> [0]: a silencer on (off) his weapon (server)");
 	gEnv->pConsole->AddCommand("coop_test_enter", CmdTestEnter, 0, "Crysis Coop testing: coop_test_enter <vehicle> <seat id>: the host's player gets in (server)");
 	gEnv->pConsole->AddCommand("coop_test_path", CmdTestPath, 0,
 		"Crysis Coop testing: coop_test_path <entity name> logs the AI navigation's way from the host's player to it (server)");
@@ -3356,6 +3409,26 @@ void CoopAgent::OnServerRequest(EntityId agent, int op, const char* name)
 			if (pMine)
 				if (IVehicleSeat* pOld = pMine->GetSeatForPassenger(agent))
 					pOld->Exit(false, true);
+			const Vec3 at = pVehicle->GetEntity()->GetWorldPos();
+			if (Dist2D(pAgent->GetEntity()->GetWorldPos(), at) > 6.0f)
+			{
+				// from afar (the vehicle drove off): its body was put into the
+				// vehicle's own, which threw the vehicle (the driver's camera
+				// stuck or flew off). Next to it first, and in a moment later,
+				// and not while it drives fast
+				pe_status_dynamics dyn;
+				IPhysicalEntity* pPhys = pVehicle->GetEntity()->GetPhysics();
+				if (pPhys && pPhys->GetStatus(&dyn) && dyn.v.GetLength() > 3.0f)
+					return;
+				AABB box;
+				pVehicle->GetEntity()->GetLocalBounds(box);
+				const Matrix34& tm = pVehicle->GetEntity()->GetWorldTM();
+				const Vec3 side = tm.GetColumn0().GetNormalizedSafe(Vec3(1, 0, 0)) * (max(box.max.x, -box.min.x) + 1.5f);
+				pRules->MovePlayer(static_cast<CActor*>(pAgent), at + side + Vec3(0, 0, 0.5f), pAgent->GetEntity()->GetWorldAngles());
+				s_enters.push_back(SPendingEnter(agent, pVehicle->GetEntityId(), Now() + 0.5f));
+				CryLogAlways("[CoopAgent] %s put next to %s, gets in a moment later", pAgent->GetEntity()->GetName(), pVehicle->GetEntity()->GetName());
+				return;
+			}
 			pSeat->Enter(agent, false);
 			CryLogAlways("[CoopAgent] %s gets into %s", pAgent->GetEntity()->GetName(), pVehicle->GetEntity()->GetName());
 		}

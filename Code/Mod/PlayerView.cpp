@@ -895,7 +895,7 @@ void CPlayerView::ViewSpectatorTarget(SViewParams &viewParams)
 		flat.z = 0;
 		flat.NormalizeSafe(Vec3(0, 1, 0));
 		const Vec3 pivot = vtm.GetTranslation() + Vec3(0, 0, max(1.5f, box.max.z) + 0.5f);
-		Vec3 goal = pivot - flat * (size * 1.1f + 2.0f) + Vec3(0, 0, size * 0.25f);
+		Vec3 goal = pivot - flat * (size * 0.6f + 1.5f) + Vec3(0, 0, size * 0.18f);
 		IPhysicalEntity* pSkip[2];
 		int nSkip = 0;
 		if (IPhysicalEntity* p = pVehicleEntity->GetPhysics())
