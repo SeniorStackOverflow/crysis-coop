@@ -14,6 +14,7 @@ History:
 #include "Game.h"
 #include "GameCVars.h"
 #include "Projectile.h"
+#include "CoopAI.h"
 #include "Bullet.h"
 #include "WeaponSystem.h"
 #include "ISerialize.h"
@@ -717,6 +718,14 @@ void CProjectile::SetTracked(bool tracked)
 void CProjectile::Explode(bool destroy, bool impact, const Vec3 &pos, const Vec3 &normal, const Vec3 &vel, EntityId targetId)
 {
 	const SExplosionParams* pExplosionParams = m_pAmmoParams->pExplosion;
+	// Crysis Coop: for the log, where a player's grenade goes off
+	if (pExplosionParams && gEnv->bServer && CoopAI::IsCoopSession())
+		if (IActor* pOwner = g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(m_ownerId))
+			if (pOwner->IsPlayer())
+			{
+				const Vec3 at = pos.IsZero() ? GetEntity()->GetWorldPos() : pos;
+				CryLogAlways("[CoopAnim] %s's %s goes off at (%.1f, %.1f, %.1f)", pOwner->GetEntity()->GetName(), GetEntity()->GetClass()->GetName(), at.x, at.y, at.z);
+			}
 	if (pExplosionParams)
 	{
 		Vec3 dir(0,0,1);

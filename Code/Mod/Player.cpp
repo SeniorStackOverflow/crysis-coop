@@ -737,12 +737,10 @@ void CPlayer::CoopTraceUpperBody(IAnimationGraphState* pGraph)
 	if (!special.empty() && !b.told && now - b.since > 3.0f)
 	{
 		b.told = true;
-		char action[64] = "";
-		pGraph->GetInput(pGraph->GetInputId("Action"), action);
 		IItem* pItem = GetCurrentItem();
 		COffHand* pOffHand = static_cast<COffHand*>(GetWeaponByClass(CItem::sOffHandClass));
-		CryLogAlways("[CoopAnim] %s%s: left hand up at the head for 3 s (%s, Action=%s, item %s, left hand 0x%x, %s)",
-			GetEntity()->GetName(), IsPlayer() ? "" : " (AI)", state, action, pItem ? pItem->GetEntity()->GetClass()->GetName() : "-",
+		CryLogAlways("[CoopAnim] %s%s: left hand up at the head for 3 s (%s, item %s, left hand 0x%x, %s)",
+			GetEntity()->GetName(), IsPlayer() ? "" : " (AI)", state, pItem ? pItem->GetEntity()->GetClass()->GetName() : "-",
 			pOffHand ? (unsigned)pOffHand->GetOffHandState() : 0u, IsClient() ? "this game's player" : (gEnv->bServer ? "server" : "client"));
 	}
 }

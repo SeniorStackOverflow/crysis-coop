@@ -678,7 +678,34 @@ function TeamInstantAction:ProcessActorDamage(hit)
 		target.actor:SetHealth(health);
 		return (health <= 0);
 	end
-	return stockProcessActorDamage(self, hit);
+	local before = target and target.actor and target.actor:GetHealth();
+	local died = stockProcessActorDamage(self, hit);
+	if (C.DEBUG and hit.explosion and target and target.actor) then
+		CoopLog(string.format("HIT %s by %s explosion type=%s dmg=%.1f hp %s->%s%s", tostring(target:GetName()),
+			tostring(hit.shooter and hit.shooter:GetName()), tostring(hit.type), hit.damage or 0, tostring(before),
+			tostring(target.actor:GetHealth()), died and " KILLED" or ""));
+	end
+	return died;
+end
+
+-- for the log: a player's explosion, the actors it reaches
+local stockOnExplosion = TeamInstantAction.Server.OnExplosion;
+function TeamInstantAction.Server:OnExplosion(explosion)
+	local shooter = explosion.shooterId and System.GetEntity(explosion.shooterId);
+	if (C.DEBUG and shooter and shooter.actor and shooter.actor:IsPlayer()) then
+		local list = "";
+		for i, entity in ipairs(explosion.AffectedEntities or {}) do
+			if (entity.actor) then
+				list = list..string.format(" %s(%.0fm,obstr %.2f)", tostring(entity:GetName()),
+					vecLen(vecSub(entity:GetWorldPos(), explosion.pos)), (explosion.AffectedEntitiesObstruction or {})[i] or -1);
+			end
+		end
+		CoopLog(string.format("EXPLOSION of %s: damage %.0f radius %.1f-%.1f, actors:%s", tostring(shooter:GetName()),
+			explosion.damage or 0, explosion.min_radius or 0, explosion.radius or 0, list));
+	end
+	if (stockOnExplosion) then
+		return stockOnExplosion(self, explosion);
+	end
 end
 
 -- a vehicle with enemies inside cannot be entered: its own check asks the AI

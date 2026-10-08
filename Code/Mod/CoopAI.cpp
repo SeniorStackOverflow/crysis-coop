@@ -4679,7 +4679,7 @@ namespace
 				const IAnimationGraphState::InputID id = pGraph->GetInputId(inputs[i]);
 				if (id == (IAnimationGraphState::InputID)-1)
 					continue;
-				char value[64] = "";
+				char value[256] = "";
 				pGraph->GetInput(id, value);
 				graph += string(" ") + inputs[i] + "=" + value;
 			}

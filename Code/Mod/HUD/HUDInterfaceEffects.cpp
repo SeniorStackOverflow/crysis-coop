@@ -445,7 +445,9 @@ void CHUD::UpdateProjectileTracker(CGameFlashAnimation &anim, IEntity *pProjecti
 {
 	if (pProjectile)
 	{
-		Vec3 screen;
+		// Crysis Coop: zero first (a game without graphics, the AI companion's,
+		// projects nothing: the garbage printed with %f overran the buffers)
+		Vec3 screen(ZERO);
 		Vec3 world=pProjectile->GetWorldPos();
 		m_pRenderer->ProjectToScreen(	world.x, world.y,	world.z, &screen.x,	&screen.y, &screen.z);
 
@@ -490,14 +492,17 @@ void CHUD::UpdateProjectileTracker(CGameFlashAnimation &anim, IEntity *pProjecti
 
 		char strX[32];
 		char strY[32];
-		sprintf(strX,"%f", screen.x*sx-boxX+useless);
-		sprintf(strY,"%f", screen.y*sy-boxY);
+		_snprintf(strX, sizeof(strX), "%f", screen.x*sx-boxX+useless);
+		_snprintf(strY, sizeof(strY), "%f", screen.y*sy-boxY);
+		strX[sizeof(strX)-1] = 0;
+		strY[sizeof(strY)-1] = 0;
 
 		anim.SetVariable("Root.GrenadeDetect._x", strX);
 		anim.SetVariable("Root.GrenadeDetect._y", strY);
 
 		char strDistance[32];
-		sprintf(strDistance, "%.2fM",(world-player).len());
+		_snprintf(strDistance, sizeof(strDistance), "%.2fM",(world-player).len());
+		strDistance[sizeof(strDistance)-1] = 0;
 		anim.Invoke("setDistance", strDistance);
 
 		string grenadeName("@");

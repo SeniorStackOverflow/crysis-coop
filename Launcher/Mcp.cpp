@@ -498,6 +498,8 @@ namespace
 			"{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}" },
 		{ "use", "Press the use key on what is in front of the companion (a door, a switch, a pick-up).",
 			"{\"type\":\"object\",\"properties\":{}}" },
+		{ "throw_grenade", "Throw a hand grenade at an enemy (by name from observe, or the best one: a group, or one behind cover). The companion throws on its own too in fights; it never throws when a teammate is close to the target or the way up is blocked.",
+			"{\"type\":\"object\",\"properties\":{\"enemy\":{\"type\":\"string\",\"description\":\"the enemy's name; empty = the best target\"}}}" },
 		{ "switch_weapon", "Take the next weapon, or one by its class name (SCAR, FY71, SMG, Shotgun, SOCOM, DSG1, LAW...).",
 			"{\"type\":\"object\",\"properties\":{\"weapon\":{\"type\":\"string\",\"description\":\"empty = the next one\"}}}" },
 		{ "suit_mode", "Set the nanosuit mode.",
@@ -544,6 +546,7 @@ namespace
 		else if (name == "fire_at_will") command = std::string("fire ") + (args->Str("enabled", "true") == "false" ? "off" : "on");
 		else if (name == "say") command = "say " + args->Str("text");
 		else if (name == "use") command = "use";
+		else if (name == "throw_grenade") command = "grenade " + args->Str("enemy", "best");
 		else if (name == "switch_weapon") command = "weapon " + args->Str("weapon", "next");
 		else if (name == "suit_mode") command = "suit " + args->Str("mode", "armor");
 		else if (name == "screenshot") command = "screenshot";

@@ -1334,6 +1334,292 @@ namespace
 		s_bot.doing.Format("fighting %s (%.0f m%s)", pEnemy->GetEntity()->GetName(), aim.GetDistance(eye), seen ? "" : ", out of sight");
 	}
 
+	// ------------------------------------------------------------------
+	// hand grenades: at enemies standing together, or at the one it fought
+	// hiding behind cover where it last saw him; never with one of its own
+	// close to where it lands
+
+	struct SGrenade
+	{
+		int phase;              // 0 none, 1 turning to the throw, 2 the pin out (key held), 3 thrown
+		float phaseAt, nextAt, scanAt;
+		EntityId target;
+		Vec3 at;                // where it should land
+		float yaw, pitch, flight;
+		string why;
+		bool ordered;           // told to (the AI agent); orderTarget "" = the best one
+		string orderTarget;
+		float orderAt;
+		EntityId hidden;        // the enemy it fought: where and when it last saw him
+		Vec3 hiddenPos;
+		float hiddenSeenAt;
+		int switches;
+		int thrown;
+		float steadySince;      // aimed at the throw since (the host's game must have that aim too)
+		SGrenade(): phase(0), phaseAt(0), nextAt(0), scanAt(0), target(0), at(ZERO), yaw(0), pitch(0), flight(0), ordered(false), orderAt(0),
+			hidden(0), hiddenPos(ZERO), hiddenSeenAt(-100), switches(0), thrown(0), steadySince(-1) {}
+	} s_gren;
+
+	const float GRENADE_COOLDOWN = 14.0f;
+	const float GRENADE_SAFE = 12.0f;       // nobody of its own this close to where it lands
+	const float GRENADE_NEAR = 16.0f;       // it goes off up to 15 m around: never closer to itself
+
+	IEntityClass* GrenadeClass()
+	{
+		static IEntityClass* s_pClass = 0;
+		if (!s_pClass)
+			s_pClass = gEnv->pEntitySystem->GetClassRegistry()->FindClass("explosivegrenade");
+		return s_pClass;
+	}
+
+	int Grenades(CPlayer* pMe)
+	{
+		IInventory* pInventory = pMe->GetInventory();
+		return pInventory && GrenadeClass() ? pInventory->GetAmmoCount(GrenadeClass()) : 0;
+	}
+
+	// the throw from the eye to there (22 m/s, 1.5 times that in strength
+	// mode): the low arc, or the high one when the low one is blocked; it
+	// must land before its 2.5 s fuse and nothing solid may be on the way
+	// (leaves and grass let it through); false: out of reach or blocked
+	bool GrenadeArc(CPlayer* pMe, const Vec3& eye, const Vec3& to, float& pitch, float& flight)
+	{
+		float v = 22.0f;
+		if (CNanoSuit* pSuit = pMe->GetNanoSuit())
+			if (pSuit->GetMode() == NANOMODE_STRENGTH)
+				v *= 1.5f;
+		const float g = 9.8f;
+		const float d = Dist2D(eye, to);
+		const float h = to.z - eye.z;
+		const float disc = v * v * v * v - g * (g * d * d + 2.0f * h * v * v);
+		if (disc < 0.0f || d < 1.0f)
+			return false;
+		const Vec3 flat = Vec3(to.x - eye.x, to.y - eye.y, 0).GetNormalizedSafe(Vec3(0, 1, 0));
+		IPhysicalEntity* pSkip = pMe->GetEntity()->GetPhysics();
+		for (int k = 0; k < 2; ++k)
+		{
+			const float a = atan_tpl((v * v + (k ? 1.0f : -1.0f) * sqrt_tpl(disc)) / (g * d));
+			const float t = d / (v * cos_tpl(a));
+			if (t > 2.1f)
+				continue;
+			bool clear = true;
+			Vec3 prev = eye;
+			for (int i = 1; i <= 10 && clear; ++i)
+			{
+				const float ti = t * i / 10.0f;
+				const Vec3 p = eye + flat * (v * cos_tpl(a) * ti) + Vec3(0, 0, v * sin_tpl(a) * ti - 0.5f * g * ti * ti);
+				ray_hit hit;
+				if (FirstBlock(prev, p - prev, ent_static | ent_terrain | ent_rigid | ent_sleeping_rigid, &pSkip, pSkip ? 1 : 0, hit, eT_Walk)
+					&& hit.pt.GetDistance(to) > 2.5f)
+					clear = false;
+				prev = p;
+			}
+			if (clear)
+			{
+				pitch = a;
+				flight = t;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// nobody of its own (players, friendly soldiers) close to there
+	bool GrenadeSafe(const Vec3& at)
+	{
+		IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+		while (IActor* pActor = it->Next())
+		{
+			if (pActor->GetHealth() <= 0 || pActor->GetEntity()->IsHidden() || Hostile(pActor))
+				continue;
+			if (pActor->GetEntity()->GetWorldPos().GetDistance(at) < GRENADE_SAFE)
+				return false;
+		}
+		return true;
+	}
+
+	// whom: enemies standing together (2 or more within 5 m), the one it
+	// fought hiding where it last saw him, or (told to) any one in reach;
+	// 16 to 32 m away, a throw there clear
+	bool PickGrenadeTarget(CPlayer* pMe, const Vec3& pos, const Vec3& eye, const string& name, bool ordered)
+	{
+		float bestScore = 0.0f;
+		IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+		while (IActor* pActor = it->Next())
+		{
+			if (!Hostile(pActor) || pActor->GetLinkedVehicle())
+				continue;
+			IEntity* pEntity = pActor->GetEntity();
+			if (!name.empty() && stricmp(name.c_str(), pEntity->GetName()))
+				continue;
+			const Vec3 p = pEntity->GetWorldPos();
+			const float d = Dist2D(p, pos);
+			if (d < GRENADE_NEAR || d > 32.0f || fabsf(p.z - pos.z) > 6.0f)
+				continue;
+			const bool seen = Visible(pMe, eye, pEntity, AimPoint(pEntity));
+			const bool hiding = !seen && pActor->GetEntityId() == s_gren.hidden && Now() - s_gren.hiddenSeenAt < 8.0f && p.GetDistance(s_gren.hiddenPos) < 4.0f;
+			if (!seen && !hiding)
+				continue;
+			int together = 0;
+			IActorIteratorPtr it2 = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+			while (IActor* pOther = it2->Next())
+				if (pOther != pActor && Hostile(pOther) && pOther->GetEntity()->GetWorldPos().GetDistance(p) < 5.0f)
+					++together;
+			float score = 0.0f;
+			string why;
+			if (together >= 1)
+			{
+				score = 3.0f + together;
+				why.Format("%d of them together", together + 1);
+			}
+			else if (hiding)
+			{
+				score = 2.0f;
+				why = "behind cover";
+			}
+			else if (ordered)
+			{
+				score = 1.0f;
+				why = "told to";
+			}
+			if (score <= bestScore || !GrenadeSafe(p))
+				continue;
+			float pitch, flight;
+			if (!GrenadeArc(pMe, eye, p + Vec3(0, 0, 0.3f), pitch, flight))
+				continue;
+			bestScore = score;
+			s_gren.target = pActor->GetEntityId();
+			s_gren.at = p;
+			s_gren.yaw = Yaw(p - eye);
+			s_gren.pitch = pitch;
+			s_gren.flight = flight;
+			s_gren.why = why;
+		}
+		return bestScore > 0.0f;
+	}
+
+	// one step of it; true while it throws (no firing, no walking meanwhile)
+	bool GrenadeStep(CPlayer* pMe, const Vec3& pos, const Vec3& eye, IActor* pEnemy)
+	{
+		if (pEnemy && Visible(pMe, eye, pEnemy->GetEntity(), AimPoint(pEnemy->GetEntity())))
+		{
+			s_gren.hidden = pEnemy->GetEntityId();
+			s_gren.hiddenPos = pEnemy->GetEntity()->GetWorldPos();
+			s_gren.hiddenSeenAt = Now();
+		}
+		COffHand* pOffHand = static_cast<COffHand*>(pMe->GetWeaponByClass(CItem::sOffHandClass));
+		if (!pOffHand)
+			return false;
+		const float now = Now();
+		if (s_gren.phase == 0)
+		{
+			if (s_gren.ordered && now - s_gren.orderAt > 8.0f)
+			{
+				Event("no grenade: %s", Grenades(pMe) <= 0 ? "none left" : "no enemy in reach (16-32 m) with a clear throw and none of its own close");
+				s_gren.ordered = false;
+			}
+			if (!s_gren.ordered && (now < s_gren.nextAt || !s_bot.fireAtWill))
+				return false;
+			if (now < s_gren.scanAt || now < s_bot.reloadAt || now < s_bot.switchAt || Grenades(pMe) <= 0)
+				return false;
+			s_gren.scanAt = now + 0.5f;
+			if (pOffHand->GetOffHandState() != eOHS_INIT_STATE)
+				return false;
+			// the explosive ones in the left hand (not the flashbangs, the smoke)
+			IFireMode* pMode = pOffHand->GetFireMode(pOffHand->GetCurrentFireMode());
+			if (!pMode || pMode->GetAmmoType() != GrenadeClass())
+			{
+				if (s_gren.switches < 4)
+				{
+					++s_gren.switches;
+					Press(pMe, g_pGame->Actions().handgrenade, true);
+					Press(pMe, g_pGame->Actions().handgrenade, false);
+				}
+				return false;
+			}
+			s_gren.switches = 0;
+			if (!PickGrenadeTarget(pMe, pos, eye, s_gren.ordered ? s_gren.orderTarget : string(), s_gren.ordered))
+				return false;
+			s_gren.ordered = false;
+			s_gren.phase = 1;
+			s_gren.phaseAt = now;
+			s_gren.steadySince = -1.0f;
+			Fire(pMe, false);
+			Event("throws a grenade at %s (%s, %.0f m, %.0f degrees up, %.1f s in the air, at %s)", NameOf(s_gren.target), s_gren.why.c_str(),
+				Dist2D(s_gren.at, pos), RAD2DEG(s_gren.pitch), s_gren.flight, Vec(s_gren.at).c_str());
+		}
+		// it keeps the throw's direction meanwhile; the enemy may move a little
+		if (IActor* pTarget = ActorOf(s_gren.target))
+			if (pTarget->GetHealth() > 0 && pTarget->GetEntity()->GetWorldPos().GetDistance(s_gren.at) > 1.5f && s_gren.phase < 3)
+			{
+				float pitch, flight;
+				const Vec3 p = pTarget->GetEntity()->GetWorldPos();
+				if (GrenadeSafe(p) && GrenadeArc(pMe, eye, p + Vec3(0, 0, 0.3f), pitch, flight))
+				{
+					s_gren.at = p;
+					s_gren.yaw = Yaw(p - eye);
+					s_gren.pitch = pitch;
+				}
+			}
+		Fire(pMe, false);
+		s_ctl.look = true;
+		s_ctl.yaw = s_gren.yaw;
+		s_ctl.pitch = s_gren.pitch;
+		s_ctl.turnRate = 6.0f;
+		s_ctl.moveDir.zero();
+		float yaw, pitch;
+		ViewAngles(pMe, yaw, pitch);
+		const float off = fabsf(Wrap(s_gren.yaw - yaw)) + fabsf(s_gren.pitch - pitch);
+		s_bot.doing.Format("throwing a grenade at %s", NameOf(s_gren.target));
+		if (s_gren.phase == 1)
+		{
+			// a teammate walked there meanwhile, or it cannot turn there: no throw
+			if (!GrenadeSafe(s_gren.at) || now - s_gren.phaseAt > 3.0f)
+			{
+				Event("no grenade after all: %s", now - s_gren.phaseAt > 3.0f ? "could not turn to the throw" : "one of its own came close to it");
+				s_gren.phase = 0;
+				s_gren.nextAt = now + 4.0f;
+				return false;
+			}
+			// aimed and held there a moment: the host's game, which throws it,
+			// has its aim a little later
+			if (off >= 0.04f)
+				s_gren.steadySince = -1.0f;
+			else if (s_gren.steadySince < 0.0f)
+				s_gren.steadySince = now;
+			else if (now - s_gren.steadySince > 0.5f)
+			{
+				Press(pMe, g_pGame->Actions().grenade, true);
+				s_gren.phase = 2;
+				s_gren.phaseAt = now;
+			}
+			return true;
+		}
+		if (s_gren.phase == 2)
+		{
+			// the pin out (the hand ready), then let go
+			const bool ready = pOffHand->GetOffHandState() == eOHS_HOLDING_GRENADE;
+			if (off >= 0.04f)
+				s_gren.steadySince = now;
+			if ((ready && now - s_gren.steadySince > 0.6f && now - s_gren.phaseAt > 0.6f) || now - s_gren.phaseAt > 3.0f)
+			{
+				Press(pMe, g_pGame->Actions().grenade, false);
+				s_gren.phase = 3;
+				s_gren.phaseAt = now;
+				++s_gren.thrown;
+			}
+			return true;
+		}
+		// thrown: the direction kept a moment (it leaves the hand a little later)
+		if (now - s_gren.phaseAt < 0.6f && pOffHand->GetOffHandState() != eOHS_INIT_STATE)
+			return true;
+		if (now - s_gren.phaseAt < 0.6f)
+			return true;
+		s_gren.phase = 0;
+		s_gren.nextAt = now + GRENADE_COOLDOWN + cry_frand() * 6.0f;
+		return false;
+	}
+
 	void Think(float frameTime)
 	{
 		CPlayer* pMe = LocalPlayer();
@@ -1425,6 +1711,19 @@ namespace
 		const Vec3 pos = pMe->GetEntity()->GetWorldPos();
 		const Vec3 eye = EyePos(pMe);
 		IVehicle* pMyVehicle = pMe->GetLinkedVehicle();
+
+		// a grenade throw begun is finished first (a second or two)
+		if (s_gren.phase != 0)
+		{
+			if (pMyVehicle || pMe->GetHealth() <= 0)
+			{
+				if (s_gren.phase == 2)
+					Press(pMe, g_pGame->Actions().grenade, false);
+				s_gren.phase = 0;
+			}
+			else if (GrenadeStep(pMe, pos, eye, ActorOf(s_bot.enemy)))
+				return;
+		}
 
 		// the one it follows
 		IActor* pLeader = s_bot.leader.empty() ? HostPlayer() : ActorByName(s_bot.leader.c_str());
@@ -1612,6 +1911,9 @@ namespace
 			return;
 		if (Survive(pMe, pos, eye, pEnemy))
 			return;
+		// a grenade at enemies standing together or hiding behind cover
+		if (GrenadeStep(pMe, pos, eye, pEnemy))
+			return;
 		// a cover is good for a while (the enemies move)
 		if (s_bot.haveCover && Now() - s_bot.coverAt > 20.0f)
 			s_bot.haveCover = false;
@@ -1723,10 +2025,10 @@ namespace
 		static const char* modes[] = { "speed", "strength", "cloak", "armor" };
 		CNanoSuit* pSuit = pMe->GetNanoSuit();
 		string s;
-		s.Format(",\"me\":{\"name\":%s,\"health\":%d,\"maxHealth\":%d,\"down\":%s,\"suit\":%s,\"energy\":%.0f,\"weapon\":%s,\"clip\":%d,\"reserve\":%d,\"position\":%s,\"facing\":%s,\"vehicle\":%s}",
+		s.Format(",\"me\":{\"name\":%s,\"health\":%d,\"maxHealth\":%d,\"down\":%s,\"suit\":%s,\"energy\":%.0f,\"weapon\":%s,\"clip\":%d,\"reserve\":%d,\"grenades\":%d,\"position\":%s,\"facing\":%s,\"vehicle\":%s}",
 			Esc(pMe->GetEntity()->GetName()).c_str(), pMe->GetHealth(), pMe->GetMaxHealth(), pMe->GetHealth() <= 0 ? "true" : "false",
 			Esc(pSuit && pSuit->GetMode() >= 0 && pSuit->GetMode() < 4 ? modes[pSuit->GetMode()] : "none").c_str(), pSuit ? pSuit->GetSuitEnergy() : 0.0f,
-			Esc(weapon.c_str()).c_str(), clip, reserve, Vec(pos).c_str(), Esc(Compass(pMe->GetViewRotation().GetColumn1())).c_str(),
+			Esc(weapon.c_str()).c_str(), clip, reserve, Grenades(pMe), Vec(pos).c_str(), Esc(Compass(pMe->GetViewRotation().GetColumn1())).c_str(),
 			pMe->GetLinkedVehicle() ? Esc(pMe->GetLinkedVehicle()->GetEntity()->GetName()).c_str() : "null");
 		j += s;
 		s.Format(",\"order\":{\"type\":%s,\"leader\":%s,\"target\":%s,\"fireAtWill\":%s,\"doing\":%s}",
@@ -2015,6 +2317,22 @@ namespace
 			}
 			else
 				Reply(id.c_str(), Fail("not in a game, or nothing to say"));
+		}
+		else if (cmd == "grenade" && pMe)
+		{
+			const int n = Grenades(pMe);
+			if (n <= 0)
+				Reply(id.c_str(), Fail("it has no grenades"));
+			else
+			{
+				s_gren.ordered = true;
+				s_gren.orderTarget = (args.empty() || args == "best") ? string() : args;
+				s_gren.orderAt = Now();
+				string text;
+				text.Format("throws a grenade %s%s as soon as it has a clear throw (%d left)", s_gren.orderTarget.empty() ? "at the best target" : "at ",
+					s_gren.orderTarget.c_str(), n);
+				Reply(id.c_str(), Ok(text.c_str()));
+			}
 		}
 		else if (cmd == "use" && pMe)
 		{
