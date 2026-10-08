@@ -589,6 +589,7 @@ public:
 	virtual void SetAngles(const Ang3 &angles);
 	virtual Ang3 GetAngles();
 	virtual void PlayAction(const char *action,const char *extension, bool looping=false);
+	void CoopTraceUpperBody(struct IAnimationGraphState* pGraph);
 	virtual void UpdateGrab(float frameTime);
 	virtual float GetActorStrength() const;
 	virtual void Freeze(bool freeze);

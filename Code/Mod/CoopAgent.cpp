@@ -23,6 +23,7 @@
 #include "IViewSystem.h"
 #include "IItemSystem.h"
 #include "IWeapon.h"
+#include "IWorldQuery.h"
 #include "ILevelSystem.h"
 #include "INetworkService.h"
 #include "ISurfaceType.h"
@@ -339,7 +340,7 @@ namespace
 		// weapons: when it looks again, the one it goes to pick up
 		float weaponAt;
 		EntityId loot;
-		float lootSince, useAt;
+		float lootSince, useAt, useBlocked;
 		std::set<EntityId> lootFailed;
 		// a way around what is in the way (from the host's game: its AI
 		// navigation), and where to
@@ -369,7 +370,7 @@ namespace
 		SBrain(): order(eO_Free), spot(ZERO), haveSpot(false), fireAtWill(true), enemy(0), burstUntil(0), pauseUntil(0), reloadAt(0),
 			switchAt(0), attackHeld(false), checkPos(ZERO), checkAt(0), stuck(0), strafeUntil(0), strafeSide(1), jump(false),
 			farSince(-1), askAt(0), useHeld(false), useFor(0), useSince(0), lastHealth(-1), wasDown(false), named(false),
-			weaponAt(0), loot(0), lootSince(0), useAt(0), pathGoal(ZERO), pathAt(-100), pathAskAt(0), reviveSince(-1),
+			weaponAt(0), loot(0), lootSince(0), useAt(0), useBlocked(0), pathGoal(ZERO), pathAt(-100), pathAskAt(0), reviveSince(-1),
 			dodgeUntil(0), dodgeSide(1), retreating(false), hitAt(-100), lastFought(0), bursts(0), heldFire(0), stuckTimes(0), unseen(0), turning(0), statsAt(0), dropAt(0), downedFor(0), downedSince(0), enemySeenAt(-100),
 			cover(ZERO), haveCover(false), coverAskAt(0), retreatSince(-100), recoveredAt(-100),
 			coverAt(-100), peekUntil(0), peekUp(true) {}
@@ -396,6 +397,11 @@ namespace
 
 	void Fire(CPlayer* pPlayer, bool on)
 	{
+		// not with something in the left hand: the fire key would throw it
+		if (on)
+			if (COffHand* pOffHand = static_cast<COffHand*>(pPlayer->GetWeaponByClass(CItem::sOffHandClass)))
+				if (pOffHand->GetOffHandState() & (eOHS_HOLDING_OBJECT | eOHS_HOLDING_NPC | eOHS_PICKING | eOHS_PICKING_ITEM | eOHS_PICKING_ITEM2))
+					on = false;
 		if (on != s_bot.attackHeld)
 		{
 			Press(pPlayer, g_pGame->Actions().attack1, on);
@@ -866,7 +872,31 @@ namespace
 		{
 			LookAt(eye, at, 6.0f);
 			COffHand* pOffHand = static_cast<COffHand*>(pMe->GetWeaponByClass(CItem::sOffHandClass));
-			if (Now() >= s_bot.useAt && (!pOffHand || pOffHand->GetOffHandState() == eOHS_INIT_STATE))
+			// what the use key would take: a loose thing lying on the weapon
+			// (a spade, a box, a chair) goes into the left hand instead, and
+			// the others see the body keep that hand up at the head
+			IEntity* pOver = 0;
+			if (IWorldQuery* pQuery = pMe->GetGameObject()->GetWorldQuery())
+				if (const ray_hit* pRay = pQuery->GetLookAtPoint(3.0f))
+					pOver = gEnv->pEntitySystem->GetEntityFromPhysics(pRay->pCollider);
+			const bool blocked = pOver && pOver != pLoot && !g_pGame->GetIGameFramework()->GetIItemSystem()->GetItem(pOver->GetId())
+				&& pOver->GetPhysics() && pOver->GetPhysics()->GetType() == PE_RIGID;
+			if (blocked)
+			{
+				if (s_bot.useBlocked <= 0.0f)
+					s_bot.useBlocked = Now();
+				else if (Now() - s_bot.useBlocked > 3.0f)
+				{
+					Event("leaves the %s: a %s lies on it", pLoot->GetClass()->GetName(), pOver->GetName());
+					s_bot.lootFailed.insert(s_bot.loot);
+					s_bot.loot = 0;
+					s_bot.useBlocked = 0.0f;
+					return false;
+				}
+			}
+			else
+				s_bot.useBlocked = 0.0f;
+			if (!blocked && Now() >= s_bot.useAt && (!pOffHand || pOffHand->GetOffHandState() == eOHS_INIT_STATE))
 			{
 				Press(pMe, g_pGame->Actions().use, true);
 				Press(pMe, g_pGame->Actions().use, false);

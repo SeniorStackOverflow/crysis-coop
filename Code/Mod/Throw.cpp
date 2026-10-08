@@ -12,6 +12,7 @@ History:
 *************************************************************************/
 #include "StdAfx.h"
 #include "Throw.h"
+#include "CoopAI.h"
 #include "Actor.h"
 #include "Player.h"
 #include "Game.h"
@@ -223,6 +224,9 @@ void CThrow::StopFire()
 //------------------------------------------------------------------------
 void CThrow::NetStartFire()
 {
+	if (CoopAI::IsCoopSession() && m_pWeapon->GetOwnerActor())
+		CryLogAlways("[CoopAnim] %s starts a throw from the network with the %s (mode %s)", m_pWeapon->GetOwnerActor()->GetEntity()->GetName(),
+			m_pWeapon->GetEntity()->GetClass()->GetName(), GetName() ? GetName() : "?");
 	m_firing = true;
 	m_throwing = false;
 	m_thrown = false;
@@ -283,6 +287,14 @@ struct CThrow::ThrowAction
 
 void CThrow::DoThrow()
 {
+	if (CoopAI::IsCoopSession() && m_pWeapon->GetOwnerActor())
+	{
+		IAnimationGraphState* pGraph = m_pWeapon->GetOwnerActor()->GetAnimationGraphState();
+		IEntity* pThrowable = m_throwableId ? gEnv->pEntitySystem->GetEntity(m_throwableId) : 0;
+		CryLogAlways("[CoopAnim] %s throws with the %s (mode %s, grenade=%d, throwable %s, %s; body %s)", m_pWeapon->GetOwnerActor()->GetEntity()->GetName(),
+			m_pWeapon->GetEntity()->GetClass()->GetName(), GetName() ? GetName() : "?", (int)m_usingGrenade, pThrowable ? pThrowable->GetName() : "-",
+			gEnv->bServer ? "server" : "client", pGraph ? pGraph->GetCurrentStateName() : "-");
+	}
 	m_throw_time = m_throwparams.delay;
 	m_throwing = true;
 	m_thrown = false;

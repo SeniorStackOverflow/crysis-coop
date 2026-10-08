@@ -713,6 +713,40 @@ void CPlayer::UpdateFirstPersonEffects(float frameTime)
 	m_bUnderwater = (m_stats.headUnderWaterTimer > 0.0f);
 }
 
+// Crysis Coop: see CPlayer::Update
+void CPlayer::CoopTraceUpperBody(IAnimationGraphState* pGraph)
+{
+	struct SBody { string special; float since; bool told; };
+	static std::map<EntityId, SBody> s_body;
+	const char* state = pGraph->GetCurrentStateName();
+	const float now = gEnv->pTimer->GetCurrTime();
+	SBody& b = s_body[GetEntityId()];
+	// the left hand up at the head: the radio of a soldier calling
+	// reinforcements, a throw
+	string special;
+	if (state && (strstr(state, "Radio") || strstr(state, "toThrow")))
+		special = state;
+	if (special.empty() != b.special.empty())
+	{
+		if (special.empty() && b.told)
+			CryLogAlways("[CoopAnim] %s%s: left hand down after %.1f s (%s)", GetEntity()->GetName(), IsPlayer() ? "" : " (AI)", now - b.since, state ? state : "?");
+		b.since = now;
+		b.told = false;
+	}
+	b.special = special;
+	if (!special.empty() && !b.told && now - b.since > 3.0f)
+	{
+		b.told = true;
+		char action[64] = "";
+		pGraph->GetInput(pGraph->GetInputId("Action"), action);
+		IItem* pItem = GetCurrentItem();
+		COffHand* pOffHand = static_cast<COffHand*>(GetWeaponByClass(CItem::sOffHandClass));
+		CryLogAlways("[CoopAnim] %s%s: left hand up at the head for 3 s (%s, Action=%s, item %s, left hand 0x%x, %s)",
+			GetEntity()->GetName(), IsPlayer() ? "" : " (AI)", state, action, pItem ? pItem->GetEntity()->GetClass()->GetName() : "-",
+			pOffHand ? (unsigned)pOffHand->GetOffHandState() : 0u, IsClient() ? "this game's player" : (gEnv->bServer ? "server" : "client"));
+	}
+}
+
 void CPlayer::Update(SEntityUpdateContext& ctx, int updateSlot)
 {
 	FUNCTION_PROFILER(GetISystem(), PROFILE_GAME);
@@ -730,6 +764,11 @@ void CPlayer::Update(SEntityUpdateContext& ctx, int updateSlot)
 	if (CoopAI::IsCoopSession() && updateSlot == 0)
 		if (COffHand* pOffHand = static_cast<COffHand*>(GetWeaponByClass(CItem::sOffHandClass)))
 			pOffHand->CoopWatchStuck(ctx.fFrameTime);
+
+	// Crysis Coop: for the log, an actor's body with the left hand up at
+	// the head for long (as this game animates it)
+	if (CoopAI::IsCoopSession() && updateSlot == 0 && m_pAnimatedCharacter && m_pAnimatedCharacter->GetAnimationGraphState())
+		CoopTraceUpperBody(m_pAnimatedCharacter->GetAnimationGraphState());
 
 	if (gEnv->bServer && !IsClient() && IsPlayer())
 	{

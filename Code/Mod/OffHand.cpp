@@ -1715,6 +1715,25 @@ void COffHand::PerformThrow(int activationMode, EntityId throwableId, int oldFMI
 	if (!m_fm)
 		return;
 
+	// Crysis Coop: the server knows nothing of what a client holds in the
+	// left hand (an ammo box it reached for, a thing): the throw reaches it as
+	// a start of fire, and it throws a real grenade (and its body stays with
+	// the left hand up at the head). The client lets go of it instead
+	if (throwableId && activationMode == eAAM_OnPress && CoopAI::IsCoopSession() && !gEnv->bServer)
+	{
+		IEntity* pThrowable = gEnv->pEntitySystem->GetEntity(throwableId);
+		CryLogAlways("[Coop] %s lets go of the %s instead of throwing it (the server would throw a grenade)",
+			GetOwnerActor() ? GetOwnerActor()->GetEntity()->GetName() : "?", pThrowable ? pThrowable->GetName() : "?");
+		IgnoreCollisions(false, throwableId);
+		DrawNear(false, throwableId);
+		m_mainHand = static_cast<CItem*>(GetOwnerActor()->GetCurrentItem());
+		m_mainHandWeapon = m_mainHand ? static_cast<CWeapon*>(m_mainHand->GetIWeapon()) : NULL;
+		m_mainHandIsDualWield = m_mainHand ? m_mainHand->IsDualWield() : false;
+		m_currentState = eOHS_TRANSITIONING;
+		FinishAction(eOHA_RESET);
+		return;
+	}
+
 	if(activationMode==eAAM_OnPress)
 		m_currentState = eOHS_HOLDING_GRENADE;
 
@@ -2548,12 +2567,14 @@ void COffHand::CoopWatchStuck(float frameTime)
 	else
 		m_coopOneHandTime = 0.0f;
 	// the body keeps the left hand up at the head, ready to throw (the
-	// "hold_grenade" upper body), with nothing in it: the throw or drop that
-	// ends it never reached this game's animation of him. Signals do not end
-	// it, a new "Action" does
+	// "hold_grenade" upper body), with nothing in it. Seen after a thing
+	// caught by the use key was thrown away: "Action" is idle again, the
+	// upper body stays in its "toThrow..." states (even running). Signals do
+	// not end it, a new "Action" does
 	IAnimationGraphState* pGraph = (m_currentState == eOHS_INIT_STATE && GetOwnerActor()) ? GetOwnerActor()->GetAnimationGraphState() : 0;
 	const char* graphState = pGraph ? pGraph->GetCurrentStateName() : 0;
-	if (graphState && strstr(graphState, "toThrowGrenade"))
+	const char* upperBody = graphState ? strchr(graphState, '+') : 0;
+	if (upperBody && strstr(upperBody, "toThrow"))
 	{
 		m_coopHandUpTime += frameTime;
 		if (m_coopHandUpTime >= 2.0f)
