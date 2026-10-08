@@ -424,6 +424,14 @@ void CGameRules::ClientExplosion(const ExplosionInfo &explosionInfo)
 
 	TExplosionAffectedEntities affectedEntities;
 
+	// Crysis Coop: for the log, a player's explosion as a client gets it
+	// (the server logs it where the projectile goes off)
+	if (!gEnv->bServer && CoopAI::IsCoopSession())
+		if (IActor* pShooter = g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(explosionInfo.shooterId))
+			if (pShooter->IsPlayer())
+				CryLogAlways("[CoopAnim] %s's explosion here at (%.1f, %.1f, %.1f), damage %.0f", pShooter->GetEntity()->GetName(),
+					explosionInfo.pos.x, explosionInfo.pos.y, explosionInfo.pos.z, explosionInfo.damage);
+
 	if (gEnv->bServer)
   {
 		CullEntitiesInExplosion(explosionInfo);

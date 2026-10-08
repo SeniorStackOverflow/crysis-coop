@@ -1345,6 +1345,7 @@ namespace
 		float phaseAt, nextAt, scanAt;
 		EntityId target;
 		Vec3 at;                // where it should land
+		Vec3 targetAt;          // where the one it throws at was to be then
 		float yaw, pitch, flight;
 		string why;
 		bool ordered;           // told to (the AI agent); orderTarget "" = the best one
@@ -1356,7 +1357,7 @@ namespace
 		int switches;
 		int thrown;
 		float steadySince;      // aimed at the throw since (the host's game must have that aim too)
-		SGrenade(): phase(0), phaseAt(0), nextAt(0), scanAt(0), target(0), at(ZERO), yaw(0), pitch(0), flight(0), ordered(false), orderAt(0),
+		SGrenade(): phase(0), phaseAt(0), nextAt(0), scanAt(0), target(0), at(ZERO), targetAt(ZERO), yaw(0), pitch(0), flight(0), ordered(false), orderAt(0),
 			hidden(0), hiddenPos(ZERO), hiddenSeenAt(-100), switches(0), thrown(0), steadySince(-1) {}
 	} s_gren;
 
@@ -1438,62 +1439,121 @@ namespace
 		return true;
 	}
 
-	// whom: enemies standing together (2 or more within 5 m), the one it
-	// fought hiding where it last saw him, or (told to) any one in reach;
-	// 16 to 32 m away, a throw there clear
-	bool PickGrenadeTarget(CPlayer* pMe, const Vec3& pos, const Vec3& eye, const string& name, bool ordered)
+	// where the enemies go: their speed from where they were half a second
+	// ago (a running one is not where it lands)
+	struct STrack { Vec3 pos; float at; Vec3 vel; };
+	std::map<EntityId, STrack> s_tracks;
+
+	Vec3 Predict(IActor* pActor, float ahead)
 	{
-		float bestScore = 0.0f;
+		const Vec3 p = pActor->GetEntity()->GetWorldPos();
+		std::map<EntityId, STrack>::iterator it = s_tracks.find(pActor->GetEntityId());
+		return it == s_tracks.end() ? p : p + it->second.vel * ahead;
+	}
+
+	void TrackEnemies()
+	{
+		const float now = Now();
+		IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+		while (IActor* pActor = it->Next())
+		{
+			if (!Hostile(pActor))
+				continue;
+			const Vec3 p = pActor->GetEntity()->GetWorldPos();
+			STrack& t = s_tracks[pActor->GetEntityId()];
+			if (t.at <= 0.0f || now - t.at > 2.0f)
+			{
+				t.pos = p;
+				t.at = now;
+				t.vel.zero();
+			}
+			else if (now - t.at >= 0.5f)
+			{
+				t.vel = (p - t.pos) / (now - t.at);
+				t.vel.z = 0.0f;
+				t.pos = p;
+				t.at = now;
+			}
+		}
+	}
+
+	// where to throw: enemies are few to waste one on, so where it goes off
+	// two or more of them (three for its last one) will be within 4.5 m
+	// (a grenade kills there, it only hurts farther), where they will be
+	// when it lands; 16 to 32 m away, a clear throw, none of its own close.
+	// Told to (the AI agent): one will do. Known enemies only: seen now, or
+	// the one it fought hiding where it last saw him
+	bool PickGrenadeTarget(CPlayer* pMe, const Vec3& pos, const Vec3& eye, const string& name, bool ordered, int left)
+	{
+		const float LETHAL = 4.5f;
+		const int need = ordered ? 1 : (left <= 1 ? 3 : 2);
+		// the enemies it knows of, where they will be (about 1.5 s on)
+		struct SFoe { IActor* pActor; Vec3 at; bool known; };
+		std::vector<SFoe> foes;
 		IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
 		while (IActor* pActor = it->Next())
 		{
 			if (!Hostile(pActor) || pActor->GetLinkedVehicle())
 				continue;
 			IEntity* pEntity = pActor->GetEntity();
-			if (!name.empty() && stricmp(name.c_str(), pEntity->GetName()))
-				continue;
-			const Vec3 p = pEntity->GetWorldPos();
-			const float d = Dist2D(p, pos);
-			if (d < GRENADE_NEAR || d > 32.0f || fabsf(p.z - pos.z) > 6.0f)
+			if (pEntity->GetWorldPos().GetDistance(pos) > 50.0f)
 				continue;
 			const bool seen = Visible(pMe, eye, pEntity, AimPoint(pEntity));
-			const bool hiding = !seen && pActor->GetEntityId() == s_gren.hidden && Now() - s_gren.hiddenSeenAt < 8.0f && p.GetDistance(s_gren.hiddenPos) < 4.0f;
-			if (!seen && !hiding)
+			const bool hiding = !seen && pActor->GetEntityId() == s_gren.hidden && Now() - s_gren.hiddenSeenAt < 8.0f
+				&& pEntity->GetWorldPos().GetDistance(s_gren.hiddenPos) < 4.0f;
+			SFoe f = { pActor, Predict(pActor, 1.5f), seen || hiding };
+			foes.push_back(f);
+		}
+		float bestScore = 0.0f;
+		for (size_t i = 0; i < foes.size(); ++i)
+		{
+			if (!foes[i].known)
 				continue;
-			int together = 0;
-			IActorIteratorPtr it2 = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
-			while (IActor* pOther = it2->Next())
-				if (pOther != pActor && Hostile(pOther) && pOther->GetEntity()->GetWorldPos().GetDistance(p) < 5.0f)
-					++together;
-			float score = 0.0f;
-			string why;
-			if (together >= 1)
+			if (!name.empty() && stricmp(name.c_str(), foes[i].pActor->GetEntity()->GetName()))
+				continue;
+			// the middle of those around him (a throw between them gets more)
+			Vec3 sum(ZERO);
+			int around = 0;
+			for (size_t k = 0; k < foes.size(); ++k)
+				if (foes[k].at.GetDistance(foes[i].at) < 6.0f)
+				{
+					sum += foes[k].at;
+					++around;
+				}
+			Vec3 aim = sum / (float)around;
+			aim.z = foes[i].at.z;
+			// a middle out of reach of him: at him
+			if (aim.GetDistance(foes[i].at) > LETHAL - 1.0f)
+				aim = foes[i].at;
+			int lethal = 0, hurt = 0;
+			for (size_t k = 0; k < foes.size(); ++k)
 			{
-				score = 3.0f + together;
-				why.Format("%d of them together", together + 1);
+				const float d = foes[k].at.GetDistance(aim);
+				if (d < LETHAL)
+					++lethal;
+				else if (d < 8.0f)
+					++hurt;
 			}
-			else if (hiding)
-			{
-				score = 2.0f;
-				why = "behind cover";
-			}
-			else if (ordered)
-			{
-				score = 1.0f;
-				why = "told to";
-			}
-			if (score <= bestScore || !GrenadeSafe(p))
+			if (lethal < need)
+				continue;
+			const float d = Dist2D(aim, pos);
+			if (d < GRENADE_NEAR || d > 32.0f || fabsf(aim.z - pos.z) > 6.0f)
+				continue;
+			// more of them killed first, then more of them hurt, then nearer
+			const float score = lethal * 10.0f + hurt * 3.0f + (32.0f - d) * 0.1f;
+			if (score <= bestScore || !GrenadeSafe(aim))
 				continue;
 			float pitch, flight;
-			if (!GrenadeArc(pMe, eye, p + Vec3(0, 0, 0.3f), pitch, flight))
+			if (!GrenadeArc(pMe, eye, aim + Vec3(0, 0, 0.3f), pitch, flight))
 				continue;
 			bestScore = score;
-			s_gren.target = pActor->GetEntityId();
-			s_gren.at = p;
-			s_gren.yaw = Yaw(p - eye);
+			s_gren.target = foes[i].pActor->GetEntityId();
+			s_gren.at = aim;
+			s_gren.targetAt = foes[i].at;
+			s_gren.yaw = Yaw(aim - eye);
 			s_gren.pitch = pitch;
 			s_gren.flight = flight;
-			s_gren.why = why;
+			s_gren.why.Format("%d within %.1f m of where it lands, %d more close", lethal, LETHAL, hurt);
 		}
 		return bestScore > 0.0f;
 	}
@@ -1501,6 +1561,7 @@ namespace
 	// one step of it; true while it throws (no firing, no walking meanwhile)
 	bool GrenadeStep(CPlayer* pMe, const Vec3& pos, const Vec3& eye, IActor* pEnemy)
 	{
+		TrackEnemies();
 		if (pEnemy && Visible(pMe, eye, pEnemy->GetEntity(), AimPoint(pEnemy->GetEntity())))
 		{
 			s_gren.hidden = pEnemy->GetEntityId();
@@ -1538,7 +1599,7 @@ namespace
 				return false;
 			}
 			s_gren.switches = 0;
-			if (!PickGrenadeTarget(pMe, pos, eye, s_gren.ordered ? s_gren.orderTarget : string(), s_gren.ordered))
+			if (!PickGrenadeTarget(pMe, pos, eye, s_gren.ordered ? s_gren.orderTarget : string(), s_gren.ordered, Grenades(pMe)))
 				return false;
 			s_gren.ordered = false;
 			s_gren.phase = 1;
@@ -1548,16 +1609,18 @@ namespace
 			Event("throws a grenade at %s (%s, %.0f m, %.0f degrees up, %.1f s in the air, at %s)", NameOf(s_gren.target), s_gren.why.c_str(),
 				Dist2D(s_gren.at, pos), RAD2DEG(s_gren.pitch), s_gren.flight, Vec(s_gren.at).c_str());
 		}
-		// it keeps the throw's direction meanwhile; the enemy may move a little
+		// it keeps the throw's direction meanwhile; when the one it throws at
+		// goes elsewhere (2 m and more), the throw goes with him
 		if (IActor* pTarget = ActorOf(s_gren.target))
-			if (pTarget->GetHealth() > 0 && pTarget->GetEntity()->GetWorldPos().GetDistance(s_gren.at) > 1.5f && s_gren.phase < 3)
+			if (pTarget->GetHealth() > 0 && s_gren.phase < 3)
 			{
+				const Vec3 moved = Predict(pTarget, 1.5f) - s_gren.targetAt;
 				float pitch, flight;
-				const Vec3 p = pTarget->GetEntity()->GetWorldPos();
-				if (GrenadeSafe(p) && GrenadeArc(pMe, eye, p + Vec3(0, 0, 0.3f), pitch, flight))
+				if (moved.GetLength() > 2.0f && GrenadeSafe(s_gren.at + moved) && GrenadeArc(pMe, eye, s_gren.at + moved + Vec3(0, 0, 0.3f), pitch, flight))
 				{
-					s_gren.at = p;
-					s_gren.yaw = Yaw(p - eye);
+					s_gren.at += moved;
+					s_gren.targetAt += moved;
+					s_gren.yaw = Yaw(s_gren.at - eye);
 					s_gren.pitch = pitch;
 				}
 			}
