@@ -759,6 +759,11 @@ namespace
 		s_bot.weaponAt = Now() + 1.0f;
 		if (Now() < s_bot.reloadAt || Now() < s_bot.switchAt)
 			return;
+		// not while the left hand picks something up: the weapon in the
+		// right one would stay in the one-hand pose
+		if (COffHand* pOffHand = static_cast<COffHand*>(pMe->GetWeaponByClass(CItem::sOffHandClass)))
+			if (pOffHand->GetOffHandState() != eOHS_INIT_STATE)
+				return;
 		IItem* pCurrent = pMe->GetCurrentItem();
 		const int currentRank = pCurrent ? WeaponRank(pCurrent->GetEntity()->GetClass()->GetName()) : 0;
 		const int currentShots = currentRank ? WeaponShots(pMe, pCurrent) : 0;
@@ -860,7 +865,8 @@ namespace
 		else
 		{
 			LookAt(eye, at, 6.0f);
-			if (Now() >= s_bot.useAt)
+			COffHand* pOffHand = static_cast<COffHand*>(pMe->GetWeaponByClass(CItem::sOffHandClass));
+			if (Now() >= s_bot.useAt && (!pOffHand || pOffHand->GetOffHandState() == eOHS_INIT_STATE))
 			{
 				Press(pMe, g_pGame->Actions().use, true);
 				Press(pMe, g_pGame->Actions().use, false);
@@ -3152,6 +3158,22 @@ namespace
 			pItem->GetAccessory(name) ? "attached" : "not attached");
 	}
 
+	// coop_test_onehand <player>: his weapon in the one-hand pose, as a pick-up
+	// cut short leaves it (this game only; the left hand's watch takes it back)
+	void CmdTestOneHand(IConsoleCmdArgs* pArgs)
+	{
+		IActor* pActor = pArgs->GetArgCount() > 1 ? ActorByName(pArgs->GetArg(1)) : 0;
+		CItem* pItem = pActor ? static_cast<CItem*>(pActor->GetCurrentItem()) : 0;
+		if (!pItem)
+		{
+			CryLogAlways("[CoopTest] coop_test_onehand: no such player or nothing in his hands");
+			return;
+		}
+		pItem->PlayAction(g_pItemStrings->offhand_on);
+		pItem->SetActionSuffix("akimbo_");
+		CryLogAlways("[CoopTest] %s's %s in one hand", pActor->GetEntity()->GetName(), pItem->GetEntity()->GetClass()->GetName());
+	}
+
 	// coop_test_enter <vehicle> <seat id>: the host's player gets in (server)
 	void CmdTestEnter(IConsoleCmdArgs* pArgs)
 	{
@@ -3273,6 +3295,7 @@ void CoopAgent::Init()
 		"Crysis Coop testing: coop_test_ammo <player> <ammo class> <count> sets what he carries of it (server)");
 	gEnv->pConsole->AddCommand("coop_test_vehicles", CmdTestVehicles, 0, "Crysis Coop testing: logs the vehicles near the host's player");
 	gEnv->pConsole->AddCommand("coop_test_silencer", CmdTestSilencer, 0, "Crysis Coop testing: coop_test_silencer <player> [0]: a silencer on (off) his weapon (server)");
+	gEnv->pConsole->AddCommand("coop_test_onehand", CmdTestOneHand, 0, "Crysis Coop testing: coop_test_onehand <player>: his weapon in the one-hand pose (this game)");
 	gEnv->pConsole->AddCommand("coop_test_enter", CmdTestEnter, 0, "Crysis Coop testing: coop_test_enter <vehicle> <seat id>: the host's player gets in (server)");
 	gEnv->pConsole->AddCommand("coop_test_path", CmdTestPath, 0,
 		"Crysis Coop testing: coop_test_path <entity name> logs the AI navigation's way from the host's player to it (server)");

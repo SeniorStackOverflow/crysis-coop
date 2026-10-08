@@ -29,6 +29,15 @@ CoopConfig =
 		GaussRifle = false,
 	},
 	SILENCER_DAMAGE = 0.8,              -- a silenced weapon's bullets do this share (quiet costs power)
+	-- how much ammo of each kind a player carries: the campaign's numbers
+	-- (Scripts/Entities/actor/player.lua), not the much smaller multiplayer ones
+	AMMO_CAPACITY = {
+		bullet=40*7, fybullet=30*10, lightbullet=20*10, smgbullet=50*7,
+		explosivegrenade=10, flashbang=10, smokegrenade=10, empgrenade=10, scargrenade=10,
+		rocket=3, sniperbullet=10*3, tacbullet=4*5, tagbullet=10, gaussbullet=4*5,
+		hurricanebullet=500, incendiarybullet=30*10, shotgunshell=8*5,
+		avexplosive=3, c4explosive=4, claymoreexplosive=3, rubberbullet=30*20, tacgunprojectile=5,
+	},
 	REVIVE_HEALTH = 0.5,                -- part of his health a revived player gets back
 	ALL_DOWN_DELAY = 6,                 -- seconds everybody is down before the team is back at the last checkpoint
 	BACK_FADE_TIME = 1.5,               -- seconds the screen takes to come out of black there

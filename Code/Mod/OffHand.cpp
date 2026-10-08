@@ -156,6 +156,7 @@ m_usable(false),
 m_heldEntityId(0),
 m_pickingTimer(-1.0f),
 m_coopStuckTime(0.0f),
+m_coopOneHandTime(0.0f),
 m_resetTimer(-1.0f),
 m_preHeldEntityId(0),
 m_grabbedNPCSpecies(eGCT_UNKNOWN),
@@ -2527,6 +2528,24 @@ void COffHand::CoopWatchStuck(float frameTime)
 	}
 	else
 		s_busy.erase(owner);
+	// the weapon keeps the one-hand pose ("akimbo_" actions: the left hand is
+	// busy) when the hand's action ended without giving it back, e.g. another
+	// weapon was taken in the middle of a pick-up
+	CItem* pCurrent = (m_currentState == eOHS_INIT_STATE && GetOwnerActor()) ? static_cast<CItem*>(GetOwnerActor()->GetCurrentItem()) : 0;
+	if (pCurrent && pCurrent != this && !pCurrent->IsDualWield() && !stricmp(pCurrent->GetActionSuffix(0), "akimbo_"))
+	{
+		m_coopOneHandTime += frameTime;
+		if (m_coopOneHandTime >= 1.0f)
+		{
+			m_coopOneHandTime = 0.0f;
+			CryLogAlways("[Coop] %s held the %s in one hand: both hands again",
+				GetOwnerActor()->GetEntity()->GetName(), pCurrent->GetEntity()->GetClass()->GetName());
+			pCurrent->SetActionSuffix("");
+			pCurrent->PlayAction(g_pItemStrings->offhand_off, 0, false, eIPAF_Default | eIPAF_NoBlend);
+		}
+	}
+	else
+		m_coopOneHandTime = 0.0f;
 	if (!(m_currentState & (eOHS_PICKING_ITEM | eOHS_PICKING_ITEM2)))
 	{
 		m_coopStuckTime = 0.0f;

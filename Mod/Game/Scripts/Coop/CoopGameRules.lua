@@ -483,6 +483,23 @@ end
 --------------------------------------------------------------------------
 -- 7. player equipment
 --------------------------------------------------------------------------
+-- InstantAction:SetupPlayer (server and every client) gives the multiplayer
+-- ammo capacities; the actor's reset applies player.ammoCapacity again later
+function TeamInstantAction:SetupPlayer(player)
+	if (not player) then
+		return;
+	end
+	player.ammoCapacity = {};
+	for ammo, capacity in pairs(C.AMMO_CAPACITY) do
+		player.ammoCapacity[ammo] = capacity;
+	end
+	if (player.inventory) then
+		for ammo, capacity in pairs(player.ammoCapacity) do
+			player.inventory:SetAmmoCapacity(ammo, capacity);
+		end
+	end
+end
+
 function TeamInstantAction:EquipPlayer(actor, additionalEquip)
 	if (self.game:IsDemoMode() ~= 0) then
 		return;

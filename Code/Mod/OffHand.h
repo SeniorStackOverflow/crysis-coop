@@ -229,6 +229,7 @@ private:
 	float					m_range;
 	float					m_pickingTimer;
 	float					m_coopStuckTime;
+	float					m_coopOneHandTime;
 	float					m_resetTimer;
 
 	int						m_usable;
