@@ -14,6 +14,21 @@ CoopConfig =
 	REVIVE_RANGE = 4.5,                 -- m between them (Coop.dll's use key: 4)
 	REVIVE_RANGE_SERVER = 10,           -- m the server allows: a friend's game may have him a few metres off
 	COMPANION_DAMAGE = 0.5,             -- the AI companion takes this share of the enemies' damage (a buddy, as in other games)
+	-- a bullet's damage by the distance it flew (players' and soldiers' alike):
+	-- full up to "near" metres, then less and less, down to "min" times at "far"
+	-- (on top of the single player weapons' own small drop after 50 m)
+	DAMAGE_FALLOFF = {
+		default    = { near = 25, far = 120, min = 0.6 },
+		FY71       = { near = 30, far = 150, min = 0.6 },
+		SCAR       = { near = 30, far = 150, min = 0.6 },
+		SMG        = { near = 15, far = 70,  min = 0.5 },
+		SOCOM      = { near = 15, far = 60,  min = 0.45 },
+		Shotgun    = { near = 6,  far = 35,  min = 0.2 },
+		Hurricane  = { near = 20, far = 100, min = 0.5 },
+		DSG1       = false,             -- a sniper rifle: the same at any distance
+		GaussRifle = false,
+	},
+	SILENCER_DAMAGE = 0.8,              -- a silenced weapon's bullets do this share (quiet costs power)
 	REVIVE_HEALTH = 0.5,                -- part of his health a revived player gets back
 	ALL_DOWN_DELAY = 6,                 -- seconds everybody is down before the team is back at the last checkpoint
 	BACK_FADE_TIME = 1.5,               -- seconds the screen takes to come out of black there

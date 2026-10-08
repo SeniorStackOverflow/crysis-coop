@@ -537,11 +537,53 @@ end
 -- 9. damage: difficulty multiplier for AI -> player hits (friendly fire
 --    between players is handled by stock TIA OnHit via g_friendlyfireratio)
 --------------------------------------------------------------------------
+-- a bullet's damage share by the distance it flew and a silencer (see
+-- DAMAGE_FALLOFF, SILENCER_DAMAGE); also the distance, for the log
+function CoopBulletDamageScale(hit)
+	local shooter, weapon = hit.shooter, hit.weapon;
+	if (not shooter or not weapon or not hit.pos or hit.explosion) then
+		return 1, nil, false;
+	end
+	if (hit.type ~= "bullet" and hit.type ~= "gaussbullet") then
+		return 1, nil, false;
+	end
+	local from = shooter:GetWorldPos();
+	local dx, dy, dz = hit.pos.x - from.x, hit.pos.y - from.y, hit.pos.z - from.z;
+	local dist = math.sqrt(dx * dx + dy * dy + dz * dz);
+	local scale = 1;
+	local f = C.DAMAGE_FALLOFF and C.DAMAGE_FALLOFF[weapon.class];
+	if (f == nil and C.DAMAGE_FALLOFF) then
+		f = C.DAMAGE_FALLOFF.default;
+	end
+	if (f and dist > f.near) then
+		local t = math.min(1, (dist - f.near) / math.max(1, f.far - f.near));
+		scale = 1 - t * (1 - f.min);
+	end
+	local silenced = false;
+	if (weapon.weapon and weapon.weapon.GetAccessory) then
+		silenced = (weapon.weapon:GetAccessory("Silencer") or weapon.weapon:GetAccessory("SOCOMSilencer")) ~= nil;
+	end
+	if (silenced and C.SILENCER_DAMAGE) then
+		scale = scale * C.SILENCER_DAMAGE;
+	end
+	return scale, dist, silenced;
+end
+
 local stockOnHit = TeamInstantAction.Server.OnHit;
 function TeamInstantAction.Server:OnHit(hit)
 	local shooter = hit.shooter;
 	local target = hit.target;
 	local targetIsPlayer = target and target.actor and target.actor:IsPlayer();
+	-- a mounted gun's bullets never hurt its own gunner (they started inside him)
+	if (shooter and target and shooter.id == target.id and hit.weapon and hit.weapon.class
+		and string.sub(hit.weapon.class, 1, 7) == "Vehicle") then
+		hit.damage = 0;
+	end
+	-- distance and silencer
+	local scale, dist, silenced = CoopBulletDamageScale(hit);
+	if (scale ~= 1 and hit.damage) then
+		hit.damage = hit.damage * scale;
+	end
 	if (targetIsPlayer and shooter and shooter.actor and (not shooter.actor:IsPlayer())) then
 		hit.damage = hit.damage * C.AI_DAMAGE_TO_PLAYER_MULT;
 		-- the single player campaign takes an AI's hit on the player as it is
@@ -561,9 +603,10 @@ function TeamInstantAction.Server:OnHit(hit)
 	-- debug record of every hit on an actor
 	if (C.DEBUG and target and target.actor) then
 		local after = target.actor:GetHealth();
-		CoopLog(string.format("HIT %s%s by %s weapon=%s type=%s dmg=%.1f%s hp %s->%s%s",
+		CoopLog(string.format("HIT %s%s by %s weapon=%s%s type=%s dist=%s x%.2f dmg=%.1f%s hp %s->%s%s",
 			targetIsPlayer and "player " or "", tostring(target:GetName()), tostring(shooter and shooter:GetName()),
-			tostring(hit.weapon and hit.weapon.class), tostring(hit.type), hit.damage or 0,
+			tostring(hit.weapon and hit.weapon.class), silenced and "+silencer" or "", tostring(hit.type),
+			dist and string.format("%.0f", dist) or "-", scale or 1, hit.damage or 0,
 			god and string.format(" (god, would be %.1f)", wanted or 0) or "",
 			tostring(before), tostring(after), (after and after <= 0 and before and before > 0) and " KILLED" or ""));
 	end

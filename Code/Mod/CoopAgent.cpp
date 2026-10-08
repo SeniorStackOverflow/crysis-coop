@@ -1108,6 +1108,124 @@ namespace
 		return true;
 	}
 
+	// the vehicle's gun: its trigger
+	void VehicleFire(CPlayer* pMe, IVehicle* pVehicle, bool on)
+	{
+		static bool s_held = false;
+		if (on == s_held)
+			return;
+		s_held = on;
+		pVehicle->OnAction(eVAI_Attack1, on ? eAAM_OnPress : eAAM_OnRelease, on ? 1.0f : 0.0f, pMe->GetEntityId());
+		if (on)
+			++s_bot.bursts;
+	}
+
+	// at a vehicle's gun: the turret follows the view, turned as with the
+	// mouse (the vehicle's rotate actions; how much a unit turns it and which
+	// way are found out as it goes), firing in bursts when on an enemy with
+	// nothing else in the way
+	void VehicleGunner(CPlayer* pMe, IVehicle* pVehicle)
+	{
+		static float s_signYaw = -1.0f, s_signPitch = -1.0f;
+		static float s_lastYawErr = 0.0f, s_lastPitchErr = 0.0f;
+		static int s_worseYaw = 0, s_worsePitch = 0;
+		const CCamera& cam = gEnv->pSystem->GetViewCamera();
+		const Vec3 eye = cam.GetPosition();
+		const Vec3 look = cam.GetViewdir().GetNormalizedSafe(Vec3(0, 1, 0));
+		EntityId enemy = PickEnemy(pMe, eye, 150.0f);
+		IActor* pEnemy = ActorOf(enemy);
+		if (enemy != s_bot.enemy)
+		{
+			if (enemy && enemy != s_bot.lastFought)
+				Event("fighting %s from %s's gun", NameOf(enemy), pVehicle->GetEntity()->GetName());
+			if (enemy)
+				s_bot.lastFought = enemy;
+			s_bot.enemy = enemy;
+		}
+		if (!pEnemy)
+		{
+			VehicleFire(pMe, pVehicle, false);
+			s_bot.doing.Format("at the gun of %s", pVehicle->GetEntity()->GetName());
+			return;
+		}
+		const Vec3 aim = AimPoint(pEnemy->GetEntity());
+		const Vec3 want = (aim - eye).GetNormalizedSafe(look);
+		const float yawErr = Wrap(Yaw(want) - Yaw(look));
+		const float pitchErr = Pitch(want) - Pitch(look);
+		// a turn the wrong way (the error grows while turning): the other way
+		if (fabsf(yawErr) > fabsf(s_lastYawErr) + 0.002f && fabsf(s_lastYawErr) > 0.02f)
+		{
+			if (++s_worseYaw > 6)
+			{
+				s_signYaw = -s_signYaw;
+				s_worseYaw = 0;
+			}
+		}
+		else
+			s_worseYaw = 0;
+		if (fabsf(pitchErr) > fabsf(s_lastPitchErr) + 0.002f && fabsf(s_lastPitchErr) > 0.02f)
+		{
+			if (++s_worsePitch > 6)
+			{
+				s_signPitch = -s_signPitch;
+				s_worsePitch = 0;
+			}
+		}
+		else
+			s_worsePitch = 0;
+		s_lastYawErr = yawErr;
+		s_lastPitchErr = pitchErr;
+		static float s_traceAt = 0.0f;
+		if (Now() >= s_traceAt)
+		{
+			s_traceAt = Now() + 1.0f;
+			CryLogAlways("[CoopAgent] gun aim at %s: yaw off %.3f pitch off %.3f (signs %.0f %.0f), view (%.2f %.2f %.2f)",
+				pEnemy->GetEntity()->GetName(), yawErr, pitchErr, s_signYaw, s_signPitch, look.x, look.y, look.z);
+		}
+		const float gain = 120.0f;
+		if (fabsf(yawErr) > 0.005f)
+			pVehicle->OnAction(eVAI_RotateYaw, eAAM_OnPress, s_signYaw * clamp_tpl(yawErr * gain, -25.0f, 25.0f), pMe->GetEntityId());
+		if (fabsf(pitchErr) > 0.005f)
+			pVehicle->OnAction(eVAI_RotatePitch, eAAM_OnPress, s_signPitch * clamp_tpl(pitchErr * gain, -25.0f, 25.0f), pMe->GetEntityId());
+		// on target, seen, nothing else in the way (its own vehicle aside)
+		const bool onTarget = fabsf(yawErr) + fabsf(pitchErr) < 0.05f;
+		bool clear = false;
+		if (onTarget)
+		{
+			IPhysicalEntity* skip[2];
+			int n = 0;
+			if (IPhysicalEntity* p = pMe->GetEntity()->GetPhysics())
+				skip[n++] = p;
+			if (IPhysicalEntity* p = pVehicle->GetEntity()->GetPhysics())
+				skip[n++] = p;
+			ray_hit hit;
+			if (FirstBlock(eye, look * (aim.GetDistance(eye) + 2.0f), ent_all, skip, n, hit))
+			{
+				clear = hit.pCollider == pEnemy->GetEntity()->GetPhysics() || hit.pt.GetDistance(aim) < 1.0f;
+				if (IVehicle* pTheirs = pEnemy->GetLinkedVehicle())
+					clear = clear || hit.pCollider == pTheirs->GetEntity()->GetPhysics();
+			}
+			if (!clear)
+				++s_bot.heldFire;
+		}
+		else
+			++s_bot.turning;
+		// bursts
+		const float now = Now();
+		if (clear && now >= s_bot.pauseUntil && now < s_bot.burstUntil)
+			VehicleFire(pMe, pVehicle, true);
+		else
+		{
+			VehicleFire(pMe, pVehicle, false);
+			if (now >= s_bot.burstUntil)
+			{
+				s_bot.pauseUntil = now + 0.2f + cry_frand() * 0.3f;
+				s_bot.burstUntil = s_bot.pauseUntil + 0.5f + cry_frand() * 0.6f;
+			}
+		}
+		s_bot.doing.Format("at the gun of %s, fighting %s (%.0f m)", pVehicle->GetEntity()->GetName(), pEnemy->GetEntity()->GetName(), aim.GetDistance(eye));
+	}
+
 	// one step of a fight with an enemy: turn to it, the weapon ready, fire
 	// in bursts when on target, seen, and nothing else in the line of fire
 	void FightStep(CPlayer* pMe, const Vec3& eye, IActor* pEnemy)
@@ -1392,8 +1510,23 @@ namespace
 				if (pMyVehicle)
 					Ask(2, "");
 				else
-					Ask(3, pLeaderVehicle->GetEntity()->GetName());
-				s_bot.doing.Format("getting into %s's vehicle", pLeader->GetEntity()->GetName());
+				{
+					// it walks (runs) to the vehicle and gets in next to it; put
+					// in only when the vehicle is far off (it drove away)
+					const Vec3 at = pLeaderVehicle->GetEntity()->GetWorldPos();
+					const float d = Dist2D(at, pos);
+					if (d < 5.0f || d > 80.0f)
+					{
+						Ask(3, pLeaderVehicle->GetEntity()->GetName());
+						s_bot.doing.Format("getting into %s's vehicle", pLeader->GetEntity()->GetName());
+					}
+					else
+					{
+						MoveTo(pMe, at, 4.0f, true, false, "");
+						s_bot.doing.Format("going to %s's vehicle (%.0f m)", pLeader->GetEntity()->GetName(), d);
+						return;
+					}
+				}
 			}
 			else if (pMyVehicle && !pLeaderVehicle)
 			{
@@ -1404,6 +1537,13 @@ namespace
 		if (pMyVehicle)
 		{
 			Fire(pMe, false);
+			IVehicleSeat* pSeat = pMyVehicle->GetSeatForPassenger(pMe->GetEntityId());
+			if (pSeat && pSeat->IsGunner() && !pSeat->IsDriver() && s_bot.fireAtWill)
+			{
+				VehicleGunner(pMe, pMyVehicle);
+				return;
+			}
+			VehicleFire(pMe, pMyVehicle, false);
 			if (s_bot.doing.empty() || s_bot.doing.find("vehicle") == string::npos)
 				s_bot.doing.Format("riding in %s", pMyVehicle->GetEntity()->GetName());
 			return;
@@ -2966,6 +3106,56 @@ namespace
 		CryLogAlways("[CoopTest] %s carries %d %s now", pActor->GetEntity()->GetName(), count, pAmmo->GetName());
 	}
 
+	// the vehicles near the host's player: name, class, distance, seats (who sits there)
+	void CmdTestVehicles(IConsoleCmdArgs*)
+	{
+		IActor* pHost = g_pGame->GetIGameFramework()->GetClientActor();
+		IVehicleSystem* pVS = g_pGame->GetIGameFramework()->GetIVehicleSystem();
+		if (!pHost || !pVS)
+			return;
+		const Vec3 me = pHost->GetEntity()->GetWorldPos();
+		IVehicleIteratorPtr it = pVS->CreateVehicleIterator();
+		while (IVehicle* pVehicle = it->Next())
+		{
+			IEntity* pEntity = pVehicle->GetEntity();
+			const float d = pEntity->GetWorldPos().GetDistance(me);
+			if (d > 400.0f)
+				continue;
+			string seats;
+			for (unsigned int i = 1; i <= pVehicle->GetSeatCount(); ++i)
+				if (IVehicleSeat* pSeat = pVehicle->GetSeatById((TVehicleSeatId)i))
+					seats += string().Format(" %d:%s%s%s=%s", i, pSeat->GetSeatName(), pSeat->IsDriver() ? "(driver)" : "", pSeat->IsGunner() ? "(gunner)" : "",
+						pSeat->GetPassenger() ? NameOf(pSeat->GetPassenger()) : "-");
+			CryLogAlways("[CoopTest] vehicle %s %s at %.0f m (%.0f %.0f %.0f)%s%s", pEntity->GetName(), pEntity->GetClass()->GetName(), d,
+				pEntity->GetWorldPos().x, pEntity->GetWorldPos().y, pEntity->GetWorldPos().z, pVehicle->IsDestroyed() ? " destroyed" : pEntity->IsHidden() ? " hidden" : "", seats.c_str());
+		}
+	}
+
+	// coop_test_enter <vehicle> <seat id>: the host's player gets in (server)
+	void CmdTestEnter(IConsoleCmdArgs* pArgs)
+	{
+		IActor* pHost = g_pGame->GetIGameFramework()->GetClientActor();
+		// coop_test_enter out: the host gets out
+		if (pHost && pArgs->GetArgCount() > 1 && !stricmp(pArgs->GetArg(1), "out"))
+		{
+			IVehicle* pIn = pHost->GetLinkedVehicle();
+			IVehicleSeat* pMine = pIn ? pIn->GetSeatForPassenger(pHost->GetEntityId()) : 0;
+			const bool ok = pMine && pMine->Exit(false, true);
+			CryLogAlways("[CoopTest] the host gets out: %s", ok ? "ok" : "not in a vehicle");
+			return;
+		}
+		IEntity* pEntity = pArgs->GetArgCount() > 2 ? gEnv->pEntitySystem->FindEntityByName(pArgs->GetArg(1)) : 0;
+		IVehicle* pVehicle = pEntity ? g_pGame->GetIGameFramework()->GetIVehicleSystem()->GetVehicle(pEntity->GetId()) : 0;
+		IVehicleSeat* pSeat = pVehicle ? pVehicle->GetSeatById((TVehicleSeatId)atoi(pArgs->GetArg(2))) : 0;
+		if (!pHost || !pSeat || !gEnv->bServer)
+		{
+			CryLogAlways("[CoopTest] coop_test_enter: no such vehicle or seat");
+			return;
+		}
+		const bool ok = pSeat->Enter(pHost->GetEntityId(), true);
+		CryLogAlways("[CoopTest] the host gets into %s seat %s: %s", pEntity->GetName(), pSeat->GetSeatName(), ok ? "ok" : "refused");
+	}
+
 	void CmdTestPath(IConsoleCmdArgs* pArgs)
 	{
 		IEntity* pTo = pArgs->GetArgCount() > 1 ? gEnv->pEntitySystem->FindEntityByName(pArgs->GetArg(1)) : 0;
@@ -2988,19 +3178,23 @@ namespace
 
 	IVehicleSeat* FreeSeat(IVehicle* pVehicle)
 	{
+		// the gun first (it fights from there), then a passenger's seat, the
+		// wheel last
+		IVehicleSeat* pPassenger = 0;
 		IVehicleSeat* pAny = 0;
 		for (unsigned int i = 1; i <= pVehicle->GetSeatCount(); ++i)
 		{
 			IVehicleSeat* pSeat = pVehicle->GetSeatById((TVehicleSeatId)i);
 			if (!pSeat || pSeat->GetPassenger())
 				continue;
-			// a passenger's seat rather than the wheel
-			if (!pSeat->IsDriver())
+			if (pSeat->IsGunner() && !pSeat->IsDriver())
 				return pSeat;
+			if (!pSeat->IsDriver() && !pPassenger)
+				pPassenger = pSeat;
 			if (!pAny)
 				pAny = pSeat;
 		}
-		return pAny;
+		return pPassenger ? pPassenger : pAny;
 	}
 }
 
@@ -3025,6 +3219,8 @@ void CoopAgent::Init()
 		pFree->SetFlags(pFree->GetFlags() | VF_NOT_NET_SYNCED);
 	gEnv->pConsole->AddCommand("coop_test_ammo", CmdTestAmmo, 0,
 		"Crysis Coop testing: coop_test_ammo <player> <ammo class> <count> sets what he carries of it (server)");
+	gEnv->pConsole->AddCommand("coop_test_vehicles", CmdTestVehicles, 0, "Crysis Coop testing: logs the vehicles near the host's player");
+	gEnv->pConsole->AddCommand("coop_test_enter", CmdTestEnter, 0, "Crysis Coop testing: coop_test_enter <vehicle> <seat id>: the host's player gets in (server)");
 	gEnv->pConsole->AddCommand("coop_test_path", CmdTestPath, 0,
 		"Crysis Coop testing: coop_test_path <entity name> logs the AI navigation's way from the host's player to it (server)");
 }

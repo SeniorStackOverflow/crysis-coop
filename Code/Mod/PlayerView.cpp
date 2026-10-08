@@ -881,6 +881,50 @@ void CPlayerView::ViewSpectatorTarget(SViewParams &viewParams)
 	// sees through the host's eyes. The orbit camera hung over his head
 	// looking straight down while the host lay in a scripted wake-up (a
 	// cutscene played from the host's own eyes, without a camera of its own).
+	// Crysis Coop: a downed player whose teammate rides a vehicle follows the
+	// vehicle from behind and above (the orbit camera below got stuck or flew
+	// off with a vehicle)
+	if (CoopAI::IsCoopSession() && pTarget->IsPlayer() && pTarget->GetLinkedVehicle() && m_in.stats_spectatorMode == 0)
+	{
+		IEntity* pVehicleEntity = pTarget->GetLinkedVehicle()->GetEntity();
+		const Matrix34& vtm = pVehicleEntity->GetWorldTM();
+		AABB box;
+		pVehicleEntity->GetLocalBounds(box);
+		const float size = max(3.0f, (box.max - box.min).GetLength());
+		Vec3 flat = vtm.GetColumn1();
+		flat.z = 0;
+		flat.NormalizeSafe(Vec3(0, 1, 0));
+		const Vec3 pivot = vtm.GetTranslation() + Vec3(0, 0, max(1.5f, box.max.z) + 0.5f);
+		Vec3 goal = pivot - flat * (size * 1.1f + 2.0f) + Vec3(0, 0, size * 0.25f);
+		IPhysicalEntity* pSkip[2];
+		int nSkip = 0;
+		if (IPhysicalEntity* p = pVehicleEntity->GetPhysics())
+			pSkip[nSkip++] = p;
+		if (IPhysicalEntity* p = pTarget->GetEntity()->GetPhysics())
+			pSkip[nSkip++] = p;
+		primitives::sphere sphere;
+		sphere.center = pivot;
+		sphere.r = 0.3f;
+		geom_contact* pContact = 0;
+		const Vec3 dir = goal - pivot;
+		const float hitDist = gEnv->pPhysicalWorld->PrimitiveWorldIntersection(sphere.type, &sphere, dir,
+			ent_static | ent_terrain | ent_rigid | ent_sleeping_rigid, &pContact, 0,
+			(geom_colltype_player << rwi_colltype_bit) | rwi_stop_at_pierceable, 0, 0, 0, pSkip, nSkip);
+		if (hitDist > 0 && pContact)
+			goal = pivot + dir.GetNormalizedSafe() * MAX(0.5f, hitDist - 0.2f);
+		static Vec3 s_vcam(goal);
+		static int s_vframe = 0;
+		const int frame = gEnv->pRenderer->GetFrameID();
+		if (frame - s_vframe > 5 || (s_vcam - goal).GetLengthSquared() > 400.0f)
+			s_vcam = goal;
+		s_vframe = frame;
+		Interpolate(s_vcam, goal, 6.0f, viewParams.frameTime);
+		viewParams.viewID = 3;
+		viewParams.nearplane = 0.1f;
+		viewParams.position = s_vcam;
+		viewParams.rotation = Quat::CreateRotationVDir((pivot + flat * 6.0f - s_vcam).GetNormalizedSafe(flat));
+		return;
+	}
 	if (CoopAI::IsCoopSession() && pTarget->IsPlayer() && !pTarget->GetLinkedVehicle())
 	{
 		viewParams.viewID = 3;
