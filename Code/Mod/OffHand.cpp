@@ -155,6 +155,7 @@ m_range(OFFHAND_RANGE),
 m_usable(false),
 m_heldEntityId(0),
 m_pickingTimer(-1.0f),
+m_coopStuckTime(0.0f),
 m_resetTimer(-1.0f),
 m_preHeldEntityId(0),
 m_grabbedNPCSpecies(eGCT_UNKNOWN),
@@ -2508,6 +2509,40 @@ void COffHand::StartPickUpItem()
 	GetScheduler()->TimerAction(GetCurrentAnimationTime(eIGS_FirstPerson)+100, CSchedulerAction<FinishOffHandAction>::Create(FinishOffHandAction(eOHA_PICK_ITEM,this)), false);
 	RequireUpdate(eIUS_General);
 	m_startPickUp = true;
+}
+
+//=========================================================================================================
+void COffHand::CoopWatchStuck(float frameTime)
+{
+	if (!(m_currentState & (eOHS_PICKING_ITEM | eOHS_PICKING_ITEM2)))
+	{
+		m_coopStuckTime = 0.0f;
+		return;
+	}
+	m_coopStuckTime += frameTime;
+	if (m_coopStuckTime < 3.0f)
+		return;
+	m_coopStuckTime = 0.0f;
+	CryLogAlways("[Coop] %s's left hand was stuck picking something up (state 0x%x): back to the weapon",
+		GetOwnerActor() ? GetOwnerActor()->GetEntity()->GetName() : "?", (unsigned)m_currentState);
+	m_pickingTimer = -1.0f;
+	m_startPickUp = false;
+	if (m_heldEntityId)
+		IgnoreCollisions(false, m_heldEntityId);
+	if (m_mainHand)
+	{
+		if (m_mainHandIsDualWield)
+			m_mainHand->Select(true);
+		else
+		{
+			m_mainHand->ResetDualWield();
+			m_mainHand->SetActionSuffix("");
+			m_mainHand->PlayAction(g_pItemStrings->offhand_off, 0, false, eIPAF_Default | eIPAF_NoBlend);
+		}
+	}
+	else if (GetOwnerActor())
+		GetOwnerActor()->HolsterItem(false);
+	SetOffHandState(eOHS_INIT_STATE);
 }
 
 //=========================================================================================================

@@ -14,6 +14,8 @@
 #include "CoopSave.h"
 #include "CoopRevive.h"
 #include "HUD/HUD.h"
+#include "OffHand.h"
+#include "Item.h"
 #include "IPlayerInput.h"
 #include "Player.h"
 #include "NanoSuit.h"
@@ -351,6 +353,7 @@ namespace
 		float hitAt;            // when it was last hit
 		EntityId lastFought;    // the last one it said it fights (no repeats)
 		int bursts, heldFire, stuckTimes, unseen, turning;   // for the log, now and then
+		float dropAt;           // a thing it holds in the left hand goes, then
 		EntityId downedFor;     // the downed teammate it goes to, since when
 		float downedSince;
 		float statsAt;
@@ -367,7 +370,7 @@ namespace
 			switchAt(0), attackHeld(false), checkPos(ZERO), checkAt(0), stuck(0), strafeUntil(0), strafeSide(1), jump(false),
 			farSince(-1), askAt(0), useHeld(false), useFor(0), useSince(0), lastHealth(-1), wasDown(false), named(false),
 			weaponAt(0), loot(0), lootSince(0), useAt(0), pathGoal(ZERO), pathAt(-100), pathAskAt(0), reviveSince(-1),
-			dodgeUntil(0), dodgeSide(1), retreating(false), hitAt(-100), lastFought(0), bursts(0), heldFire(0), stuckTimes(0), unseen(0), turning(0), statsAt(0), downedFor(0), downedSince(0), enemySeenAt(-100),
+			dodgeUntil(0), dodgeSide(1), retreating(false), hitAt(-100), lastFought(0), bursts(0), heldFire(0), stuckTimes(0), unseen(0), turning(0), statsAt(0), dropAt(0), downedFor(0), downedSince(0), enemySeenAt(-100),
 			cover(ZERO), haveCover(false), coverAskAt(0), retreatSince(-100), recoveredAt(-100),
 			coverAt(-100), peekUntil(0), peekUp(true) {}
 	} s_bot;
@@ -1225,6 +1228,26 @@ namespace
 				seen = isDown;
 			}
 		}
+		// something caught in the left hand by the use key (a crate, a bottle
+		// next to a weapon it went to pick up): its rifle in one hand, the
+		// other at its face; thrown away again
+		if (COffHand* pOffHand = static_cast<COffHand*>(pMe->GetWeaponByClass(CItem::sOffHandClass)))
+		{
+			if (pOffHand->GetOffHandState() & (eOHS_HOLDING_OBJECT | eOHS_HOLDING_NPC))
+			{
+				if (s_bot.dropAt <= 0.0f)
+					s_bot.dropAt = Now() + 1.0f;
+				else if (Now() >= s_bot.dropAt)
+				{
+					Press(pMe, g_pGame->Actions().use, true);
+					Press(pMe, g_pGame->Actions().use, false);
+					s_bot.dropAt = Now() + 1.5f;
+					Event("throws away what it caught in the left hand");
+				}
+			}
+			else
+				s_bot.dropAt = 0.0f;
+		}
 		if (down || (pView && pView->IsPlayingCutScene()))
 		{
 			Fire(pMe, false);
@@ -1233,8 +1256,12 @@ namespace
 			return;
 		}
 		// the name the host sees
-		if (!s_bot.named && s_pName->GetString()[0] && strcmp(pMe->GetEntity()->GetName(), s_pName->GetString()))
+		// (again after joining again: a checkpoint load gives it the default
+		// name back)
+		static float s_nameAt = 0.0f;
+		if (s_pName->GetString()[0] && strcmp(pMe->GetEntity()->GetName(), s_pName->GetString()) && Now() >= s_nameAt)
 		{
+			s_nameAt = Now() + 5.0f;
 			s_bot.named = true;
 			string cmd;
 			cmd.Format("name %s", s_pName->GetString());

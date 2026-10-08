@@ -145,6 +145,10 @@ public:
 	bool EvaluateStateTransition(int requestedAction, int activationMode, int inputMethod);
 	bool PreExecuteAction(int requestedAction, int activationMode, bool forceSelect =false);
 	void CancelAction();
+	// Crysis Coop: the hand left halfway through picking an item up (the
+	// item gone meanwhile, a network turn) goes back after a while: until
+	// then the main weapon is held in one hand and can not be reloaded
+	void CoopWatchStuck(float frameTime);
 
 	void IgnoreCollisions(bool ignore, EntityId entityId=0);
 	void DrawNear(bool drawNear, EntityId entityId=0);
@@ -224,6 +228,7 @@ private:
 
 	float					m_range;
 	float					m_pickingTimer;
+	float					m_coopStuckTime;
 	float					m_resetTimer;
 
 	int						m_usable;

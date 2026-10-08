@@ -44,7 +44,11 @@ void CShotValidator::AddShot(EntityId playerId, EntityId weaponId, uint16 seq, u
 	TShot shot(seq, weaponId, now, shotLife);
 
 	TChannelHits::iterator chit=m_pendinghits.find(channelId);
-	assert(chit!=m_pendinghits.end());
+	// Crysis Coop: a shot that arrives after its player's channel went (a
+	// checkpoint load drops every channel while a friend or the AI companion
+	// is firing): nothing to check it against (this read freed memory)
+	if (chit==m_pendinghits.end() || m_shots.find(channelId)==m_shots.end())
+		return;
 	THits &hits=chit->second;
 	THits::iterator hit=hits.find(shot);
 
@@ -128,7 +132,9 @@ bool CShotValidator::ProcessHit(const HitInfo &hitInfo)
 	}
 
 	TChannelHits::iterator chit=m_pendinghits.find(channelId);
-	assert(chit!=m_pendinghits.end());
+	// Crysis Coop: the shooter's channel already gone (see AddShot)
+	if (chit==m_pendinghits.end())
+		return false;
 	THits &hits=chit->second;
 	hits.insert(THits::value_type(shot, THit(hitInfo, now)));
 

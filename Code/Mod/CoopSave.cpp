@@ -429,6 +429,49 @@ namespace
 	bool s_pending = false;
 	string s_pendingName;
 	float s_pendingFor = 0.0f;
+
+	// Before a checkpoint is saved the soldiers forget the other players
+	// (friends, the AI companion): those are not in the savegame, and a
+	// soldier who still had one of them as a target came back from the load
+	// with an empty target: the AI system crashed on the first update
+	// (CPuppet::UpdatePuppetInternalState). Their AI objects are switched off
+	// a moment (the soldiers drop them as they do a downed player), the game
+	// is saved, and they are switched on again.
+	std::vector<EntityId> s_quieted;
+	float s_quietUntil = -1.0f;
+
+	bool QuietRemotePlayers()
+	{
+		s_quieted.clear();
+		IGameFramework* pFramework = g_pGame->GetIGameFramework();
+		IActor* pLocal = pFramework->GetClientActor();
+		IActorIteratorPtr pIt = pFramework->GetIActorSystem()->CreateActorIterator();
+		while (IActor* pActor = pIt->Next())
+		{
+			if (!pActor->IsPlayer() || pActor == pLocal)
+				continue;
+			IAIObject* pAI = pActor->GetEntity()->GetAI();
+			if (pAI && pAI->IsEnabled())
+			{
+				pAI->Event(AIEVENT_DISABLE, 0);
+				s_quieted.push_back(pActor->GetEntityId());
+			}
+		}
+		return !s_quieted.empty();
+	}
+
+	void UnquietRemotePlayers()
+	{
+		for (size_t i = 0; i < s_quieted.size(); ++i)
+		{
+			IActor* pActor = g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(s_quieted[i]);
+			IAIObject* pAI = pActor ? pActor->GetEntity()->GetAI() : 0;
+			// a downed one stays off (no target while he waits to be revived)
+			if (pAI && !pAI->IsEnabled() && pActor->GetHealth() > 0)
+				pAI->Event(AIEVENT_ENABLE, 0);
+		}
+		s_quieted.clear();
+	}
 	float s_retryTimer = 0.0f;
 	string s_readyLevel;            // the coop level the server runs
 	bool s_levelStartSaved = false;
@@ -1098,6 +1141,8 @@ void CoopSave::OnLoadingStart(const char* levelName)
 	s_readyLevel.clear();
 	s_pending = false;
 	s_levelStartSaved = false;
+	s_quietUntil = -1.0f;
+	s_quieted.clear();
 	// coop_continue: some other level than the saved one (coop_host, a level
 	// change): no load then
 	if ((s_loadState == eLS_WaitMap || s_loadState == eLS_WaitLevel) && stricmp(ShortLevelName(levelName), s_load.level.c_str()))
@@ -1198,8 +1243,25 @@ void CoopSave::Update(float frameTime)
 		}
 		return;
 	}
+	// first the soldiers forget the other players (see QuietRemotePlayers)
+	if (s_quietUntil < 0.0f)
+	{
+		if (QuietRemotePlayers())
+		{
+			s_quietUntil = gEnv->pTimer->GetCurrTime() + 0.6f;
+			s_retryTimer = 0.0f;
+			return;
+		}
+	}
+	else if (gEnv->pTimer->GetCurrTime() < s_quietUntil)
+	{
+		s_retryTimer = 0.0f;
+		return;
+	}
+	s_quietUntil = -1.0f;
 	s_pending = false;
 	SaveCheckpoint(s_pendingName);
+	UnquietRemotePlayers();
 }
 
 // ---------------------------------------------------------------------------
