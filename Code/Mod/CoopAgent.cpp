@@ -3776,9 +3776,12 @@ namespace
 			CryLogAlways("[CoopTest] coop_test_vehview: not in a vehicle");
 			return;
 		}
-		pVehicle->OnAction(eVAI_ChangeView, eAAM_OnPress, 1.0f, pMe->GetEntityId());
-		pVehicle->OnAction(eVAI_ChangeView, eAAM_OnRelease, 0.0f, pMe->GetEntityId());
-		CryLogAlways("[CoopTest] next view in %s", pVehicle->GetEntity()->GetName());
+		IVehicleSeat* pSeat = pVehicle->GetSeatForPassenger(pMe->GetEntityId());
+		if (!pSeat)
+			return;
+		const TVehicleViewId next = pSeat->GetNextView(pSeat->GetCurrentView());
+		const bool ok = pSeat->SetView(next);
+		CryLogAlways("[CoopTest] view %d in %s's %s: %s", (int)next, pVehicle->GetEntity()->GetName(), pSeat->GetSeatName(), ok ? "set" : "refused");
 	}
 
 	// coop_test_enter <vehicle> <seat id>: the host's player gets in (server)

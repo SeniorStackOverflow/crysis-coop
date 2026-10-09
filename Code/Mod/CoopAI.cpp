@@ -1718,8 +1718,58 @@ namespace
 	}
 }
 
+extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void* hModule, char* lpFilename, unsigned long nSize);
+
+namespace
+{
+	// The campaign level's own models (its editor brushes: stepping stones,
+	// planks, rocks in Levels/<level>/brush/*.cgf of its level.pak) are named
+	// with the original level's path. The co-op copy's level.pak is opened
+	// under the copy's path, so they were not found: yellow default balls.
+	// The original level.pak is opened under its own path too
+	string s_originalPak;
+
+	void OpenOriginalLevelPak(const char* levelName)
+	{
+		if (!gEnv->pCryPak)
+			return;
+		if (!s_originalPak.empty())
+		{
+			gEnv->pCryPak->ClosePack(s_originalPak.c_str());
+			s_originalPak.clear();
+		}
+		const char* base = levelName ? strrchr(levelName, '/') : 0;
+		base = base ? base + 1 : levelName;
+		if (!base || strnicmp(base, "coop_", 5) != 0)
+			return;
+		const string level = base + 5;
+		// the game's folder: Bin32's parent
+		char exe[520] = "";
+		GetModuleFileNameA(0, exe, sizeof(exe));
+		for (int i = 0; i < 2; ++i)
+		{
+			char* slash = strrchr(exe, '\\');
+			if (char* other = strrchr(exe, '/'))
+				if (!slash || other > slash)
+					slash = other;
+			if (slash)
+				*slash = 0;
+		}
+		const string pak = string(exe) + "\\Game\\Levels\\" + level + "\\level.pak";
+		const string bind = "Levels/" + level + "/";
+		if (gEnv->pCryPak->OpenPack(bind.c_str(), pak.c_str()))
+		{
+			s_originalPak = pak;
+			CryLogAlways("[Coop] the campaign level's own models: %s opened as %s", pak.c_str(), bind.c_str());
+		}
+		else
+			CryLogAlways("[Coop] could not open %s (its brushes will be yellow balls)", pak.c_str());
+	}
+}
+
 void CoopAI::OnLoadingStart(const char* levelName)
 {
+	OpenOriginalLevelPak(levelName);
 	CoopNetSerClearTrace();
 	CoopSave::OnLoadingStart(levelName);
 	ResetFlowMirror();
