@@ -3742,6 +3742,45 @@ namespace
 		CryLogAlways("[CoopTest] %s %s %s", pPlayer->GetEntity()->GetName(), press ? "presses" : "lets go of", pArgs->GetArg(1));
 	}
 
+	// coop_test_cam: this game's camera (where, which way), the view it
+	// comes from, the player's vehicle seat and its view
+	void CmdTestCam(IConsoleCmdArgs*)
+	{
+		const CCamera& cam = gEnv->pSystem->GetViewCamera();
+		const Vec3 p = cam.GetPosition(), d = cam.GetViewdir();
+		IViewSystem* pViews = g_pGame->GetIGameFramework()->GetIViewSystem();
+		IView* pView = pViews ? pViews->GetActiveView() : 0;
+		const SViewParams* pParams = pView ? pView->GetCurrentParams() : 0;
+		IActor* pMe = g_pGame->GetIGameFramework()->GetClientActor();
+		IVehicle* pVehicle = pMe ? pMe->GetLinkedVehicle() : 0;
+		IVehicleSeat* pSeat = pVehicle ? pVehicle->GetSeatForPassenger(pMe->GetEntityId()) : 0;
+		IVehicleView* pSeatView = pSeat ? pSeat->GetView(pSeat->GetCurrentView()) : 0;
+		const float water = gEnv->p3DEngine->GetWaterLevel(&p);
+		CryLogAlways("[CoopTest] water there %.1f (%s)", water, water > WATER_LEVEL_UNKNOWN && p.z < water ? "UNDER WATER" : "above");
+		CryLogAlways("[CoopTest] camera (%.1f, %.1f, %.1f) looking (%.2f, %.2f, %.2f) fov %.2f; view of %s (params at %.1f %.1f %.1f); me at %s; vehicle %s at %s seat %s view %d %s",
+			p.x, p.y, p.z, d.x, d.y, d.z, cam.GetFov(), pView ? NameOf(pView->GetLinkedId()) : "-",
+			pParams ? pParams->position.x : 0.0f, pParams ? pParams->position.y : 0.0f, pParams ? pParams->position.z : 0.0f,
+			pMe ? Vec(pMe->GetEntity()->GetWorldPos()).c_str() : "-", pVehicle ? pVehicle->GetEntity()->GetName() : "-",
+			pVehicle ? Vec(pVehicle->GetEntity()->GetWorldPos()).c_str() : "-", pSeat ? pSeat->GetSeatName() : "-",
+			pSeat ? (int)pSeat->GetCurrentView() : -1, pSeatView ? (pSeatView->IsThirdPerson() ? "third person" : "first person") : "-");
+	}
+
+	// coop_test_vehview: this game's player in a vehicle takes the seat's next
+	// view (first person / third person), as the view key does
+	void CmdTestVehView(IConsoleCmdArgs*)
+	{
+		IActor* pMe = g_pGame->GetIGameFramework()->GetClientActor();
+		IVehicle* pVehicle = pMe ? pMe->GetLinkedVehicle() : 0;
+		if (!pVehicle)
+		{
+			CryLogAlways("[CoopTest] coop_test_vehview: not in a vehicle");
+			return;
+		}
+		pVehicle->OnAction(eVAI_ChangeView, eAAM_OnPress, 1.0f, pMe->GetEntityId());
+		pVehicle->OnAction(eVAI_ChangeView, eAAM_OnRelease, 0.0f, pMe->GetEntityId());
+		CryLogAlways("[CoopTest] next view in %s", pVehicle->GetEntity()->GetName());
+	}
+
 	// coop_test_enter <vehicle> <seat id>: the host's player gets in (server)
 	void CmdTestEnter(IConsoleCmdArgs* pArgs)
 	{
@@ -3866,6 +3905,8 @@ void CoopAgent::Init()
 	gEnv->pConsole->AddCommand("coop_test_onehand", CmdTestOneHand, 0, "Crysis Coop testing: coop_test_onehand <player> [grab]: his weapon in the one-hand pose, or (grab) his left hand held up (this game)");
 	gEnv->pConsole->AddCommand("coop_test_anim", CmdTestAnim, 0, "Crysis Coop testing: coop_test_anim <player>: logs his animation graph inputs as this game plays them");
 	gEnv->pConsole->AddCommand("coop_test_key", CmdTestKey, 0, "Crysis Coop testing: coop_test_key <action> <1|0>: this game's player presses (lets go of) a key's action");
+	gEnv->pConsole->AddCommand("coop_test_cam", CmdTestCam, 0, "Crysis Coop testing: coop_test_cam logs this game's camera, its view and the vehicle seat's view");
+	gEnv->pConsole->AddCommand("coop_test_vehview", CmdTestVehView, 0, "Crysis Coop testing: coop_test_vehview: the vehicle seat's next view for this game's player");
 	gEnv->pConsole->AddCommand("coop_test_enter", CmdTestEnter, 0, "Crysis Coop testing: coop_test_enter <vehicle> <seat id>: the host's player gets in (server)");
 	gEnv->pConsole->AddCommand("coop_test_path", CmdTestPath, 0,
 		"Crysis Coop testing: coop_test_path <entity name> logs the AI navigation's way from the host's player to it (server)");

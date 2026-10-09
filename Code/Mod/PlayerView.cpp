@@ -868,6 +868,37 @@ void CPlayerView::ViewVehicle(SViewParams &viewParams)
 	{
 		m_in.pVehicle->UpdateView(viewParams, m_in.entityId);
 		viewParams.viewID = 2;		
+		// Crysis Coop: a seat's view that has no place (its third person view
+		// after a checkpoint, or switched to in the network game) puts the
+		// camera at the map's origin, under the sea: grey, the sound of
+		// water. The seat goes back to a view that has one (first person)
+		if (CoopAI::IsCoopSession() && m_in.entityId == g_pGame->GetIGameFramework()->GetClientActorId()
+			&& viewParams.position.GetDistance(m_in.pVehicle->GetEntity()->GetWorldPos()) > 50.0f)
+		{
+			IVehicleSeat* pSeat = m_in.pVehicle->GetSeatForPassenger(m_in.entityId);
+			if (pSeat)
+			{
+				const TVehicleViewId was = pSeat->GetCurrentView();
+				TVehicleViewId first = was;
+				for (TVehicleViewId id = pSeat->GetNextView(was); id != was && id != InvalidVehicleViewId; id = pSeat->GetNextView(id))
+					if (IVehicleView* pView = pSeat->GetView(id))
+						if (!pView->IsThirdPerson())
+						{
+							first = id;
+							break;
+						}
+				static float s_loggedAt = -100.0f;
+				const float now = gEnv->pTimer->GetCurrTime();
+				if (now - s_loggedAt > 5.0f)
+				{
+					s_loggedAt = now;
+					CryLogAlways("[Coop] %s's camera in %s was %.0f m off (view %d): view %d now", m_in.pVehicle->GetEntity()->GetName(),
+						pSeat->GetSeatName(), viewParams.position.GetDistance(m_in.pVehicle->GetEntity()->GetWorldPos()), (int)was, (int)first);
+				}
+				if (first != was && pSeat->SetView(first))
+					m_in.pVehicle->UpdateView(viewParams, m_in.entityId);
+			}
+		}
 	}
 }
 
