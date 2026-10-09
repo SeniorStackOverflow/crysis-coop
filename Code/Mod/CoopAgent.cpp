@@ -1357,8 +1357,12 @@ namespace
 		int switches;
 		int thrown;
 		float steadySince;      // aimed at the throw since (the host's game must have that aim too)
+		int kills;              // how many it is to kill
+		int need;               // and needs to (else it does not throw)
+		float checkAt;          // when it looks again whether they are still there
+		bool rechecked;         // looked again before letting go
 		SGrenade(): phase(0), phaseAt(0), nextAt(0), scanAt(0), target(0), at(ZERO), targetAt(ZERO), yaw(0), pitch(0), flight(0), ordered(false), orderAt(0),
-			hidden(0), hiddenPos(ZERO), hiddenSeenAt(-100), switches(0), thrown(0), steadySince(-1) {}
+			hidden(0), hiddenPos(ZERO), hiddenSeenAt(-100), switches(0), thrown(0), steadySince(-1), kills(0), rechecked(false), need(2), checkAt(0) {}
 	} s_gren;
 
 	const float GRENADE_COOLDOWN = 14.0f;
@@ -1417,15 +1421,21 @@ namespace
 				if (FirstBlock(from, dir0 * 3.0f, ent_static | ent_terrain | ent_rigid | ent_sleeping_rigid, &pSkip, pSkip ? 1 : 0, hit, eT_Walk))
 					clear = false;
 			}
+			// the arc in 16 pieces, three rays side by side (it is no point: a
+			// post or a branch just beside the middle throws it back)
 			Vec3 prev = eye;
-			for (int i = 1; i <= 10 && clear; ++i)
+			for (int i = 1; i <= 16 && clear; ++i)
 			{
-				const float ti = t * i / 10.0f;
+				const float ti = t * i / 16.0f;
 				const Vec3 p = eye + flat * (v * cos_tpl(a) * ti) + Vec3(0, 0, v * sin_tpl(a) * ti - 0.5f * g * ti * ti);
-				ray_hit hit;
-				if (FirstBlock(prev, p - prev, ent_static | ent_terrain | ent_rigid | ent_sleeping_rigid, &pSkip, pSkip ? 1 : 0, hit, eT_Walk)
-					&& hit.pt.GetDistance(to) > 2.5f)
-					clear = false;
+				for (int s = -1; s <= 1 && clear; ++s)
+				{
+					const Vec3 side = right * (0.2f * s);
+					ray_hit hit;
+					if (FirstBlock(prev + side, p - prev, ent_static | ent_terrain | ent_rigid | ent_sleeping_rigid, &pSkip, pSkip ? 1 : 0, hit, eT_Walk)
+						&& hit.pt.GetDistance(to) > 2.5f)
+						clear = false;
+				}
 				prev = p;
 			}
 			if (clear)
@@ -1454,7 +1464,7 @@ namespace
 
 	// where the enemies go: their speed from where they were half a second
 	// ago (a running one is not where it lands)
-	struct STrack { Vec3 pos; float at; Vec3 vel; };
+	struct STrack { Vec3 pos; float at; Vec3 vel; int still; };   // still: half seconds standing in a row
 	std::map<EntityId, STrack> s_tracks;
 
 	Vec3 Predict(IActor* pActor, float ahead)
@@ -1479,10 +1489,12 @@ namespace
 				t.pos = p;
 				t.at = now;
 				t.vel.zero();
+				t.still = 0;
 			}
 			else if (now - t.at >= 0.5f)
 			{
 				t.vel = (p - t.pos) / (now - t.at);
+				t.still = t.vel.GetLength() < 1.0f ? t.still + 1 : 0;
 				t.vel.z = 0.0f;
 				t.pos = p;
 				t.at = now;
@@ -1490,21 +1502,30 @@ namespace
 		}
 	}
 
-	// where to throw: grenades are few to waste one on, so where it goes off
-	// two or more of them (three for its last one) will be within 3.5 m,
-	// standing (a grenade kills a soldier up to about 6 m in the open; its
-	// throw lands within 2 or 3 m; a running one is gone by then), where
-	// they will be when it lands; 16 to 32 m away, a clear throw, none of
-	// its own close.
-	// Told to (the AI agent): one will do. Known enemies only: seen now, or
-	// the one it fought hiding where it last saw him
-	bool PickGrenadeTarget(CPlayer* pMe, const Vec3& pos, const Vec3& eye, const string& name, bool ordered, int left)
+	// a grenade's damage to an enemy so far from where it goes off, as the
+	// game works it out (all of it within 5 m, then less and less to 15 m),
+	// less behind something solid
+	float GrenadeDamage(const Vec3& at, const Vec3& foe, float extra)
 	{
-		const float LETHAL = 3.5f;
-		const int need = ordered ? 1 : (left <= 1 ? 3 : 2);
-		// the enemies it knows of, where they will be (about 1.5 s on)
-		struct SFoe { IActor* pActor; Vec3 at; bool known; bool still; };
-		std::vector<SFoe> foes;
+		const float d = foe.GetDistance(at) + extra;
+		float effect = 1.0f;
+		if (d > 5.0f)
+		{
+			const float k = max(0.0f, (10.0f - min(d - 5.0f, 10.0f)) / 10.0f);
+			effect = k * k;
+		}
+		IPhysicalEntity* pSkip = 0;
+		ray_hit hit;
+		if (FirstBlock(at + Vec3(0, 0, 0.5f), foe + Vec3(0, 0, 1.0f) - (at + Vec3(0, 0, 0.5f)), ent_static | ent_rigid | ent_sleeping_rigid, &pSkip, 0, hit, eT_Walk))
+			effect *= 0.4f;
+		return 250.0f * effect;
+	}
+
+	// the enemies it knows of now, where they will be when it goes off, their health
+	struct SFoe { IActor* pActor; Vec3 at; bool known; bool still; float health; };
+
+	void GrenadeFoes(CPlayer* pMe, const Vec3& pos, const Vec3& eye, float ahead, std::vector<SFoe>& foes)
+	{
 		IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
 		while (IActor* pActor = it->Next())
 		{
@@ -1517,60 +1538,103 @@ namespace
 			const bool hiding = !seen && pActor->GetEntityId() == s_gren.hidden && Now() - s_gren.hiddenSeenAt < 8.0f
 				&& pEntity->GetWorldPos().GetDistance(s_gren.hiddenPos) < 4.0f;
 			std::map<EntityId, STrack>::const_iterator tr = s_tracks.find(pActor->GetEntityId());
-			const bool still = tr != s_tracks.end() && tr->second.vel.GetLength() < 1.5f;
-			SFoe f = { pActor, Predict(pActor, 1.5f), seen || hiding, still };
+			const bool still = tr != s_tracks.end() && tr->second.still >= 2;
+			// a soldier has 180 on the host (this game may scale it)
+			const float health = 180.0f * min(1.0f, (float)pActor->GetHealth() / (float)max(1, pActor->GetMaxHealth()));
+			SFoe f = { pActor, Predict(pActor, ahead), seen || hiding, still, health };
 			foes.push_back(f);
 		}
-		float bestScore = 0.0f;
+	}
+
+	// how many it would kill (and hurt) going off there: with room for where
+	// it lands and where they step meanwhile (2.5 m; 4 m for a running one)
+	int GrenadeKills(const std::vector<SFoe>& foes, const Vec3& at, int* pHurt = 0)
+	{
+		int kills = 0, hurt = 0;
+		for (size_t k = 0; k < foes.size(); ++k)
+		{
+			const float dmg = GrenadeDamage(at, foes[k].at, foes[k].still ? 2.5f : 4.0f);
+			if (dmg >= foes[k].health)
+				++kills;
+			else if (dmg > 30.0f)
+				++hurt;
+		}
+		if (pHurt)
+			*pHurt = hurt;
+		return kills;
+	}
+
+	// where to throw: grenades are few to waste one on, so only where it
+	// would kill three (two when it has four or more), counted with the
+	// game's damage, their health (a hurt one dies farther away) and room for
+	// where it lands, at where they will be when it goes off. The places
+	// tried: at each enemy it knows of, between each two, the middle of
+	// each group. 16 to 32 m away, a clear throw, none of its own close.
+	// Told to (the AI agent): one will do
+	bool PickGrenadeTarget(CPlayer* pMe, const Vec3& pos, const Vec3& eye, const string& name, bool ordered, int left)
+	{
+		// measured: where it counted on two it killed 1.1 a throw (they step
+		// away, the soldiers dodge a grenade they see), where it counted on
+		// three it killed three: three, or two when it has grenades to spare
+		const int need = ordered ? 1 : (left >= 4 ? 2 : 3);
+		// the throw starts in about 1.5 s and flies about 1.2 s
+		std::vector<SFoe> foes;
+		GrenadeFoes(pMe, pos, eye, 2.7f, foes);
+		std::vector<std::pair<Vec3, size_t> > places;
 		for (size_t i = 0; i < foes.size(); ++i)
 		{
 			if (!foes[i].known)
 				continue;
 			if (!name.empty() && stricmp(name.c_str(), foes[i].pActor->GetEntity()->GetName()))
 				continue;
-			// the middle of those around him (a throw between them gets more)
-			Vec3 sum(ZERO);
-			int around = 0;
+			places.push_back(std::make_pair(foes[i].at, i));
+			Vec3 sum(foes[i].at);
+			int n = 1;
 			for (size_t k = 0; k < foes.size(); ++k)
-				if (foes[k].at.GetDistance(foes[i].at) < 6.0f)
+				if (k != i && foes[k].at.GetDistance(foes[i].at) < 9.0f)
 				{
-					sum += foes[k].at;
-					++around;
+					places.push_back(std::make_pair((foes[i].at + foes[k].at) * 0.5f, i));
+					if (foes[k].at.GetDistance(foes[i].at) < 6.0f)
+					{
+						sum += foes[k].at;
+						++n;
+					}
 				}
-			Vec3 aim = sum / (float)around;
+			if (n > 2)
+				places.push_back(std::make_pair(sum / (float)n, i));
+		}
+		float bestScore = 0.0f;
+		for (size_t p = 0; p < places.size(); ++p)
+		{
+			Vec3 aim = places[p].first;
+			const size_t i = places[p].second;
 			aim.z = foes[i].at.z;
-			// a middle out of reach of him: at him
-			if (aim.GetDistance(foes[i].at) > LETHAL - 1.0f)
-				aim = foes[i].at;
-			int lethal = 0, hurt = 0;
-			for (size_t k = 0; k < foes.size(); ++k)
-			{
-				const float d = foes[k].at.GetDistance(aim);
-				if (d < LETHAL && foes[k].still)
-					++lethal;
-				else if (d < 8.0f)
-					++hurt;
-			}
-			if (lethal < need)
+			int hurt = 0;
+			const int kills = GrenadeKills(foes, aim, &hurt);
+			if (kills < need)
 				continue;
 			const float d = Dist2D(aim, pos);
 			if (d < GRENADE_NEAR || d > 32.0f || fabsf(aim.z - pos.z) > 6.0f)
 				continue;
 			// more of them killed first, then more of them hurt, then nearer
-			const float score = lethal * 10.0f + hurt * 3.0f + (32.0f - d) * 0.1f;
+			const float score = kills * 10.0f + hurt * 2.0f + (32.0f - d) * 0.05f;
 			if (score <= bestScore || !GrenadeSafe(aim))
 				continue;
+			// it skids on 1.4 m on landing (23 throws measured): it lands short
+			const Vec3 throwAt = aim - Vec3(aim.x - pos.x, aim.y - pos.y, 0).GetNormalizedSafe(Vec3(0, 1, 0)) * 1.4f;
 			float pitch, flight;
-			if (!GrenadeArc(pMe, eye, aim + Vec3(0, 0, 0.3f), pitch, flight))
+			if (!GrenadeArc(pMe, eye, throwAt + Vec3(0, 0, 0.3f), pitch, flight))
 				continue;
 			bestScore = score;
 			s_gren.target = foes[i].pActor->GetEntityId();
 			s_gren.at = aim;
 			s_gren.targetAt = foes[i].at;
-			s_gren.yaw = Yaw(aim - eye);
+			s_gren.yaw = Yaw(throwAt - eye);
+			s_gren.need = need;
 			s_gren.pitch = pitch;
 			s_gren.flight = flight;
-			s_gren.why.Format("%d standing within %.1f m of where it lands, %d more close", lethal, LETHAL, hurt);
+			s_gren.kills = kills;
+			s_gren.why.Format("%d to be killed, %d hurt", kills, hurt);
 		}
 		return bestScore > 0.0f;
 	}
@@ -1622,25 +1686,28 @@ namespace
 			s_gren.phase = 1;
 			s_gren.phaseAt = now;
 			s_gren.steadySince = -1.0f;
+			s_gren.rechecked = false;
 			Fire(pMe, false);
-			Event("throws a grenade at %s (%s, %.0f m, %.0f degrees up, %.1f s in the air, at %s)", NameOf(s_gren.target), s_gren.why.c_str(),
-				Dist2D(s_gren.at, pos), RAD2DEG(s_gren.pitch), s_gren.flight, Vec(s_gren.at).c_str());
+			Event("throws a grenade at %s (%s, %.0f m, %.0f degrees up, %.1f s in the air, at %s from %s)", NameOf(s_gren.target), s_gren.why.c_str(),
+				Dist2D(s_gren.at, pos), RAD2DEG(s_gren.pitch), s_gren.flight, Vec(s_gren.at).c_str(), Vec(pos).c_str());
 		}
-		// it keeps the throw's direction meanwhile; when the one it throws at
-		// goes elsewhere (2 m and more), the throw goes with him
-		if (IActor* pTarget = ActorOf(s_gren.target))
-			if (pTarget->GetHealth() > 0 && s_gren.phase < 3)
+		// before the pin is out: still there? (the throw takes 2 or 3 s; a
+		// group that broke up is not worth a grenade any more)
+		if (s_gren.phase == 1 && now >= s_gren.checkAt)
+		{
+			s_gren.checkAt = now + 0.25f;
+			std::vector<SFoe> foes;
+			GrenadeFoes(pMe, pos, eye, 2.5f, foes);
+			const int kills = GrenadeKills(foes, s_gren.at);
+			// chosen for three: still worth it with two left there
+			if (kills < max(1, min(s_gren.need, 2)))
 			{
-				const Vec3 moved = Predict(pTarget, 1.5f) - s_gren.targetAt;
-				float pitch, flight;
-				if (moved.GetLength() > 2.0f && GrenadeSafe(s_gren.at + moved) && GrenadeArc(pMe, eye, s_gren.at + moved + Vec3(0, 0, 0.3f), pitch, flight))
-				{
-					s_gren.at += moved;
-					s_gren.targetAt += moved;
-					s_gren.yaw = Yaw(s_gren.at - eye);
-					s_gren.pitch = pitch;
-				}
+				Event("no grenade after all: they moved (%d to be killed there now)", kills);
+				s_gren.phase = 0;
+				s_gren.nextAt = now + 2.0f;
+				return false;
 			}
+		}
 		Fire(pMe, false);
 		s_ctl.look = true;
 		s_ctl.yaw = s_gren.yaw;
@@ -1667,7 +1734,7 @@ namespace
 				s_gren.steadySince = -1.0f;
 			else if (s_gren.steadySince < 0.0f)
 				s_gren.steadySince = now;
-			else if (now - s_gren.steadySince > 0.5f)
+			else if (now - s_gren.steadySince > 0.3f)
 			{
 				Press(pMe, g_pGame->Actions().grenade, true);
 				s_gren.phase = 2;
@@ -1679,11 +1746,27 @@ namespace
 		{
 			// the pin out (the hand ready), then let go
 			const bool ready = pOffHand->GetOffHandState() == eOHS_HOLDING_GRENADE;
+			// about to let go: still as good there (they moved meanwhile)? Else
+			// the best place now (the pin is out: it goes somewhere)
+			if (ready && !s_gren.rechecked && now - s_gren.phaseAt > 0.4f)
+			{
+				s_gren.rechecked = true;
+				std::vector<SFoe> foes;
+				GrenadeFoes(pMe, pos, eye, s_gren.flight + 0.3f, foes);
+				const int now_kills = GrenadeKills(foes, s_gren.at);
+				if (now_kills < s_gren.kills)
+				{
+					const Vec3 was = s_gren.at;
+					if (PickGrenadeTarget(pMe, pos, eye, string(), true, 99) && Dist2D(s_gren.at, was) > 1.0f)
+						Event("throws elsewhere: %s (there now only %d)", s_gren.why.c_str(), now_kills);
+				}
+			}
 			if (off >= 0.04f)
 				s_gren.steadySince = now;
-			if ((ready && now - s_gren.steadySince > 0.6f && now - s_gren.phaseAt > 0.6f) || now - s_gren.phaseAt > 3.0f)
+			if ((ready && now - s_gren.steadySince > 0.4f && now - s_gren.phaseAt > 0.5f) || now - s_gren.phaseAt > 3.0f)
 			{
 				Press(pMe, g_pGame->Actions().grenade, false);
+				CryLogAlways("[CoopAgent] grenade let go: aimed at %s from %s", Vec(s_gren.at).c_str(), Vec(pos).c_str());
 				s_gren.phase = 3;
 				s_gren.phaseAt = now;
 				++s_gren.thrown;
