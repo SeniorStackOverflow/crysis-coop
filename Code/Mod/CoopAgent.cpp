@@ -25,6 +25,7 @@
 #include "IWeapon.h"
 #include "IWorldQuery.h"
 #include "ILevelSystem.h"
+#include "I3DEngine.h"
 #include "INetworkService.h"
 #include "ISurfaceType.h"
 
@@ -3784,6 +3785,43 @@ namespace
 		CryLogAlways("[CoopTest] view %d in %s's %s: %s", (int)next, pVehicle->GetEntity()->GetName(), pSeat->GetSeatName(), ok ? "set" : "refused");
 	}
 
+	// coop_test_levelmodels: the campaign level's own models (Levels/<level>/
+	// brush/*.cgf): how many the engine has, how many are its default ball
+	void CmdTestLevelModels(IConsoleCmdArgs*)
+	{
+		ILevel* pLevel = g_pGame->GetIGameFramework()->GetILevelSystem()->GetCurrentLevel();
+		const char* name = pLevel ? pLevel->GetLevelInfo()->GetName() : "";
+		const char* base = strrchr(name, '/');
+		base = base ? base + 1 : name;
+		if (strnicmp(base, "coop_", 5) == 0)
+			base += 5;
+		string mask;
+		mask.Format("Levels/%s/brush/*.cgf", base);
+		int found = 0, balls = 0;
+		string ballNames;
+		_finddata_t fd;
+		intptr_t h = gEnv->pCryPak->FindFirst(mask.c_str(), &fd);
+		if (h != -1)
+		{
+			do
+			{
+				string path;
+				path.Format("Levels/%s/brush/%s", base, fd.name);
+				IStatObj* pObj = gEnv->p3DEngine->LoadStatObj(path.c_str());
+				if (!pObj || pObj->IsDefaultObject())
+				{
+					++balls;
+					if (balls <= 5)
+						ballNames += string(" ") + fd.name;
+				}
+				else
+					++found;
+			} while (gEnv->pCryPak->FindNext(h, &fd) >= 0);
+			gEnv->pCryPak->FindClose(h);
+		}
+		CryLogAlways("[CoopTest] level models of %s: %d found, %d default balls%s", base, found, balls, ballNames.c_str());
+	}
+
 	// coop_test_enter <vehicle> <seat id>: the host's player gets in (server)
 	void CmdTestEnter(IConsoleCmdArgs* pArgs)
 	{
@@ -3910,6 +3948,7 @@ void CoopAgent::Init()
 	gEnv->pConsole->AddCommand("coop_test_key", CmdTestKey, 0, "Crysis Coop testing: coop_test_key <action> <1|0>: this game's player presses (lets go of) a key's action");
 	gEnv->pConsole->AddCommand("coop_test_cam", CmdTestCam, 0, "Crysis Coop testing: coop_test_cam logs this game's camera, its view and the vehicle seat's view");
 	gEnv->pConsole->AddCommand("coop_test_vehview", CmdTestVehView, 0, "Crysis Coop testing: coop_test_vehview: the vehicle seat's next view for this game's player");
+	gEnv->pConsole->AddCommand("coop_test_levelmodels", CmdTestLevelModels, 0, "Crysis Coop testing: coop_test_levelmodels: the level's own brush models found / default balls");
 	gEnv->pConsole->AddCommand("coop_test_enter", CmdTestEnter, 0, "Crysis Coop testing: coop_test_enter <vehicle> <seat id>: the host's player gets in (server)");
 	gEnv->pConsole->AddCommand("coop_test_path", CmdTestPath, 0,
 		"Crysis Coop testing: coop_test_path <entity name> logs the AI navigation's way from the host's player to it (server)");
