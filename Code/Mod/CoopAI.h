@@ -34,6 +34,9 @@ namespace CoopAI
 	// TIA/coop_*): the HUD then works as in the campaign (objectives, PDA
 	// map) for every player
 	bool IsCoopSession();
+	// the "map" command's options for a coop level: server, and the full
+	// physics of Crysis' DX10 games (buildings break) unless coop_immersive 0
+	const char* MapOptions();
 	// the freeze log ([CoopHitch]) does not count a load
 	void ResetHitchTimer();
 	// a co-op campaign level (Levels/Multiplayer/TIA/coop_*)

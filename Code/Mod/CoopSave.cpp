@@ -806,7 +806,7 @@ namespace
 		s_lastSave = progress.save;
 		gEnv->pConsole->ExecuteString("exec coop_settings.cfg");
 		string cmd;
-		cmd.Format("map multiplayer/tia/coop_%s s", progress.level.c_str());
+		cmd.Format("map multiplayer/tia/coop_%s %s", progress.level.c_str(), CoopAI::MapOptions());
 		CoopRelay::RestartGame(cmd.c_str());
 	}
 
@@ -1062,7 +1062,7 @@ namespace
 		s_menuStatus.clear();
 		gEnv->pConsole->ExecuteString("exec coop_settings.cfg");
 		string cmd;
-		cmd.Format("map multiplayer/tia/coop_%s s", level);
+		cmd.Format("map multiplayer/tia/coop_%s %s", level, CoopAI::MapOptions());
 		CoopRelay::RestartGame(cmd.c_str());
 	}
 

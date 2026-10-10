@@ -6,6 +6,7 @@
 #pragma comment(lib, "ws2_32.lib")
 
 #include "StdAfx.h"
+#include <StringUtils.h>
 #include "CoopAgent.h"
 #include "CoopAI.h"
 #include "Game.h"
@@ -3785,6 +3786,97 @@ namespace
 		CryLogAlways("[CoopTest] view %d in %s's %s: %s", (int)next, pVehicle->GetEntity()->GetName(), pSeat->GetSeatName(), ok ? "set" : "refused");
 	}
 
+	// coop_test_findobj [x y z] [radius] [filter]: the physical things near a
+	// place (this game's player by default): what they are (a level brush's
+	// model, an entity), where, their parts and how many breakable joints
+	// hold them (a building that collapses has them)
+	void CmdTestFindObj(IConsoleCmdArgs* pArgs)
+	{
+		Vec3 at(ZERO);
+		int arg = 1;
+		if (pArgs->GetArgCount() >= 4)
+		{
+			at = Vec3((float)atof(pArgs->GetArg(1)), (float)atof(pArgs->GetArg(2)), (float)atof(pArgs->GetArg(3)));
+			arg = 4;
+		}
+		else if (IActor* pMe = g_pGame->GetIGameFramework()->GetClientActor())
+			at = pMe->GetEntity()->GetWorldPos();
+		const float radius = pArgs->GetArgCount() > arg ? (float)atof(pArgs->GetArg(arg)) : 15.0f;
+		const char* filter = pArgs->GetArgCount() > arg + 1 ? pArgs->GetArg(arg + 1) : "";
+		IPhysicalEntity** list = 0;
+		const int n = gEnv->pPhysicalWorld->GetEntitiesInBox(at - Vec3(radius), at + Vec3(radius), list, ent_static | ent_rigid | ent_sleeping_rigid);
+		int shown = 0, withJoints = 0;
+		for (int i = 0; i < n && shown < 40; ++i)
+		{
+			IPhysicalEntity* pPhys = list[i];
+			pe_params_foreign_data fd;
+			pPhys->GetParams(&fd);
+			string what = "?";
+			Vec3 pos(ZERO);
+			pe_status_pos sp;
+			if (pPhys->GetStatus(&sp))
+				pos = sp.pos;
+			if (fd.iForeignData == PHYS_FOREIGN_ID_STATIC && fd.pForeignData)
+			{
+				IRenderNode* pNode = (IRenderNode*)fd.pForeignData;
+				IStatObj* pObj = pNode->GetEntityStatObj(0);
+				what.Format("brush %s", pObj ? pObj->GetFilePath() : pNode->GetName());
+			}
+			else if (fd.iForeignData == PHYS_FOREIGN_ID_ENTITY && fd.pForeignData)
+			{
+				IEntity* pEntity = (IEntity*)fd.pForeignData;
+				IStatObj* pObj = pEntity->GetStatObj(0);
+				what.Format("entity %s (%s) %s", pEntity->GetName(), pEntity->GetClass()->GetName(), pObj ? pObj->GetFilePath() : "");
+			}
+			else
+				what.Format("foreign %d", fd.iForeignData);
+			if (*filter && !CryStringUtils::stristr(what.c_str(), filter))
+				continue;
+			pe_status_nparts np;
+			const int parts = pPhys->GetStatus(&np);
+			int joints = 0, breakable = 0, broken = 0;
+			for (int j = 0; j < 256; ++j)
+			{
+				pe_params_structural_joint sj;
+				sj.idx = j;
+				if (!pPhys->GetParams(&sj))
+					break;
+				++joints;
+				if (sj.bBreakable)
+					++breakable;
+				if (sj.bBroken)
+					++broken;
+			}
+			if (joints)
+				++withJoints;
+			CryLogAlways("[CoopTest] %s at (%.1f, %.1f, %.1f) %.0f m: type %d, %d parts, %d joints (%d breakable, %d broken)", what.c_str(),
+				pos.x, pos.y, pos.z, pos.GetDistance(at), (int)pPhys->GetType(), parts, joints, breakable, broken);
+			++shown;
+		}
+		CryLogAlways("[CoopTest] findobj: %d physical things within %.0f m of (%.0f, %.0f, %.0f), %d shown, %d with joints", n, radius, at.x, at.y, at.z, shown, withJoints);
+	}
+
+	// coop_test_physvars [name value]: the physics' settings that decide
+	// breaking (and sets one: multiplayer, breakscale, playerscanbreak)
+	void CmdTestPhysVars(IConsoleCmdArgs* pArgs)
+	{
+		PhysicsVars* pVars = gEnv->pPhysicalWorld->GetPhysVars();
+		if (pArgs->GetArgCount() >= 3)
+		{
+			const char* name = pArgs->GetArg(1);
+			const float value = (float)atof(pArgs->GetArg(2));
+			if (!stricmp(name, "multiplayer"))
+				pVars->bMultiplayer = (int)value;
+			else if (!stricmp(name, "breakscale"))
+				pVars->breakImpulseScale = value;
+			else if (!stricmp(name, "playerscanbreak"))
+				pVars->bPlayersCanBreak = (int)value;
+		}
+		CryLogAlways("[CoopTest] physics: multiplayer %d, breakImpulseScale %.3f, playersCanBreak %d, tickBreakable %.3f, breakOnValidation %d, logStructureChanges %d; bMultiplayer %d, bServer %d",
+			pVars->bMultiplayer, pVars->breakImpulseScale, pVars->bPlayersCanBreak, pVars->tickBreakable, pVars->bBreakOnValidation, pVars->bLogStructureChanges,
+			(int)gEnv->bMultiplayer, (int)gEnv->bServer);
+	}
+
 	// coop_test_levelmodels: the campaign level's own models (Levels/<level>/
 	// brush/*.cgf): how many the engine has, how many are its default ball
 	void CmdTestLevelModels(IConsoleCmdArgs*)
@@ -3948,6 +4040,8 @@ void CoopAgent::Init()
 	gEnv->pConsole->AddCommand("coop_test_key", CmdTestKey, 0, "Crysis Coop testing: coop_test_key <action> <1|0>: this game's player presses (lets go of) a key's action");
 	gEnv->pConsole->AddCommand("coop_test_cam", CmdTestCam, 0, "Crysis Coop testing: coop_test_cam logs this game's camera, its view and the vehicle seat's view");
 	gEnv->pConsole->AddCommand("coop_test_vehview", CmdTestVehView, 0, "Crysis Coop testing: coop_test_vehview: the vehicle seat's next view for this game's player");
+	gEnv->pConsole->AddCommand("coop_test_findobj", CmdTestFindObj, 0, "Crysis Coop testing: coop_test_findobj [x y z] [radius] [filter]: physical things near a place, their model, parts and breakable joints");
+	gEnv->pConsole->AddCommand("coop_test_physvars", CmdTestPhysVars, 0, "Crysis Coop testing: coop_test_physvars [multiplayer|breakscale|playerscanbreak value]: the physics settings that decide breaking");
 	gEnv->pConsole->AddCommand("coop_test_levelmodels", CmdTestLevelModels, 0, "Crysis Coop testing: coop_test_levelmodels: the level's own brush models found / default balls");
 	gEnv->pConsole->AddCommand("coop_test_enter", CmdTestEnter, 0, "Crysis Coop testing: coop_test_enter <vehicle> <seat id>: the host's player gets in (server)");
 	gEnv->pConsole->AddCommand("coop_test_path", CmdTestPath, 0,

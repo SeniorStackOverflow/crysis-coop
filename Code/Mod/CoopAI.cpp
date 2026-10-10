@@ -432,9 +432,9 @@ namespace
 		ILevelRotation* pRotation = pFramework->GetILevelSystem()->GetLevelRotation();
 		if (!pFramework->StartedGameContext() || !pRotation)
 		{
-			CryLogAlways("[Coop] no game running: map %s s", level);
 			string cmd;
-			cmd.Format("map %s s", level);
+			cmd.Format("map %s %s", level, CoopAI::MapOptions());
+			CryLogAlways("[Coop] no game running: %s", cmd.c_str());
 			gEnv->pConsole->ExecuteString(cmd.c_str());
 			return;
 		}
@@ -1557,6 +1557,7 @@ void CoopAI::Init()
 		gEnv->pConsole->RegisterString("coop_debug_token", "", 0, "Crysis Coop testing: game token logged every 5 s");
 	}
 	if (gEnv->pConsole)
+		gEnv->pConsole->RegisterInt("coop_immersive", 1, 0, "Crysis Coop: 1 = coop levels start with the full physics of Crysis' DX10 multiplayer (towers, huts and trees break; destroyable objects explode), 0 = the plain multiplayer game (nothing breaks)");
 		gEnv->pConsole->RegisterInt("coop_god", 0, 0, "Crysis Coop testing: 1 = players take no damage, 2 = only the host's player");
 	if (gEnv->pConsole)
 		gEnv->pConsole->RegisterInt("coop_debug_autopilot", 0, 0, "Crysis Coop testing: local player walks to the active objective, one step every N s");
@@ -2172,6 +2173,15 @@ void CoopAI::OnGameLoaded()
 int CoopAI::DebugFlags()
 {
 	return s_pDebugFlags ? s_pDebugFlags->GetIVal() : 0;
+}
+
+const char* CoopAI::MapOptions()
+{
+	// "x": CryAction's immersive multiplayer. Without it the physics breaks
+	// nothing in a network game (its breakImpulseScale 0) and destroyable
+	// objects get the simple DX9 multiplayer physics
+	ICVar* pImmersive = gEnv->pConsole ? gEnv->pConsole->GetCVar("coop_immersive") : 0;
+	return pImmersive && pImmersive->GetIVal() == 0 ? "s" : "s x";
 }
 
 bool CoopAI::IsCoopSession()
