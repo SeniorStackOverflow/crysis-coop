@@ -90,6 +90,11 @@ namespace
 		float ox = 0, oy = 0;       // the page's top left on the screen (pixels)
 	} s_view;
 
+	// testing (coop_ui framelog): the screen size and the panel, frame by frame
+	struct SFrameNote { int frame; int w, h; float pw, ph; };
+	SFrameNote s_frameNotes[32];
+	int s_frameNoteCount = 0;
+
 	void UpdateView()
 	{
 		const float w = (float)(std::max)(1, gEnv->pRenderer->GetWidth()), h = (float)(std::max)(1, gEnv->pRenderer->GetHeight());
@@ -258,8 +263,11 @@ namespace
 			float need = TextW(17, label) + 26;
 			if (subtitle && subtitle[0])
 				need = (std::max)(need, TextW(12, subtitle) + 26);
-			// (a small fixed button, like the list's arrows, does not grow)
-			if (need > w && w >= 60)
+			// the inside width at which the label fits, said every frame (said
+			// only while it did not fit, the panel grew one frame and shrank
+			// the next: it jumped between two sizes). A small fixed button,
+			// like the list's arrows, does not grow
+			if (w >= 60)
 				NeedInner(Inner() * need / w);
 			s_bottom = (std::max)(s_bottom, y + h);
 			return;
@@ -902,6 +910,12 @@ namespace
 				pArgs->GetArg(2), CoopText::Tr(pArgs->GetArg(2)), (void*)pFont, pFont == (gEnv->pCryFont ? gEnv->pCryFont->GetFont("coop") : 0) ? "coop" : "other",
 				w, h, wa, ha, gEnv->pRenderer->GetWidth(), gEnv->pRenderer->GetHeight());
 		}
+		else if (!stricmp(what, "framelog"))
+			for (int i = 0; i < 32 && i < s_frameNoteCount; ++i)
+			{
+				const SFrameNote& n = s_frameNotes[(s_frameNoteCount - 1 - i) % 32];
+				CryLogAlways("[CoopMenu] frame %d: screen %dx%d, panel %.0fx%.0f", n.frame, n.w, n.h, n.pw, n.ph);
+			}
 		else if (!stricmp(what, "console"))
 			gEnv->pConsole->ShowConsole(pArgs->GetArgCount() < 3 || atoi(pArgs->GetArg(2)) != 0);
 		else if (!stricmp(what, "page") && pArgs->GetArgCount() > 2)
@@ -986,6 +1000,12 @@ void CoopMenu::RenderMenu(bool inGame)
 	gEnv->pRenderer->ClearBuffer(FRT_CLEAR_DEPTH | FRT_CLEAR_IMMEDIATE, nullptr);
 	DrawPanel();
 	s_pUI->PostRender();
+	SFrameNote& note = s_frameNotes[s_frameNoteCount++ % 32];
+	note.frame = s_drawnFrame;
+	note.w = gEnv->pRenderer->GetWidth();
+	note.h = gEnv->pRenderer->GetHeight();
+	note.pw = PW;
+	note.ph = PH;
 }
 
 void CoopMenu::RenderHud(IUIDraw* pUIDraw, IFFont* pFont)

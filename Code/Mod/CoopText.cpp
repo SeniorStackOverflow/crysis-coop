@@ -246,9 +246,31 @@ float CoopText::Width(IUIDraw* pUI, float size, const char* english)
 	IFFont* pFont = Font();
 	if (!pUI || !pFont || !english || !english[0])
 		return 0.0f;
+	// a text measured once (per language and size): the font's state left by
+	// whatever drew with it last (the HUD's line, the revive texts) changed
+	// the result from one frame to the next, and the co-op menu jumped
+	// between two sizes in the game
+	static std::map<string, float> s_widths;
+	static string s_widthsLanguage;
+	if (s_widthsLanguage != s_language)
+	{
+		s_widths.clear();
+		s_widthsLanguage = s_language;
+	}
+	string key;
+	key.Format("%.1f|%s", size, english);
+	std::map<string, float>::const_iterator known = s_widths.find(key);
+	if (known != s_widths.end())
+		return known->second;
 	const std::wstring text = Wide(Tr(english));
+	pFont->UseRealPixels(false);
+	pFont->SetSameSize(false);
+	pFont->SetCharWidthScale(1.0f);
+	pFont->SetEffect("default");
 	float w = 0.0f, h = 0.0f;
 	pUI->GetTextDimW(pFont, &w, &h, size, size, text.c_str());
+	if (s_widths.size() < 20000)
+		s_widths[key] = w;
 	return w;
 }
 
