@@ -1,0 +1,157 @@
+# Crysis Coop: the mod's texts in Russian (UTF-8), see Code/Mod/CoopText.h.
+# A line: the English text as the code says it, a tab, the translation.
+# %s: a part that changes (a name, a number, another text of this list).
+
+# ---- the co-op menu
+CRYSIS CO-OP	CRYSIS: КООПЕРАТИВ
+NEW CAMPAIGN	НОВАЯ КАМПАНИЯ
+CAMPAIGNS	КАМПАНИИ
+JOIN A FRIEND	ИГРА У ДРУГА
+Keep my checkpoints in the cloud	Хранить мои чекпоинты в облаке
+Connect directly when possible (lower latency)	Подключаться напрямую, когда можно (меньше задержка)
+AI companion (a second player, bot or AI agent)	ИИ-компаньон (второй игрок: бот или ИИ-агент)
+looking for your campaigns...	ищу твои кампании...
+no campaign yet	кампаний пока нет
+"%s" - %s	«%s» — %s
+%s (%s), checkpoint %s, %s	%s (%s), чекпоинт %s, %s
+Continue	Продолжить
+New campaign	Новая кампания
+All campaigns	Все кампании
+Join a friend	Подключиться к другу
+Back	Назад
+Campaign name (optional):	Название кампании (можно пропустить):
+Campaign N	Кампания N
+Start on the level:	Начать с уровня:
+Your friends stay with you: their games join the new one by themselves.	Друзья остаются с тобой: их игры сами подключатся к новой.
+Looking for your campaigns (this PC and the cloud)...	Ищу твои кампании (на этом компьютере и в облаке)...
+No campaign yet: start one with New campaign.	Кампаний пока нет: начни через «Новая кампания».
+newer in the cloud	в облаке новее
+this PC + cloud	этот ПК + облако
+this PC	этот ПК
+cloud	облако
+cloud (a friend's game)	облако (игра друга)
+Checkpoint before	Чекпоинт раньше
+Sure? Delete	Точно удалить?
+Delete	Удалить
+Refresh	Обновить
+Your friend's code:	Код друга:
+Join	Войти
+The host sees his code on the screen and in his co-op menu.	Хост видит свой код на экране и в своём меню коопа.
+It is always the same code: next time it is filled in already.	Код всегда один и тот же: в следующий раз он будет уже вписан.
+Connecting to game %s...	Подключаюсь к игре %s...
+Game %s: loading the level...	Игра %s: загружается уровень...
+In game %s	В игре %s
+Game %s: the host is loading, you join again by yourself	Игра %s: хост загружается, ты подключишься снова сам
+Cannot join: %s	Не удалось войти: %s
+Co-op code: %s	Код коопа: %s
+Co-op code: waiting for the relay...	Код коопа: жду ретранслятор...
+Co-op code: not online yet	Код коопа: ещё не в сети
+Friends: Co-op game > Join a friend, and this code. It never changes.	Друзьям: «Кооперативная игра» > «Подключиться к другу» и этот код. Он не меняется.
+Friends in the game: %s (%s directly)	Друзей в игре: %s (напрямую: %s)
+Friends in the game: %s	Друзей в игре: %s
+AI companion: in the game (AI agents: CrysisCoop.exe -coop_mcp)	ИИ-компаньон: в игре (для ИИ-агентов: CrysisCoop.exe -coop_mcp)
+AI companion: joining (%s s, under a minute)	ИИ-компаньон: подключается (%s с, меньше минуты)
+AI companion CANNOT JOIN: not in the game after %s s (companion.log). Turn it off and on to try again	ИИ-компаньон НЕ МОЖЕТ ВОЙТИ: не в игре через %s с (companion.log). Выключи и включи его, чтобы попробовать снова
+AI companion CANNOT JOIN: its game did not start, 5 tries (companion.log). Turn it off and on to try again	ИИ-компаньон НЕ МОЖЕТ ВОЙТИ: его игра не запустилась за 5 попыток (companion.log). Выключи и включи его, чтобы попробовать снова
+AI companion: started; joins when your game is ready (after the intro or a checkpoint load)	ИИ-компаньон: запущен; войдёт, когда твоя игра будет готова (после вступления или загрузки чекпоинта)
+AI companion: its game closed; starting it again (try %s of 5)	ИИ-компаньон: его игра закрылась; запускаю снова (попытка %s из 5)
+AI companion: starting...	ИИ-компаньон: запускается...
+Campaign: %s	Кампания: %s
+(saved at the first checkpoint)	(сохранится на первом чекпоинте)
+Campaign %s	Кампания %s
+Save now	Сохранить сейчас
+Back to the last checkpoint	Вернуться к последнему чекпоинту
+The checkpoint before	Предыдущий чекпоинт
+Other campaigns / new campaign	Другие кампании / новая кампания
+Playing on a server (not through the relay)	Игра на сервере (не через ретранслятор)
+In your friend's game %s	В игре друга %s
+Connection: %s ms (directly)	Связь: %s мс (напрямую)
+Connection: %s ms (through the relay)	Связь: %s мс (через ретранслятор)
+The host saves the game. If he loads a checkpoint, you join again by yourself.	Игру сохраняет хост. Если он загрузит чекпоинт, ты подключишься снова сам.
+Leave the game	Выйти из игры
+Continuing...	Продолжаю...
+Continuing from the checkpoint before...	Продолжаю с предыдущего чекпоинта...
+AI companion on: it joins your game in a moment	ИИ-компаньон включён: сейчас войдёт в твою игру
+AI companion off	ИИ-компаньон выключен
+Joining...	Подключаюсь...
+Starting...	Запускаю...
+
+# ---- the levels
+Contact	Контакт
+Recovery	Спасение
+Relic	Реликвия
+Assault	Штурм
+Onslaught	Натиск
+Awakening	Пробуждение
+Core	Ядро
+Paradise Lost	Потерянный рай
+Exodus	Исход
+Ascension	Вознесение
+Reckoning	Возмездие
+
+# ---- the HUD
+CO-OP code %s  -  %s friend in the game  -  Esc > Co-op game for the co-op menu	КОД КООПА %s  -  друзей в игре: %s  -  Esc > «Кооперативная игра»: меню коопа
+CO-OP code %s  -  %s friends in the game  -  Esc > Co-op game for the co-op menu	КОД КООПА %s  -  друзей в игре: %s  -  Esc > «Кооперативная игра»: меню коопа
+Co-op code: %s (always the same)  -  your friend types in the console: coop_join %s	Код коопа: %s (всегда один и тот же)  -  друг вводит в консоли: coop_join %s
+
+# ---- downed players and revive
+EVERYBODY IS DOWN	ВСЕ РАНЕНЫ
+Back to the last checkpoint in %s	Возврат к последнему чекпоинту через %s
+%s is reviving you	%s поднимает тебя
+YOU ARE DOWN	ТЫ РАНЕН
+A teammate can revive you: he holds F next to you	Напарник может поднять тебя: пусть удерживает F рядом с тобой
+Reviving %s	Поднимаю: %s
+Hold F to revive %s	Удерживай F, чтобы поднять: %s
+%s is down - %s m	%s ранен — %s м
+%s is down	%s ранен
+%s revived %s	%s поднял %s
+
+# ---- the game's messages
+Waiting for the host to finish the level intro...	Ждём, пока хост досмотрит вступление уровня...
+%s joined the co-op	%s присоединился к коопу
+Level complete! Next: %s	Уровень пройден! Дальше: %s
+Co-op campaign complete!	Кооп-кампания пройдена!
+
+# ---- saving and loading
+Saved: checkpoint %s, %s	Сохранено: чекпоинт %s, %s
+Campaign "%s" deleted (also from the cloud)	Кампания «%s» удалена (и из облака)
+Campaign "%s" deleted (and off your cloud list)	Кампания «%s» удалена (и из твоего списка в облаке)
+Campaign "%s" deleted	Кампания «%s» удалена
+Downloading the campaign's checkpoint from the cloud...	Скачиваю чекпоинт кампании из облака...
+The cloud's checkpoint is not available: continuing from the one on this PC	Чекпоинт в облаке недоступен: продолжаю с того, что на этом ПК
+The campaign could not be downloaded	Не удалось скачать кампанию
+The saved game could not be loaded: the level starts from the beginning	Сохранение не загрузилось: уровень начнётся сначала
+Friends may not be able to join this game: if they cannot, host it again with coop_continue	Друзья, возможно, не смогут войти в эту игру: если не получится, запусти её снова через coop_continue
+Only the host of a co-op game can save	Сохранять может только хост кооп-игры
+The game will be saved as soon as possible (%s)	Игра сохранится, как только будет можно (%s)
+cutscene	идёт ролик
+saving not allowed now	сейчас сохранять нельзя
+the host is dead	хост погиб
+the host is in the air	хост в воздухе
+no coop game	нет кооп-игры
+Saving...	Сохраняю...
+No campaign is being played here (Continue picks one)	Здесь сейчас не идёт кампания («Продолжить» выберет её)
+No saved co-op progress. Start a new game with: coop_host	Нет сохранённого прогресса коопа. Новую игру начинает: coop_host
+No such campaign (coop_campaigns lists them)	Нет такой кампании (список: coop_campaigns)
+This campaign has no previous checkpoint on this PC	У этой кампании нет предыдущего чекпоинта на этом ПК
+The campaign's checkpoint is missing on this PC	Чекпоинта этой кампании нет на этом ПК
+
+# ---- joining a friend: why it did not work
+The host's game is gone	Игры хоста больше нет
+The host has closed the game	Хост закрыл игру
+The host did not come back	Хост не вернулся
+the host's version of the mod is older than yours (host: %s, yours: %s). The host needs to restart Crysis Coop: it updates itself when it starts	у хоста версия мода старее твоей (у хоста: %s, у тебя: %s). Хосту нужно перезапустить Crysis Coop: он сам обновится при запуске
+your version of the mod is older than the host's (yours: %s, host: %s). Restart Crysis Coop: it updates itself when it starts	твоя версия мода старее, чем у хоста (у тебя: %s, у хоста: %s). Перезапусти Crysis Coop: он сам обновится при запуске
+the host has another version of the mod (%s, yours: %s). Both need the same one: start Crysis Coop again, it updates itself	у хоста другая версия мода (%s, у тебя: %s). Нужна одинаковая: запустите Crysis Coop заново, он сам обновится
+the host's Crysis is another version (both need 1.2.1)	у хоста другая версия Crysis (обоим нужна 1.2.1)
+the host's game is full	игра хоста заполнена
+the host's game stopped answering	игра хоста перестала отвечать
+this game has no level %s (run the mod's installer again)	в этой игре нет уровня %s (запусти установщик мода ещё раз)
+the connection to the host was lost	связь с хостом потеряна
+the relay is full, try again later	ретранслятор переполнен, попробуй позже
+the relay runs another version of the mod (update the mod)	на ретрансляторе другая версия мода (обнови мод)
+no coop game with this code (check the code; the host must be in the game)	нет кооп-игры с таким кодом (проверь код; хост должен быть в игре)
+that coop game is full	эта кооп-игра заполнена
+cannot reach the relay (internet connection?)	нет связи с ретранслятором (интернет?)
+this Windows has no WebSocket support (Windows 8 or later needed)	эта Windows не поддерживает WebSocket (нужна Windows 8 или новее)
+unknown error	неизвестная ошибка

@@ -3,6 +3,7 @@
 // Copyright (C) Crytek GmbH, 2001-2008.
 // -------------------------------------------------------------------------
 #include "StdAfx.h"
+#include "CoopText.h"
 #include "CoopAI.h"
 #include "HUD.h"
 #include "GameFlashAnimation.h"
@@ -38,16 +39,13 @@ namespace NSKeyTranslation
 		}
 	}
 
-	// simple expand wchar_t to char
+	// a text that is not a localization label (@...) to wide characters.
+	// Crysis Coop: the mod's texts (and those the host sends) in the game's
+	// language, read as UTF-8 (English stays as it was)
 	template<class T> void ExpandToWChar(const char* charString, T& outString)
 	{
-		outString.resize(TFixedString::_strlen(charString));
-		wchar_t* dst = outString.begin();
-		const char* src = charString;
-		while (const wchar_t c=(wchar_t)(*src++))
-		{
-			*dst++ = c;
-		}
+		const std::wstring wide = CoopText::Wide(CoopText::Tr(charString));
+		outString.assign(wide.c_str(), wide.length());
 	}
 
 

@@ -1,5 +1,6 @@
 // Crysis Coop: downed players and reviving them (see CoopRevive.h).
 #include "StdAfx.h"
+#include "CoopText.h"
 #include "CoopRevive.h"
 #include "CoopAI.h"
 #include "Game.h"
@@ -122,7 +123,8 @@ namespace
 	// 800x600 space (a centered image stays centered on any aspect)
 	void CenterText(IUIDraw* pUI, IFFont* pFont, float y, float size, const char* text, float r, float g, float b, float a = 1.0f)
 	{
-		pUI->DrawText(pFont, 0, y, size, size, text, a, r, g, b,
+		// in the game's language, with the mod's font (Cyrillic)
+		CoopText::Draw(pUI, 0, y, size, size, text, a, r, g, b,
 			UIDRAWHORIZONTAL_CENTER, UIDRAWVERTICAL_TOP, UIDRAWHORIZONTAL_CENTER, UIDRAWVERTICAL_TOP);
 	}
 
