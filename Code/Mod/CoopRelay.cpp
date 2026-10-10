@@ -1294,7 +1294,7 @@ namespace
 		LoadPlayer();
 		if (code <= 0)
 		{
-			CryLogAlways("usage: coop_join <code>   (the code the host sees when he starts a coop game)");
+			CoopText::Say("usage: coop_join <code>   (the code the host sees when he starts a coop game)");
 			return false;
 		}
 		if (!s_haveKey)
@@ -1316,7 +1316,7 @@ namespace
 			SavePlayer();
 		}
 		s_joinAgent->Start(s_pRelay->GetString(), s_key, code, s_pDirect->GetIVal() != 0);
-		CryLogAlways("[CoopRelay] joining coop game %d through %s ...", code, s_pRelay->GetString());
+		CoopText::Say("[CoopRelay] joining coop game %d through %s ...", code, s_pRelay->GetString());
 		return true;
 	}
 
@@ -1337,24 +1337,26 @@ namespace
 
 	void CmdStatus(IConsoleCmdArgs*)
 	{
-		CryLogAlways("[CoopRelay] player id %s", s_haveKey ? Hex(s_id, 8).c_str() : "(none)");
+		// (shown in the game's language: CoopText::Say)
+		CoopText::Say("[CoopRelay] player id %s", s_haveKey ? Hex(s_id, 8).c_str() : "(none)");
 		if (s_hosting && s_hostCode)
-			CryLogAlways("[CoopRelay] friends join with: coop_join %d   (%d connected, %d of them directly; relay %d ms)",
+			CoopText::Say("[CoopRelay] friends join with: coop_join %d   (%d connected, %d of them directly; relay %d ms)",
 				(int)s_hostCode, (int)s_hostFriends, (int)s_hostDirect, (int)s_relayRtt);
+		else if (s_hosting && s_hostError)
+			CoopText::Say("[CoopRelay] waiting for the relay %s: %s", s_pRelay->GetString(), ErrorText(s_hostError));
 		else if (s_hosting)
-			CryLogAlways("[CoopRelay] waiting for the relay %s%s%s", s_pRelay->GetString(),
-				s_hostError ? ": " : "", s_hostError ? ErrorText(s_hostError) : "");
+			CoopText::Say("[CoopRelay] waiting for the relay %s", s_pRelay->GetString());
 		else
-			CryLogAlways("[CoopRelay] not hosting a coop game (coop_relay_enable %d, relay %s)",
+			CoopText::Say("[CoopRelay] not hosting a coop game (coop_relay_enable %d, relay %s)",
 				s_pEnable->GetIVal(), s_pRelay->GetString());
 		if (s_joinAgent->Running())
 		{
 			if (s_waitingForHost)
-				CryLogAlways("[CoopRelay] joined game %d: waiting for the host to be ready", s_lastJoinCode);
+				CoopText::Say("[CoopRelay] joined game %d: waiting for the host to be ready", s_lastJoinCode);
 			else if (s_joinDirectRtt >= 0)
-				CryLogAlways("[CoopRelay] joined, direct connection to the host: %d ms (through the relay: %d ms)", (int)s_joinDirectRtt, (int)s_relayRtt);
+				CoopText::Say("[CoopRelay] joined, direct connection to the host: %d ms (through the relay: %d ms)", (int)s_joinDirectRtt, (int)s_relayRtt);
 			else
-				CryLogAlways("[CoopRelay] joined through the relay: %d ms (no direct connection)", (int)s_relayRtt);
+				CoopText::Say("[CoopRelay] joined through the relay: %d ms (no direct connection)", (int)s_relayRtt);
 		}
 	}
 
@@ -1466,9 +1468,9 @@ void CoopRelay::Init()
 	ICVar* own[] = { s_pRelay, s_pEnable, s_pDirect, s_pCode, s_pEnglishKeyboard };
 	for (int i = 0; i < (int)(sizeof(own) / sizeof(own[0])); ++i)
 		own[i]->SetFlags(own[i]->GetFlags() | VF_NOT_NET_SYNCED);
-	gEnv->pConsole->AddCommand("coop_join", CmdJoin, 0, "Crysis Coop: join a friend's coop game: coop_join <code>  (no code: the last one)");
-	gEnv->pConsole->AddCommand("coop_leave", CmdLeave, 0, "Crysis Coop: leave the joined coop game (no joining again by itself)");
-	gEnv->pConsole->AddCommand("coop_relay_status", CmdStatus, 0, "Crysis Coop: the code friends join with, connection and latency");
+	gEnv->pConsole->AddCommand("coop_join", CmdJoin, 0, CoopText::ForConsole("Crysis Coop: join a friend's coop game: coop_join <code>  (no code: the last one)"));
+	gEnv->pConsole->AddCommand("coop_leave", CmdLeave, 0, CoopText::ForConsole("Crysis Coop: leave the joined coop game (no joining again by itself)"));
+	gEnv->pConsole->AddCommand("coop_relay_status", CmdStatus, 0, CoopText::ForConsole("Crysis Coop: the code friends join with, connection and latency"));
 	CoopCloud::Init();
 }
 

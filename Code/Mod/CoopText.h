@@ -35,4 +35,13 @@ namespace CoopText
 
 	// the width a text takes (IUIDraw's units at that size), translated
 	float Width(IUIDraw* pUI, float size, const char* english);
+
+	// a message for the player in the console: shown in the game's language,
+	// the log file keeps it in English. The console draws its text byte by
+	// byte: Cyrillic goes to it in Windows-1251, which its font
+	// (Fonts/console.xml, CoopConsole.ttf) has at those places
+	void Say(const char* format, ...);
+
+	// a text as the console shows it (translated, Windows-1251)
+	string ForConsole(const char* english);
 }

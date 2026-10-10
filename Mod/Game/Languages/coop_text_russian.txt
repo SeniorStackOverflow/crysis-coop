@@ -158,3 +158,41 @@ unknown error	неизвестная ошибка
 The host is loading the game. You will join again by yourself.	Хост загружает игру. Ты подключишься снова сам.
 AI companion cannot join: its game did not start. Esc > Co-op game: turn it off and on	ИИ-компаньон не может войти: его игра не запустилась. Esc > «Кооперативная игра»: выключи и включи его
 AI companion cannot join your game. Esc > Co-op game: turn it off and on	ИИ-компаньон не может войти в твою игру. Esc > «Кооперативная игра»: выключи и включи его
+
+# ---- the console: what the player's commands answer (the log keeps English)
+[CoopSave] %s	[CoopSave] %s
+[CoopRelay] %s	[CoopRelay] %s
+[Coop] %s	[Coop] %s
+new campaign "%s" (%s)	новая кампания «%s» (%s)
+looking for the campaigns (this PC and the cloud)...	ищу кампании (на этом ПК и в облаке)...
+No co-op campaigns yet. Start one with: coop_host	Кооп-кампаний пока нет. Начать: coop_host
+%s. "%s" - %s, checkpoint %s, %s (%s)	%s. «%s» — %s, чекпоинт %s, %s (%s)
+this PC, newer in the cloud	этот ПК, в облаке новее
+this PC and the cloud	этот ПК и облако
+the cloud	облако
+the cloud, hosted by %s	облако, хост: %s
+(the cloud did not answer: campaigns on this PC only)	(облако не ответило: только кампании на этом ПК)
+progress loaded: %s, checkpoint %s (saved %s)	прогресс загружен: %s, чекпоинт %s (сохранён %s)
+usage: coop_campaign_delete <number or name>   (see coop_campaigns)	использование: coop_campaign_delete <номер или название>   (список: coop_campaigns)
+usage: coop_join <code>   (the code the host sees when he starts a coop game)	использование: coop_join <код>   (код хост видит, когда запускает кооп-игру)
+joining coop game %s through %s ...	подключаюсь к кооп-игре %s через %s ...
+player id %s	id игрока %s
+(none)	(нет)
+friends join with: coop_join %s   (%s connected, %s of them directly; relay %s ms)	друзья входят так: coop_join %s   (подключено: %s, из них напрямую: %s; ретранслятор %s мс)
+waiting for the relay %s: %s	жду ретранслятор %s: %s
+waiting for the relay %s	жду ретранслятор %s
+not hosting a coop game (coop_relay_enable %s, relay %s)	кооп-игра не запущена (coop_relay_enable %s, ретранслятор %s)
+joined game %s: waiting for the host to be ready	в игре %s: жду, пока хост будет готов
+joined, direct connection to the host: %s ms (through the relay: %s ms)	в игре, прямая связь с хостом: %s мс (через ретранслятор: %s мс)
+joined through the relay: %s ms (no direct connection)	в игре через ретранслятор: %s мс (прямой связи нет)
+no game running: %s	игра не запущена: %s
+Crysis Coop: host a new co-op campaign: coop_host [level] [campaign name]  (default: the first level)	Crysis Coop: новая кооп-кампания: coop_host [уровень] [название]  (по умолчанию первый уровень)
+Crysis Coop: host a co-op campaign from its last checkpoint: coop_continue [number or name] [prev]  (default: the newest)	Crysis Coop: продолжить кооп-кампанию с последнего чекпоинта: coop_continue [номер или название] [prev]  (по умолчанию самая новая)
+Crysis Coop: the host goes back to the last checkpoint (coop_load prev: the one before); friends join again by themselves	Crysis Coop: хост возвращается к последнему чекпоинту (coop_load prev: к предыдущему); друзья подключатся снова сами
+Crysis Coop: the co-op campaigns on this PC and in the cloud	Crysis Coop: кооп-кампании на этом ПК и в облаке
+Crysis Coop: delete a co-op campaign: coop_campaign_delete <number or name>	Crysis Coop: удалить кооп-кампанию: coop_campaign_delete <номер или название>
+Crysis Coop: the host saves the co-op progress now	Crysis Coop: хост сохраняет кооп-прогресс сейчас
+Crysis Coop: join a friend's coop game: coop_join <code>  (no code: the last one)	Crysis Coop: войти в кооп-игру друга: coop_join <код>  (без кода: последняя)
+Crysis Coop: leave the joined coop game (no joining again by itself)	Crysis Coop: выйти из кооп-игры друга (без повторного входа)
+Crysis Coop: the code friends join with, connection and latency	Crysis Coop: код для друзей, связь и задержка
+Crysis Coop: go to another coop map with every connected player (server)	Crysis Coop: перейти на другую кооп-карту со всеми игроками (сервер)

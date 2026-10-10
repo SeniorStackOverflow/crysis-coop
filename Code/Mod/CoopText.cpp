@@ -251,3 +251,53 @@ float CoopText::Width(IUIDraw* pUI, float size, const char* english)
 	pUI->GetTextDimW(pFont, &w, &h, size, size, text.c_str());
 	return w;
 }
+
+string CoopText::ForConsole(const char* english)
+{
+	const std::wstring wide = Wide(Tr(english));
+	string out;
+	for (size_t i = 0; i < wide.length(); ++i)
+	{
+		const unsigned int c = wide[i];
+		if (c < 0x80)
+			out += (char)c;
+		else if (c >= 0x410 && c <= 0x44F)
+			out += (char)(0xC0 + (c - 0x410));
+		else if (c == 0x401) out += (char)0xA8;    // Ё
+		else if (c == 0x451) out += (char)0xB8;    // ё
+		else if (c == 0xAB) out += (char)0xAB;     // «
+		else if (c == 0xBB) out += (char)0xBB;     // »
+		else if (c == 0x2014) out += (char)0x97;   // —
+		else if (c == 0x2013) out += (char)0x96;   // –
+		else if (c == 0x2116) out += (char)0xB9;   // №
+		else
+			out += '?';
+	}
+	return out;
+}
+
+void CoopText::Say(const char* format, ...)
+{
+	char english[2048];
+	va_list args;
+	va_start(args, format);
+	_vsnprintf(english, sizeof(english) - 1, format, args);
+	va_end(args);
+	english[sizeof(english) - 1] = 0;
+	if (!Translated() || !gEnv->pLog)
+	{
+		CryLogAlways("%s", english);
+		return;
+	}
+	// the log file: English (LogToFile writes only at some verbosity)
+	ICVar* pVerbosity = gEnv->pConsole ? gEnv->pConsole->GetCVar("log_FileVerbosity") : 0;
+	const int was = pVerbosity ? pVerbosity->GetIVal() : 0;
+	if (pVerbosity && was < 3)
+		pVerbosity->Set(3);
+	gEnv->pLog->LogToFile("%s", english);
+	if (pVerbosity && was < 3)
+		pVerbosity->Set(was);
+	// the console: the game's language
+	if (gEnv->pConsole)
+		gEnv->pConsole->PrintLine(ForConsole(english).c_str());
+}

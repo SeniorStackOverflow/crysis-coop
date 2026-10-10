@@ -902,6 +902,8 @@ namespace
 				pArgs->GetArg(2), CoopText::Tr(pArgs->GetArg(2)), (void*)pFont, pFont == (gEnv->pCryFont ? gEnv->pCryFont->GetFont("coop") : 0) ? "coop" : "other",
 				w, h, wa, ha, gEnv->pRenderer->GetWidth(), gEnv->pRenderer->GetHeight());
 		}
+		else if (!stricmp(what, "console"))
+			gEnv->pConsole->ShowConsole(pArgs->GetArgCount() < 3 || atoi(pArgs->GetArg(2)) != 0);
 		else if (!stricmp(what, "page") && pArgs->GetArgCount() > 2)
 			Open((EPage)atoi(pArgs->GetArg(2)));
 		else if (!stricmp(what, "click") && pArgs->GetArgCount() > 3)

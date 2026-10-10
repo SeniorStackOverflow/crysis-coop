@@ -13,6 +13,7 @@
 #include <windows.h>
 
 #include "StdAfx.h"
+#include "CoopText.h"
 #include "CoopSave.h"
 #include "CoopRevive.h"
 #include "CoopAI.h"
@@ -506,7 +507,7 @@ namespace
 		if (s_campaignName.empty())
 			s_campaignName.Format("Campaign %d", (int)local.size() + 1);
 		s_lastSave.clear();
-		CryLogAlways("[CoopSave] new campaign \"%s\" (%s)", s_campaignName.c_str(), s_campaign.c_str());
+		CoopText::Say("[CoopSave] new campaign \"%s\" (%s)", s_campaignName.c_str(), s_campaign.c_str());
 	}
 
 	// the AI system writes every object into the log while it (de)serializes
@@ -597,7 +598,7 @@ namespace
 	// on the host's own screen (in the game) and in the console
 	void TellHost(const char* msg)
 	{
-		CryLogAlways("[CoopSave] %s", msg);
+		CoopText::Say("[CoopSave] %s", msg);
 		if (g_pGame->GetIGameFramework()->IsGameStarted())
 			if (CGameRules* pRules = g_pGame->GetGameRules())
 				pRules->OnTextMessage(eTextMessageError, msg);
@@ -784,7 +785,7 @@ namespace
 	// a message for the player: the console, and the co-op menu's status line
 	void Status(const char* text)
 	{
-		CryLogAlways("[CoopSave] %s", text);
+		CoopText::Say("[CoopSave] %s", text);
 		s_menuStatus = text;
 	}
 	bool s_contDelete = false;          // coop_campaign_delete
@@ -874,7 +875,7 @@ namespace
 		s_contState = eCS_Listing;
 		if (CoopCloud::Enabled())
 		{
-			CryLogAlways("[CoopSave] looking for the campaigns (this PC and the cloud)...");
+			CoopText::Say("[CoopSave] looking for the campaigns (this PC and the cloud)...");
 			CoopCloud::RequestList();
 		}
 	}
@@ -941,11 +942,11 @@ namespace
 			if (s_contListOnly)
 			{
 				if (s_contList.empty())
-					CryLogAlways("No co-op campaigns yet. Start one with: coop_host");
+					CoopText::Say("No co-op campaigns yet. Start one with: coop_host");
 				for (size_t i = 0; i < s_contList.size(); ++i)
-					CryLogAlways("%s", Describe(s_contList[i], (int)i + 1).c_str());
+					CoopText::Say("%s", Describe(s_contList[i], (int)i + 1).c_str());
 				if (status != CoopCloud::eS_Done && CoopCloud::Enabled())
-					CryLogAlways("(the cloud did not answer: campaigns on this PC only)");
+					CoopText::Say("(the cloud did not answer: campaigns on this PC only)");
 				return;
 			}
 			const SEntry* pEntry = Pick(s_contList, s_contArg);
@@ -1047,7 +1048,7 @@ namespace
 		}
 		CoopAI::SetInventoryCarry(s_load.level.c_str(), carry);
 		CoopAI::OnGameLoaded();
-		CryLogAlways("[CoopSave] progress loaded: %s, checkpoint %s (saved %s)", s_load.level.c_str(), s_load.checkpoint.c_str(), s_load.time.c_str());
+		CoopText::Say("[CoopSave] progress loaded: %s, checkpoint %s (saved %s)", s_load.level.c_str(), s_load.checkpoint.c_str(), s_load.time.c_str());
 		// where the team goes back to when everybody is down
 		CoopRevive::OnCheckpoint("loaded");
 	}
@@ -1122,7 +1123,7 @@ namespace
 			arg += (arg.empty() ? "" : " ") + string(pArgs->GetArg(i));
 		if (arg.empty())
 		{
-			CryLogAlways("usage: coop_campaign_delete <number or name>   (see coop_campaigns)");
+			CoopText::Say("usage: coop_campaign_delete <number or name>   (see coop_campaigns)");
 			return;
 		}
 		StartListing(false, true, arg, false);
@@ -1138,15 +1139,16 @@ void CoopSave::Init()
 {
 	s_pCheckpoints = gEnv->pConsole->RegisterInt("coop_checkpoints", 1, 0,
 		"Crysis Coop: 1 = the host saves the campaign progress at its checkpoints and at every level start (coop_continue)");
+	// (the help in the game's language, as the console shows it)
 	gEnv->pConsole->AddCommand("coop_host", CmdHost, 0,
-		"Crysis Coop: host a new co-op campaign: coop_host [level] [campaign name]  (default: the first level)");
+		CoopText::ForConsole("Crysis Coop: host a new co-op campaign: coop_host [level] [campaign name]  (default: the first level)"));
 	gEnv->pConsole->AddCommand("coop_continue", CmdContinue, 0,
-		"Crysis Coop: host a co-op campaign from its last checkpoint: coop_continue [number or name] [prev]  (default: the newest)");
+		CoopText::ForConsole("Crysis Coop: host a co-op campaign from its last checkpoint: coop_continue [number or name] [prev]  (default: the newest)"));
 	gEnv->pConsole->AddCommand("coop_load", CmdLoad, 0,
-		"Crysis Coop: the host goes back to the last checkpoint (coop_load prev: the one before); friends join again by themselves");
-	gEnv->pConsole->AddCommand("coop_campaigns", CmdCampaigns, 0, "Crysis Coop: the co-op campaigns on this PC and in the cloud");
-	gEnv->pConsole->AddCommand("coop_campaign_delete", CmdDelete, 0, "Crysis Coop: delete a co-op campaign: coop_campaign_delete <number or name>");
-	gEnv->pConsole->AddCommand("coop_save", CmdSave, 0, "Crysis Coop: the host saves the co-op progress now");
+		CoopText::ForConsole("Crysis Coop: the host goes back to the last checkpoint (coop_load prev: the one before); friends join again by themselves"));
+	gEnv->pConsole->AddCommand("coop_campaigns", CmdCampaigns, 0, CoopText::ForConsole("Crysis Coop: the co-op campaigns on this PC and in the cloud"));
+	gEnv->pConsole->AddCommand("coop_campaign_delete", CmdDelete, 0, CoopText::ForConsole("Crysis Coop: delete a co-op campaign: coop_campaign_delete <number or name>"));
+	gEnv->pConsole->AddCommand("coop_save", CmdSave, 0, CoopText::ForConsole("Crysis Coop: the host saves the co-op progress now"));
 }
 
 void CoopSave::OnLoadingStart(const char* levelName)

@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "CoopText.h"
 #include "IAISystem.h"
 #include "IAgent.h"
 #include "IEntitySystem.h"
@@ -434,7 +435,7 @@ namespace
 		{
 			string cmd;
 			cmd.Format("map %s %s", level, CoopAI::MapOptions());
-			CryLogAlways("[Coop] no game running: %s", cmd.c_str());
+			CoopText::Say("[Coop] no game running: %s", cmd.c_str());
 			gEnv->pConsole->ExecuteString(cmd.c_str());
 			return;
 		}
@@ -678,7 +679,7 @@ namespace
 		gEnv->pConsole->AddCommand("coop_vehicle_restore", CmdVehicleRestore, 0, "Crysis Coop: restore a destroyed vehicle by entity name (server)");
 		gEnv->pConsole->AddCommand("coop_vehtest", CmdVehTest, 0, "Crysis Coop: drive the local player's vehicle forward/up for N seconds and log its speed");
 		gEnv->pConsole->AddCommand("coop_vehicle_drive", CmdVehicleDrive, 0, "Crysis Coop: make a vehicle drivable by its driver (server)");
-		gEnv->pConsole->AddCommand("coop_change_map", CmdChangeMap, 0, "Crysis Coop: go to another coop map with every connected player (server)");
+		gEnv->pConsole->AddCommand("coop_change_map", CmdChangeMap, 0, CoopText::ForConsole("Crysis Coop: go to another coop map with every connected player (server)"));
 		gEnv->pConsole->AddCommand("coop_inv_carry", CmdInvCarry, 0, "Crysis Coop: keep every player's inventory for the next coop map (server)");
 		gEnv->pConsole->AddCommand("coop_inv_restore", CmdInvRestore, 0, "Crysis Coop: give a player his (or another player's) last inventory snapshot (server)");
 		gEnv->pConsole->AddCommand("coop_mp_scope", CmdMultiplayerScope, 0, "Crysis Coop: 1 = begin / 0 = end network-mode scope for script calls");
