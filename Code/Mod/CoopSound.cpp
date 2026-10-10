@@ -37,6 +37,21 @@ namespace CoopSound
 				gEnv->pSoundSystem->Mute(false);
 			else if (!stricmp(what, "watch"))
 				s_anyFocus = true;
+			else if (IListener* pListener = gEnv->pSoundSystem->GetListener(LISTENERID_STANDARD))
+			{
+				// one frame of a broken listener (the game sets it again every frame)
+				const float nan = sqrtf(-1.0f + 0.0f * (float)pArgs->GetArgCount());
+				if (!stricmp(what, "nanpos"))
+					pListener->SetPosition(Vec3(nan, nan, nan));
+				else if (!stricmp(what, "nanvel"))
+					pListener->SetVelocity(Vec3(nan, nan, nan));
+				else if (!stricmp(what, "nanwater"))
+					pListener->SetUnderwater(nan);
+				else if (!stricmp(what, "bigvel"))
+					pListener->SetVelocity(Vec3(1e7f, 0, 0));
+				else if (!stricmp(what, "underwater"))
+					pListener->SetUnderwater(-5.0f);
+			}
 			bool active = false;
 			CryLogAlways("[CoopTest] coop_test_sound %s: paused %d, %d voices, output peak %.3f", what,
 				(int)gEnv->pSoundSystem->IsPaused(), gEnv->pSoundSystem->GetUsedVoices(), CoopSoundOutputPeak(&active));
@@ -51,7 +66,7 @@ namespace CoopSound
 		if (!s_registered)
 		{
 			s_registered = true;
-			gEnv->pConsole->AddCommand("coop_test_sound", CmdTestSound, 0, "Crysis Coop testing: coop_test_sound <pause|mute|unmute|watch>: the sound system paused (muted) as if by a fault; watch: the sound watch also without the window's focus");
+			gEnv->pConsole->AddCommand("coop_test_sound", CmdTestSound, 0, "Crysis Coop testing: coop_test_sound <pause|mute|unmute|watch|nanpos|nanvel|nanwater|bigvel|underwater>: the sound system paused (muted), or its listener broken for a frame, as if by a fault; watch: the sound watch also without the window's focus");
 		}
 		const float now = gEnv->pTimer->GetAsyncCurTime();
 
