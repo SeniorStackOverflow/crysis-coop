@@ -22,6 +22,7 @@
 #pragma comment(lib, "advapi32.lib")
 
 #include "StdAfx.h"
+#include "CoopText.h"
 #include "CoopRelay.h"
 #include "CoopAI.h"
 #include "CoopCloud.h"
@@ -1154,7 +1155,7 @@ namespace
 		if (CMPHub* pHub = pMenu ? pMenu->GetMPHub() : 0)
 		{
 			s_waitMessageDue = false;
-			pHub->ShowError("The host is loading the game. You will join again by yourself.", false);
+			pHub->ShowErrorText(CoopText::Wide(CoopText::Tr("The host is loading the game. You will join again by yourself.")).c_str());
 		}
 	}
 
@@ -1254,7 +1255,7 @@ namespace
 				return;
 			}
 			if (text)
-				pHub->ShowError(text, false);
+				pHub->ShowErrorText(CoopText::Wide(CoopText::Tr(text)).c_str());
 			else
 				pHub->DisconnectError((EDisconnectionCause)s_dropCause, false, s_dropText.c_str());
 		}

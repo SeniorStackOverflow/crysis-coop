@@ -155,3 +155,6 @@ that coop game is full	эта кооп-игра заполнена
 cannot reach the relay (internet connection?)	нет связи с ретранслятором (интернет?)
 this Windows has no WebSocket support (Windows 8 or later needed)	эта Windows не поддерживает WebSocket (нужна Windows 8 или новее)
 unknown error	неизвестная ошибка
+The host is loading the game. You will join again by yourself.	Хост загружает игру. Ты подключишься снова сам.
+AI companion cannot join: its game did not start. Esc > Co-op game: turn it off and on	ИИ-компаньон не может войти: его игра не запустилась. Esc > «Кооперативная игра»: выключи и включи его
+AI companion cannot join your game. Esc > Co-op game: turn it off and on	ИИ-компаньон не может войти в твою игру. Esc > «Кооперативная игра»: выключи и включи его
