@@ -1557,6 +1557,7 @@ void CoopAI::Init()
 		gEnv->pConsole->RegisterString("coop_debug_token", "", 0, "Crysis Coop testing: game token logged every 5 s");
 	}
 	if (gEnv->pConsole)
+		gEnv->pConsole->RegisterInt("coop_vehicle_protect", 0, 0, "Crysis Coop: 0 = vehicles take damage as in the single player game (a level's vehicle destroyed with players aboard comes back with them), 1 = a vehicle with players aboard takes no damage at all");
 		gEnv->pConsole->RegisterInt("coop_immersive", 1, 0, "Crysis Coop: 1 = coop levels start with the full physics of Crysis' DX10 multiplayer (towers, huts and trees break; destroyable objects explode), 0 = the plain multiplayer game (nothing breaks)");
 		gEnv->pConsole->RegisterInt("coop_god", 0, 0, "Crysis Coop testing: 1 = players take no damage, 2 = only the host's player");
 	if (gEnv->pConsole)
@@ -2181,6 +2182,15 @@ const char* CoopAI::MapOptions()
 	// nothing in a network game (its breakImpulseScale 0) and destroyable
 	// objects get the simple DX9 multiplayer physics
 	ICVar* pImmersive = gEnv->pConsole ? gEnv->pConsole->GetCVar("coop_immersive") : 0;
+	// an immersive server also runs the network game's own day (from the
+	// create game menu's server.cfg: a whole day in an hour, from noon); the
+	// campaign keeps its level's time of day
+	if (ICVar* pDay = gEnv->pConsole ? gEnv->pConsole->GetCVar("sv_timeofdayenable") : 0)
+		if (pDay->GetIVal() != 0)
+		{
+			CryLogAlways("[Coop] sv_timeofdayenable 0: the level keeps its own time of day");
+			pDay->Set(0);
+		}
 	return pImmersive && pImmersive->GetIVal() == 0 ? "s" : "s x";
 }
 
@@ -2321,11 +2331,13 @@ namespace
 
 namespace
 {
-	// Vehicles carrying players are made indestructible while occupied; when
-	// they are about to be destroyed the players die instead and the vehicle
-	// goes back, intact, to where it was a few seconds earlier - what a
-	// campaign checkpoint would do. The level's own vehicles (story VTOL,
-	// tanks, boats) are therefore never lost in the coop.
+	// coop_vehicle_protect 1: vehicles carrying players are made
+	// indestructible while occupied; when they are about to be destroyed the
+	// players die instead and the vehicle goes back, intact, to where it was
+	// a few seconds earlier. Indestructible takes every hit to nothing, so a
+	// vehicle with players never took damage at all: the default (0) is the
+	// single player game's damage. A level's vehicle destroyed with players
+	// in it comes back when they do (CoopGameRules.lua, 13b).
 	struct SProtectedVehicle
 	{
 		Matrix34 safe[6];
@@ -2333,11 +2345,13 @@ namespace
 		float emptyTime = 0.0f;
 	};
 	std::map<EntityId, SProtectedVehicle> s_protectedVehicles;
+	std::set<EntityId> s_vulnerableVehicles;	// made destructible once (protect 0)
 	float s_protectTimer = 0.0f;
 
 	void ClearProtectedVehicles()
 	{
 		s_protectedVehicles.clear();
+		s_vulnerableVehicles.clear();
 	}
 
 	void SetIndestructible(IVehicle* pVehicle, bool on)
@@ -2376,6 +2390,25 @@ namespace
 
 		IGameFramework* pFramework = g_pGame->GetIGameFramework();
 		IVehicleSystem* pVehicleSystem = pFramework->GetIVehicleSystem();
+
+		// coop_vehicle_protect 0: vehicles as in the single player game (one
+		// that players get into is made destructible once: a checkpoint saved
+		// by an older version may have kept it indestructible)
+		static ICVar* pProtect = gEnv->pConsole->GetCVar("coop_vehicle_protect");
+		if (!pProtect || pProtect->GetIVal() == 0)
+		{
+			for (std::map<EntityId, SProtectedVehicle>::iterator it = s_protectedVehicles.begin(); it != s_protectedVehicles.end(); ++it)
+				if (IVehicle* pVehicle = pVehicleSystem->GetVehicle(it->first))
+					SetIndestructible(pVehicle, false);
+			s_protectedVehicles.clear();
+			IActorIteratorPtr pPlayers = pFramework->GetIActorSystem()->CreateActorIterator();
+			while (IActor* pActor = pPlayers->Next())
+				if (pActor->IsPlayer())
+					if (IVehicle* pVehicle = pActor->GetLinkedVehicle())
+						if (s_vulnerableVehicles.insert(pVehicle->GetEntityId()).second)
+							SetIndestructible(pVehicle, false);
+			return;
+		}
 
 		// vehicles with players in them
 		std::set<EntityId> occupied;

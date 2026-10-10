@@ -3877,6 +3877,37 @@ namespace
 			(int)gEnv->bMultiplayer, (int)gEnv->bServer);
 	}
 
+	// coop_test_vehdamage [vehicle]: a vehicle's damage (this game's
+	// player's by default): the whole and every component
+	void CmdTestVehDamage(IConsoleCmdArgs* pArgs)
+	{
+		IVehicleSystem* pVehicles = g_pGame->GetIGameFramework()->GetIVehicleSystem();
+		IVehicle* pVehicle = 0;
+		if (pArgs->GetArgCount() > 1)
+		{
+			if (IEntity* pEntity = gEnv->pEntitySystem->FindEntityByName(pArgs->GetArg(1)))
+				pVehicle = pVehicles->GetVehicle(pEntity->GetId());
+		}
+		else if (IActor* pMe = g_pGame->GetIGameFramework()->GetClientActor())
+			pVehicle = pMe->GetLinkedVehicle();
+		if (!pVehicle)
+		{
+			CryLogAlways("[CoopTest] coop_test_vehdamage: no such vehicle");
+			return;
+		}
+		string parts;
+		for (int i = 0; i < pVehicle->GetComponentCount(); ++i)
+			if (IVehicleComponent* pComp = pVehicle->GetComponent(i))
+				if (pComp->GetDamageRatio() > 0.0f)
+				{
+					string one;
+					one.Format(" %s=%.2f", pComp->GetComponentName(), pComp->GetDamageRatio());
+					parts += one;
+				}
+		CryLogAlways("[CoopTest] vehicle %s damage %.2f (major %.2f), destroyed %d, components hit:%s", pVehicle->GetEntity()->GetName(),
+			pVehicle->GetDamageRatio(false), pVehicle->GetDamageRatio(true), (int)pVehicle->IsDestroyed(), parts.empty() ? " none" : parts.c_str());
+	}
+
 	// coop_test_levelmodels: the campaign level's own models (Levels/<level>/
 	// brush/*.cgf): how many the engine has, how many are its default ball
 	void CmdTestLevelModels(IConsoleCmdArgs*)
@@ -4042,6 +4073,7 @@ void CoopAgent::Init()
 	gEnv->pConsole->AddCommand("coop_test_vehview", CmdTestVehView, 0, "Crysis Coop testing: coop_test_vehview: the vehicle seat's next view for this game's player");
 	gEnv->pConsole->AddCommand("coop_test_findobj", CmdTestFindObj, 0, "Crysis Coop testing: coop_test_findobj [x y z] [radius] [filter]: physical things near a place, their model, parts and breakable joints");
 	gEnv->pConsole->AddCommand("coop_test_physvars", CmdTestPhysVars, 0, "Crysis Coop testing: coop_test_physvars [multiplayer|breakscale|playerscanbreak value]: the physics settings that decide breaking");
+	gEnv->pConsole->AddCommand("coop_test_vehdamage", CmdTestVehDamage, 0, "Crysis Coop testing: coop_test_vehdamage [vehicle]: a vehicle's damage, whole and by component");
 	gEnv->pConsole->AddCommand("coop_test_levelmodels", CmdTestLevelModels, 0, "Crysis Coop testing: coop_test_levelmodels: the level's own brush models found / default balls");
 	gEnv->pConsole->AddCommand("coop_test_enter", CmdTestEnter, 0, "Crysis Coop testing: coop_test_enter <vehicle> <seat id>: the host's player gets in (server)");
 	gEnv->pConsole->AddCommand("coop_test_path", CmdTestPath, 0,

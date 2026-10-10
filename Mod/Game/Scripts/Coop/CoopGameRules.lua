@@ -616,7 +616,14 @@ function TeamInstantAction.Server:OnHit(hit)
 		hit.damage = 0;
 	end
 	local before = target and target.actor and target.actor:GetHealth();
+	local vehBefore = target and target.vehicle and target.vehicle:GetRepairableDamage();
 	local r = stockOnHit(self, hit);
+	-- debug record of a hit on a vehicle
+	if (C.DEBUG and target and target.vehicle) then
+		CoopLog(string.format("HIT vehicle %s by %s weapon=%s type=%s dmg=%.1f damage %s->%s",
+			tostring(target:GetName()), tostring(shooter and shooter:GetName()), tostring(hit.weapon and hit.weapon.class),
+			tostring(hit.type), hit.damage or 0, tostring(vehBefore), tostring(target.vehicle:GetRepairableDamage())));
+	end
 	-- debug record of every hit on an actor
 	if (C.DEBUG and target and target.actor) then
 		local after = target.actor:GetHealth();
