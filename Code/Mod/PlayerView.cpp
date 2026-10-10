@@ -862,43 +862,111 @@ void CPlayerView::ViewFirstPerson(SViewParams &viewParams)
 		}
 }
 
+// Crysis Coop: the local player's camera in a vehicle seat. A seat's third
+// person view in the network game may stop following the vehicle: it stays
+// where it was (the user could not see himself), or at the map's origin under
+// the sea after a checkpoint (grey, the sound of water). The view is then
+// updated by hand; if that does not bring it back, the seat goes back to a
+// view that has a place (first person). A view newly taken starts behind
+// the vehicle.
+static void CoopVehicleCamera(IVehicle* pVehicle, EntityId me, SViewParams &viewParams)
+{
+	static EntityId s_vehicle = 0;
+	static IVehicleSeat* s_seat = 0;
+	static TVehicleViewId s_viewId = InvalidVehicleViewId;
+	static Vec3 s_cam(ZERO), s_veh(ZERO);
+	static float s_stuckFor = 0.0f, s_loggedAt = -100.0f;
+	static int s_byHand = 0, s_frames = 0;
+	static bool s_manual = false;	// the engine left this view: updated here every frame
+
+	IVehicleSeat* pSeat = pVehicle->GetSeatForPassenger(me);
+	if (!pSeat)
+		return;
+	const TVehicleViewId viewId = pSeat->GetCurrentView();
+	IVehicleView* pView = pSeat->GetView(viewId);
+	const Vec3 vehPos = pVehicle->GetEntity()->GetWorldPos();
+	const float dt = max(gEnv->pTimer->GetFrameTime(), 0.001f);
+	const float now = gEnv->pTimer->GetCurrTime();
+
+	if (s_vehicle != pVehicle->GetEntityId() || s_seat != pSeat || s_viewId != viewId)
+	{
+		s_vehicle = pVehicle->GetEntityId();
+		s_seat = pSeat;
+		s_viewId = viewId;
+		s_stuckFor = 0.0f;
+		s_manual = false;
+		if (pView && pView->IsThirdPerson())
+		{
+			pView->ResetPosition();
+			pView->Update(dt);
+			pVehicle->UpdateView(viewParams, me);
+		}
+	}
+	else if (pView && pView->IsThirdPerson())
+	{
+		++s_frames;
+		// standing still while the vehicle moves, or far from it
+		const bool still = viewParams.position.GetSquaredDistance(s_cam) < sqr(0.001f) && vehPos.GetSquaredDistance(s_veh) > sqr(0.01f);
+		if (s_manual || still || viewParams.position.GetDistance(vehPos) > 30.0f)
+		{
+			const Vec3 was = viewParams.position;
+			const char* why = still ? "stood still" : (was.GetDistance(vehPos) > 30.0f ? "was far" : "is left by the engine");
+			const bool wasManual = s_manual;
+			pView->Update(dt);
+			pVehicle->UpdateView(viewParams, me);
+			const bool fixed = viewParams.position.GetSquaredDistance(was) > sqr(0.001f) && viewParams.position.GetDistance(vehPos) <= 30.0f;
+			s_stuckFor = fixed || s_manual ? 0.0f : s_stuckFor + dt;
+			if (fixed)
+				s_manual = true;
+			++s_byHand;
+			if (now - s_loggedAt > (wasManual ? 30.0f : 5.0f))
+			{
+				CryLogAlways("[Coop] %s's third person camera in %s %s (%.0f m off): updated by hand (%d of %d frames), %s", pVehicle->GetEntity()->GetName(),
+					pSeat->GetSeatName(), why, was.GetDistance(vehPos), s_byHand, s_frames, fixed || s_manual ? "follows again" : "still stuck");
+				s_loggedAt = now;
+				s_byHand = s_frames = 0;
+			}
+		}
+		else
+			s_stuckFor = 0.0f;
+	}
+
+	if (s_stuckFor > 1.0f || viewParams.position.GetDistance(vehPos) > 50.0f)
+	{
+		TVehicleViewId first = viewId;
+		for (TVehicleViewId id = pSeat->GetNextView(viewId); id != viewId && id != InvalidVehicleViewId; id = pSeat->GetNextView(id))
+			if (IVehicleView* pOther = pSeat->GetView(id))
+				if (!pOther->IsThirdPerson())
+				{
+					first = id;
+					break;
+				}
+		if (now - s_loggedAt > 5.0f || s_stuckFor > 1.0f)
+		{
+			s_loggedAt = now;
+			CryLogAlways("[Coop] %s's camera in %s was %.0f m off (view %d): view %d now", pVehicle->GetEntity()->GetName(),
+				pSeat->GetSeatName(), viewParams.position.GetDistance(vehPos), (int)viewId, (int)first);
+		}
+		s_stuckFor = 0.0f;
+		if (first != viewId && pSeat->SetView(first))
+		{
+			s_viewId = first;
+			pVehicle->UpdateView(viewParams, me);
+		}
+	}
+
+	s_cam = viewParams.position;
+	s_veh = vehPos;
+}
+
 void CPlayerView::ViewVehicle(SViewParams &viewParams)
 {
 	if (m_in.pVehicle)
 	{
 		m_in.pVehicle->UpdateView(viewParams, m_in.entityId);
 		viewParams.viewID = 2;		
-		// Crysis Coop: a seat's view that has no place (its third person view
-		// after a checkpoint, or switched to in the network game) puts the
-		// camera at the map's origin, under the sea: grey, the sound of
-		// water. The seat goes back to a view that has one (first person)
-		if (CoopAI::IsCoopSession() && m_in.entityId == g_pGame->GetIGameFramework()->GetClientActorId()
-			&& viewParams.position.GetDistance(m_in.pVehicle->GetEntity()->GetWorldPos()) > 50.0f)
-		{
-			IVehicleSeat* pSeat = m_in.pVehicle->GetSeatForPassenger(m_in.entityId);
-			if (pSeat)
-			{
-				const TVehicleViewId was = pSeat->GetCurrentView();
-				TVehicleViewId first = was;
-				for (TVehicleViewId id = pSeat->GetNextView(was); id != was && id != InvalidVehicleViewId; id = pSeat->GetNextView(id))
-					if (IVehicleView* pView = pSeat->GetView(id))
-						if (!pView->IsThirdPerson())
-						{
-							first = id;
-							break;
-						}
-				static float s_loggedAt = -100.0f;
-				const float now = gEnv->pTimer->GetCurrTime();
-				if (now - s_loggedAt > 5.0f)
-				{
-					s_loggedAt = now;
-					CryLogAlways("[Coop] %s's camera in %s was %.0f m off (view %d): view %d now", m_in.pVehicle->GetEntity()->GetName(),
-						pSeat->GetSeatName(), viewParams.position.GetDistance(m_in.pVehicle->GetEntity()->GetWorldPos()), (int)was, (int)first);
-				}
-				if (first != was && pSeat->SetView(first))
-					m_in.pVehicle->UpdateView(viewParams, m_in.entityId);
-			}
-		}
+		if (CoopAI::IsCoopSession() && m_in.entityId == g_pGame->GetIGameFramework()->GetClientActorId())
+			CoopVehicleCamera(m_in.pVehicle, m_in.entityId, viewParams);
 	}
 }
 

@@ -2866,8 +2866,14 @@ namespace
 			++s_slow;
 		if (s_sum >= 60000.0f)
 		{
-			CryLogAlways("[CoopPerf] last minute: %.0f fps on average, worst frame %.0f ms, %d frames over 100 ms",
-				s_frames * 1000.0f / s_sum, s_worst, s_slow);
+			// and the sound system (it once fell silent in a big fight)
+			int soundMem = 0, soundMemMax = 0;
+			if (gEnv->pSoundSystem)
+				gEnv->pSoundSystem->GetSoundMemoryUsageInfo(&soundMem, &soundMemMax);
+			CryLogAlways("[CoopPerf] last minute: %.0f fps on average, worst frame %.0f ms, %d frames over 100 ms; sound: %d voices, cpu %.1f, memory %.1f of %.1f MB%s",
+				s_frames * 1000.0f / s_sum, s_worst, s_slow, gEnv->pSoundSystem ? gEnv->pSoundSystem->GetUsedVoices() : 0,
+				gEnv->pSoundSystem ? gEnv->pSoundSystem->GetCPUUsage() : 0.0f, soundMem / 1048576.0f, soundMemMax / 1048576.0f,
+				gEnv->pSoundSystem && gEnv->pSoundSystem->IsPaused() ? " PAUSED" : "");
 			s_sum = s_worst = 0.0f;
 			s_frames = s_slow = 0;
 		}

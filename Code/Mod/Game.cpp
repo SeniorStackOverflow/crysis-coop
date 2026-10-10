@@ -18,6 +18,7 @@
 #include "CoopAI.h"
 #include "CoopRelay.h"
 #include "CoopSave.h"
+#include "CoopSound.h"
 #include "GameActions.h"
 #include "Menus/FlashMenuObject.h"
 #include "Menus/OptionsManager.h"
@@ -420,6 +421,7 @@ int CGame::Update(bool haveFocus, unsigned int updateFlags)
 
 	m_pFramework->PostUpdate( true, updateFlags );
 	CoopAgent::EndFrame();
+	CoopSound::Update(haveFocus);
 
 	if(m_inDevMode != gEnv->pSystem->IsDevMode())
 	{
