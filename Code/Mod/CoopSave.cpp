@@ -243,7 +243,17 @@ namespace
 				a.Format("%s%s:%d", i ? "," : "", inv.ammo[i].first.c_str(), inv.ammo[i].second);
 				ammo += a;
 			}
-			line.Format("player=%s\t%s\t%s\t%s\t%s\n", it->first.c_str(), inv.name.c_str(), inv.current.c_str(), items.c_str(), ammo.c_str());
+			// the accessories: SCAR:Silencer+Reflex;FY71:AssaultScope (an older
+			// mod reads the first five fields)
+			string attached;
+			for (std::map<string, std::vector<string> >::const_iterator w = inv.attached.begin(); w != inv.attached.end(); ++w)
+			{
+				attached += (attached.empty() ? "" : ";") + w->first + ":";
+				for (size_t i = 0; i < w->second.size(); ++i)
+					attached += (i ? "+" : "") + w->second[i];
+			}
+			line.Format("player=%s\t%s\t%s\t%s\t%s\t%s\n", it->first.c_str(), inv.name.c_str(), inv.current.c_str(), items.c_str(), ammo.c_str(),
+				attached.c_str());
 			text += line;
 		}
 		return text;
@@ -305,6 +315,22 @@ namespace
 					Split(list[i], ':', pair);
 					if (pair.size() == 2 && !pair[0].empty())
 						inv.ammo.push_back(std::make_pair(pair[0], atoi(pair[1].c_str())));
+				}
+				if (fields.size() > 5)
+				{
+					std::vector<string> weapons, kinds;
+					Split(fields[5], ';', weapons);
+					for (size_t w = 0; w < weapons.size(); ++w)
+					{
+						Split(weapons[w], ':', pair);
+						if (pair.size() != 2 || pair[0].empty())
+							continue;
+						std::vector<string>& on = inv.attached[pair[0]];
+						Split(pair[1], '+', kinds);
+						for (size_t k = 0; k < kinds.size(); ++k)
+							if (!kinds[k].empty())
+								on.push_back(kinds[k]);
+					}
 				}
 			}
 		}
@@ -586,6 +612,10 @@ namespace
 			return "the host is dead";
 		if (CoopAI::IsAirborne(pHost->GetEntityId()))
 			return "the host is in the air";
+		// not in the middle of a story dialog: the load does not bring it back
+		// and its level's dialog lock would stay busy (no more story voices)
+		if (CoopAI::DialogBusy() && s_pendingFor < 60.0f)
+			return "a story dialog is playing";
 		return 0;
 	}
 
@@ -1022,13 +1052,17 @@ namespace
 		}
 		if (!limitRestored)
 			TellHost("Friends may not be able to join this game: if they cannot, host it again with coop_continue");
-		// saved before 0.11.3 with other players in the game: a soldier who
-		// had one of them as his target came back with an empty target and
-		// the AI system crashed on its first update. The AI starts afresh
-		// instead (the soldiers where they were saved, their alarm forgotten)
-		if (!s_load.aiQuiet && s_load.players.size() > 1)
+		// saved with other players in the campaign: an AI that saw one of them
+		// (a soldier, a vehicle) keeps that in its perception, the save keeps
+		// it, and the player is not in the save: it comes back as an empty
+		// entry and the AI system crashes on that AI's first update (at once,
+		// or when it wakes). Turning their AI off before saving
+		// (QuietRemotePlayers) reaches only the AI updated meanwhile (not a
+		// vehicle whose crew died). The AI starts afresh instead (the
+		// soldiers where they were saved, their alarm forgotten)
+		if (s_load.players.size() > 1)
 		{
-			CryLogAlways("[CoopSave] an older checkpoint saved with %d players: the AI starts afresh (it crashed otherwise)", (int)s_load.players.size());
+			CryLogAlways("[CoopSave] a checkpoint of a campaign with %d players: the AI starts afresh (it crashed otherwise)", (int)s_load.players.size());
 			gEnv->pAISystem->Reset(IAISystem::RESET_ENTER_GAME);
 		}
 		// whoever hosts now gets his own equipment (the save has the one of

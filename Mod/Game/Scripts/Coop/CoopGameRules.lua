@@ -649,6 +649,48 @@ function CoopGod(target)
 end
 
 local stockProcessActorDamage = TeamInstantAction.ProcessActorDamage;
+
+-- an NPC is hurt as in SinglePlayer:ProcessActorDamage (the network game's
+-- rule just takes the damage off): story characters (Properties.bInvulnerable:
+-- the squad mates, Strickland, US crews...) take none; a friendly soldier a
+-- player would kill falls down instead, as do actors with Damage.bNoDeath.
+-- In single player only the local player is the one who may not kill
+-- friendlies; here every player is
+function CoopNPCDamage(self, hit, target)
+	local props = target.Properties;
+	local health = target.actor:GetHealth();
+	if (props and tonumber(props.bInvulnerable) == 1) then
+		if (C.DEBUG and (hit.damage or 0) > 0) then
+			CoopLog(string.format("HIT %s by %s: no damage (invulnerable, as in single player)", tostring(target:GetName()),
+				tostring(hit.shooter and hit.shooter:GetName())));
+		end
+		return (health <= 0);
+	end
+	health = math.floor(health - (hit.damage or 0) * (1 - self:GetDamageAbsorption(target, hit)));
+	if (health <= 0) then
+		local fall = props and props.Damage and tonumber(props.Damage.bNoDeath) == 1;
+		local shooter = hit.shooter or (hit.shooterId and System.GetEntity(hit.shooterId));
+		-- friendly: not hostile to the shooter by the AI system; with no AI
+		-- object yet (hidden till its scene) by its species (0: the US side)
+		if (not fall and shooter and shooter.actor and shooter.actor:IsPlayer() and AI) then
+			if (AI.GetTypeOf and AI.GetTypeOf(target.id)) then
+				fall = not AI.Hostile(target.id, shooter.id, false);
+			else
+				fall = props and tonumber(props.species) == 0;
+			end
+		end
+		if (fall) then
+			if (C.DEBUG) then
+				CoopLog(string.format("HIT %s by %s: falls instead of dying (friendly / no death, as in single player)",
+					tostring(target:GetName()), tostring(shooter and shooter:GetName())));
+			end
+			target.actor:Fall(hit.pos);
+			return false;
+		end
+	end
+	target.actor:SetHealth(health);
+	return (health <= 0);
+end
 function TeamInstantAction:ProcessActorDamage(hit)
 	local target = hit.target;
 	if (target and target.actor and target.actor:IsPlayer() and CoopGod(target)) then
@@ -686,7 +728,12 @@ function TeamInstantAction:ProcessActorDamage(hit)
 		return (health <= 0);
 	end
 	local before = target and target.actor and target.actor:GetHealth();
-	local died = stockProcessActorDamage(self, hit);
+	local died;
+	if (target and target.actor and not target.actor:IsPlayer()) then
+		died = CoopNPCDamage(self, hit, target);
+	else
+		died = stockProcessActorDamage(self, hit);
+	end
 	if (C.DEBUG and hit.explosion and target and target.actor) then
 		CoopLog(string.format("HIT %s by %s explosion type=%s dmg=%.1f hp %s->%s%s", tostring(target:GetName()),
 			tostring(hit.shooter and hit.shooter:GetName()), tostring(hit.type), hit.damage or 0, tostring(before),

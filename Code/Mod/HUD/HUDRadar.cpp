@@ -1002,7 +1002,11 @@ void CHUDRadar::UpdateCompassStealth(CActor *pActor, float fDeltaTime)
 	float fStealthValue = 0;
 	float fStealthValueStatic = 0;
 
-	if(!gEnv->bMultiplayer)
+	// Crysis Coop: every player's own, as in single player (CoopAI)
+	if(CoopAI::GetStealth(fStealthValue, fStealthValueStatic))
+	{
+	}
+	else if(!gEnv->bMultiplayer)
 	{
 		SAIDetectionLevels levels;
 		gEnv->pAISystem->GetDetectionLevels(0, levels);
@@ -1033,7 +1037,7 @@ void CHUDRadar::UpdateCompassStealth(CActor *pActor, float fDeltaTime)
 		m_flashRadar->CheckedInvoke("Root.RadarCompassStealth.StealthBar.gotoAndStop", fStealthValue);
 		m_fLastStealthValue = fStealthValue;
 	}		
-	if(m_fLastStealthValueStatic != fStealthValueStatic && !gEnv->bMultiplayer)
+	if(m_fLastStealthValueStatic != fStealthValueStatic && (!gEnv->bMultiplayer || CoopAI::IsCoopSession()))
 	{
 		//m_flashRadar->CheckedInvoke("Root.RadarCompassStealth.StealthExposure.gotoAndStop", fStealthValueStatic);
 

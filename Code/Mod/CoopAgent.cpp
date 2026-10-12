@@ -343,7 +343,9 @@ namespace
 		float weaponAt;
 		EntityId loot;
 		float lootSince, useAt, useBlocked;
-		std::set<EntityId> lootFailed;
+		int lootUses;            // use pressed at the one it goes for
+		float lootNear;          // the closest its eyes came to it
+		std::map<EntityId, float> lootFailed;   // given up on, and when (tried again a minute later)
 		// a way around what is in the way (from the host's game: its AI
 		// navigation), and where to
 		std::vector<Vec3> path;
@@ -597,14 +599,18 @@ namespace
 		if (!fresh)
 		{
 			path.clear();
-			if (blocked && dist > 3.0f)
+			// also close by: an item behind a container's wall is 1 m away
+			// and the way in is round by the door
+			if (blocked)
 				AskPath(to);
 			return to;
 		}
 		// the way starts where the host's game has it (a little off, maybe):
-		// from the point nearest to it, and on past every one reached
+		// from the point nearest to it, and on past every one reached. The
+		// goal itself (the way's last point) is not one of them: next to it
+		// on the wrong side of a wall, the way round would be thrown away
 		size_t nearest = 0;
-		for (size_t i = 1; i < path.size(); ++i)
+		for (size_t i = 1; i + 1 < path.size(); ++i)
 			if (Dist2D(path[i], pos) < Dist2D(path[nearest], pos))
 				nearest = i;
 		path.erase(path.begin(), path.begin() + nearest);
@@ -638,7 +644,7 @@ namespace
 			return true;
 		}
 		// around what is in the way, by the host's navigation
-		const bool blocked = s_bot.stuck > 0 || (dist > 3.0f && !ClearWay(pMe, pos, to));
+		const bool blocked = s_bot.stuck > 0 || !ClearWay(pMe, pos, to);
 		Vec3 next = Waypoint(pMe, pos, to, dist, blocked);
 		Vec3 dn = next - pos;
 		dn.z = 0;
@@ -664,7 +670,11 @@ namespace
 				++s_bot.stuckTimes;
 			}
 			if (s_bot.stuck == 5)
+			{
 				s_bot.pathAt = -100.0f;    // the way it had led nowhere: a new one
+				s_bot.pathAskAt = 0.0f;
+				AskPath(to);
+			}
 			if (s_bot.stuck >= 15 && mayCatchUp && dist > 8.0f)
 			{
 				Ask(1, toName);
@@ -786,6 +796,39 @@ namespace
 		Event("takes the %s%s", cls, currentRank && !currentShots ? " (no ammo left for the other one)" : "");
 	}
 
+	bool LootGivenUp(EntityId id)
+	{
+		std::map<EntityId, float>::iterator it = s_bot.lootFailed.find(id);
+		if (it == s_bot.lootFailed.end())
+			return false;
+		if (Now() - it->second < 60.0f)
+			return true;
+		s_bot.lootFailed.erase(it);
+		return false;
+	}
+
+	// this one, and what lies with it (the rest of a box's content behind
+	// the same wall), left alone for a minute
+	void GiveUpLoot(IEntity* pLoot, const char* why)
+	{
+		if (!pLoot)
+			return;
+		const Vec3 at = pLoot->GetWorldPos();
+		SEntityProximityQuery query;
+		query.box = AABB(at - Vec3(2.0f, 2.0f, 1.5f), at + Vec3(2.0f, 2.0f, 1.5f));
+		gEnv->pEntitySystem->QueryProximity(query);
+		int n = 0;
+		for (int i = 0; i < query.nCount; ++i)
+			if (query.pEntities[i] && g_pGame->GetIGameFramework()->GetIItemSystem()->GetItem(query.pEntities[i]->GetId()))
+			{
+				s_bot.lootFailed[query.pEntities[i]->GetId()] = Now();
+				++n;
+			}
+		s_bot.lootFailed[pLoot->GetId()] = Now();
+		if (why)
+			Event("leaves the %s and %d more there: %s", pLoot->GetClass()->GetName(), max(0, n - 1), why);
+	}
+
 	// a weapon or ammo on the ground worth going for: a better weapon than
 	// it has, or ammo for one it has when it runs low
 	IEntity* FindLoot(CPlayer* pMe, const Vec3& pos, float range)
@@ -804,7 +847,7 @@ namespace
 		for (int i = 0; i < query.nCount; ++i)
 		{
 			IEntity* pEntity = query.pEntities[i];
-			if (!pEntity || pEntity->IsHidden() || s_bot.lootFailed.count(pEntity->GetId()))
+			if (!pEntity || pEntity->IsHidden() || LootGivenUp(pEntity->GetId()))
 				continue;
 			IItem* pItem = pItems->GetItem(pEntity->GetId());
 			if (!pItem || pItem->GetOwnerId())
@@ -854,18 +897,36 @@ namespace
 				return false;
 			s_bot.loot = pLoot->GetId();
 			s_bot.lootSince = Now();
-			Event("goes to pick up the %s (%.0f m)", pLoot->GetClass()->GetName(), Dist2D(pLoot->GetWorldPos(), pos));
+			s_bot.lootUses = 0;
+			s_bot.lootNear = 1000.0f;
+			Event("goes to pick up the %s (%.0f m, at %.1f %.1f %.1f)", pLoot->GetClass()->GetName(), Dist2D(pLoot->GetWorldPos(), pos),
+				pLoot->GetWorldPos().x, pLoot->GetWorldPos().y, pLoot->GetWorldPos().z);
 		}
 		if (Now() - s_bot.lootSince > 20.0f)
 		{
 			// out of reach: something else
-			s_bot.lootFailed.insert(s_bot.loot);
+			string why;
+			why.Format("out of reach (its eyes came %.1f m close, use pressed %d times)", s_bot.lootNear, s_bot.lootUses);
+			GiveUpLoot(pLoot, why.c_str());
 			s_bot.loot = 0;
 			return false;
 		}
 		const Vec3 at = pLoot->GetWorldPos();
 		Fire(pMe, false);
-		if (!MoveTo(pMe, at, 1.0f, !fighting, false, ""))
+		// there only when the hand can reach it: near and nothing solid
+		// between (next to a container with the ammo inside it is not)
+		// (toward its middle: where it lies, the floor or the shelf under it
+		// is hit first; something hit right at it is what it lies on)
+		IPhysicalEntity* skip[2] = { pMe->GetEntity()->GetPhysics(), pLoot->GetPhysics() };
+		AABB box;
+		pLoot->GetWorldBounds(box);
+		const Vec3 middle = box.IsEmpty() ? at : box.GetCenter();
+		const float away = eye.GetDistance(middle);
+		ray_hit wall;
+		const bool reach = away < 2.2f
+			&& !(FirstBlock(eye, middle - eye, ent_static | ent_rigid | ent_sleeping_rigid, skip, 2, wall, eT_Walk) && wall.dist < away - 0.4f);
+		s_bot.lootNear = min(s_bot.lootNear, away);
+		if (!MoveTo(pMe, at, reach ? 1.0f : 0.2f, !fighting, false, ""))
 		{
 			if (Dist2D(at, pos) < 4.0f)
 				LookAt(eye, at, 6.0f);
@@ -890,7 +951,7 @@ namespace
 				else if (Now() - s_bot.useBlocked > 3.0f)
 				{
 					Event("leaves the %s: a %s lies on it", pLoot->GetClass()->GetName(), pOver->GetName());
-					s_bot.lootFailed.insert(s_bot.loot);
+					GiveUpLoot(pLoot, 0);
 					s_bot.loot = 0;
 					s_bot.useBlocked = 0.0f;
 					return false;
@@ -903,6 +964,7 @@ namespace
 				Press(pMe, g_pGame->Actions().use, true);
 				Press(pMe, g_pGame->Actions().use, false);
 				s_bot.useAt = Now() + 1.2f;
+				++s_bot.lootUses;
 			}
 		}
 		s_bot.doing.Format("picking up the %s", pLoot->GetClass()->GetName());

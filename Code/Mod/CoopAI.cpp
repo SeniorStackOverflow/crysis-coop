@@ -70,6 +70,15 @@ namespace
 	void ClearAlwaysAnimated();
 	void ResetLoadoutCatchup();
 	void UpdateTimeOfDaySync(float frameTime, int channelId = 0);
+	void TakeLevelTOD(const char* why);
+	void WatchLevelTOD();
+	void KeepLevelTOD();
+	void OpenSoundLimits();
+	void UpdateDialogLock(float frameTime);
+	void UpdateStealth(float frameTime);
+	void LocalStealth(float& bar, float& exposure);
+	void CmdTestStealth(IConsoleCmdArgs*);
+	bool DialogLockBusy();
 	void UpdateTeamMates(float frameTime);
 	void UpdateAIStateSync(float frameTime);
 	void UpdateCutscenePresentation();
@@ -341,7 +350,17 @@ namespace
 			return false;
 		for (int i = 0; i < pInv->GetCount(); ++i)
 			if (IEntity* pItem = gEnv->pEntitySystem->GetEntity(pInv->GetItem(i)))
+			{
 				snap.items.push_back(pItem->GetClass()->GetName());
+				CItem* pWeapon = static_cast<CItem*>(g_pGame->GetIGameFramework()->GetIItemSystem()->GetItem(pItem->GetId()));
+				if (pWeapon && pWeapon->GetIWeapon())
+				{
+					std::vector<string>& on = snap.attached[pItem->GetClass()->GetName()];
+					const CItem::TAccessoryMap* pAcc = pWeapon->GetAttachedAccessories();
+					for (CItem::TAccessoryMap::const_iterator it = pAcc->begin(); it != pAcc->end(); ++it)
+						on.push_back(it->first.c_str());
+				}
+			}
 		for (int i = 0; i < pInv->GetAmmoTypeCount(); ++i)
 			if (IEntityClass* pAmmo = pInv->GetAmmoTypeByIdx(i))
 				snap.ammo.push_back(std::make_pair(string(pAmmo->GetName()), pInv->GetAmmoCount(pAmmo)));
@@ -350,8 +369,74 @@ namespace
 		return true;
 	}
 
+	// Accessories put back on a given weapon reach the other machines as the
+	// weapon modification menu's do (ClAttachAccessory switches it there too),
+	// once the new weapon is known on the network
+	struct SAccessorySync
+	{
+		EntityId item;
+		string accessory;
+		float wait;
+	};
+	std::vector<SAccessorySync> s_accessorySync;
+
+	void SendAccessorySwitches(float frameTime)
+	{
+		for (size_t i = 0; i < s_accessorySync.size(); )
+		{
+			SAccessorySync& a = s_accessorySync[i];
+			a.wait -= frameTime;
+			CItem* pItem = static_cast<CItem*>(g_pGame->GetIGameFramework()->GetIItemSystem()->GetItem(a.item));
+			if (pItem && a.wait <= 0.0f && CoopAI::IsNetBound(a.item))
+				pItem->GetGameObject()->InvokeRMI(CItem::ClAttachAccessory(), CItem::RequestAttachAccessoryParams(a.accessory.c_str()),
+					eRMI_ToAllClients | eRMI_NoLocalCalls);
+			else if (pItem && a.wait > -5.0f)
+			{
+				++i;
+				continue;
+			}
+			s_accessorySync.erase(s_accessorySync.begin() + i);
+		}
+	}
+
+	// the accessories the snapshot had on this weapon: on it again, and the
+	// default ones it did not have taken off
+	void PutBackAccessories(IActor* pTarget, CItem* pWeapon, const std::vector<string>& want)
+	{
+		std::vector<string> switches;
+		const CItem::TAccessoryMap* pAcc = pWeapon->GetAttachedAccessories();
+		for (CItem::TAccessoryMap::const_iterator it = pAcc->begin(); it != pAcc->end(); ++it)
+			if (std::find(want.begin(), want.end(), string(it->first.c_str())) == want.end())
+				switches.push_back(it->first.c_str());
+		for (size_t i = 0; i < want.size(); ++i)
+			if (!pWeapon->GetAccessory(want[i].c_str()))
+				switches.push_back(want[i]);
+		if (switches.empty())
+			return;
+		IInventory* pInv = pTarget->GetInventory();
+		string done;
+		for (size_t i = 0; i < switches.size(); ++i)
+		{
+			// a switch with this one on takes it off, else it goes on
+			// (replacing what is on the same place of the weapon)
+			const bool on = pWeapon->GetAccessory(switches[i].c_str()) != 0;
+			if (!on && pInv && pInv->GetCountOfClass(switches[i].c_str()) == 0)
+				g_pGame->GetIGameFramework()->GetIItemSystem()->GiveItem(pTarget, switches[i].c_str(), false, false, false);
+			pWeapon->DoSwitchAccessory(switches[i].c_str());
+			SAccessorySync a;
+			a.item = pWeapon->GetEntityId();
+			a.accessory = switches[i];
+			a.wait = 0.5f;
+			s_accessorySync.push_back(a);
+			done += (done.empty() ? "" : ",") + string(on ? "-" : "+") + switches[i];
+		}
+		CryLogAlways("[CoopInv] %s's %s: accessories %s", pTarget->GetEntity()->GetName(), pWeapon->GetEntity()->GetClass()->GetName(),
+			done.c_str());
+	}
+
 	void SnapshotInventories(float frameTime)
 	{
+		SendAccessorySwitches(frameTime);
 		s_invTimer += frameTime;
 		if (s_invTimer < 2.0f)
 			return;
@@ -673,6 +758,7 @@ namespace
 			return;
 		gEnv->pConsole->AddCommand("coop_aistats", CmdStats, 0, "Crysis Coop: log AI object statistics");
 		gEnv->pConsole->AddCommand("coop_ai_weapons", CmdAIWeapons, 0, "Crysis Coop: log what the soldiers near the local player hold");
+		gEnv->pConsole->AddCommand("coop_test_stealth", CmdTestStealth, 0, "Crysis Coop testing: coop_test_stealth logs the AI system's detection levels of every player (server)");
 		gEnv->pConsole->AddCommand("coop_test_save", CmdTestSave, 0, "Crysis Coop testing: coop_test_save [name] saves as the single player menu does");
 		gEnv->pConsole->AddCommand("coop_weapon_info", CmdWeaponInfo, 0, "Crysis Coop: log the damage of the local player's weapon and the item settings in use");
 		gEnv->pConsole->AddCommand("coop_dump_entities", CmdDumpEntities, 0, "Crysis Coop: write all entities to coop_entities_<side>_<tag>.txt");
@@ -1088,6 +1174,9 @@ namespace
 	};
 	STraceTokens s_traceTokens;
 
+	float s_dialogVoiceAt = -1000.0f;  // when a story dialog's line last played (server)
+	int s_dialogVoices = 0;           // playing now
+
 	// every voice sound (dialog lines, AI speech) that starts or stops
 	struct STraceVoice : public ISoundSystemEventListener
 	{
@@ -1099,6 +1188,11 @@ namespace
 				return;
 			const Vec3 p = pSound->GetPosition();
 			const char* name = pSound->GetName();
+			if (name && CryStringUtils::stristr(name, "languages/dialog"))
+			{
+				s_dialogVoiceAt = gEnv->pTimer->GetCurrTime();
+				s_dialogVoices = max(0, s_dialogVoices + (event == SOUNDSYSTEM_EVENT_ON_START ? 1 : -1));
+			}
 			// the server repeats every voice sound on the clients: their AI has no
 			// AI system (no barks) and dialogs run in the server's scripts. The
 			// suit voice belongs to the host's own suit.
@@ -1915,9 +2009,29 @@ namespace
 	}
 }
 
+bool CoopAI::GetStealth(float& bar, float& exposure)
+{
+	if (!IsCoopSession())
+		return false;
+	LocalStealth(bar, exposure);
+	return true;
+}
+
+bool CoopAI::DialogBusy()
+{
+	return DialogLockBusy();
+}
+
+void CoopAI::AfterFrameworkUpdate()
+{
+	KeepLevelTOD();
+}
+
 void CoopAI::OnLoadingComplete()
 {
 	ResetHitchTimer();
+	TakeLevelTOD("level loaded");
+	OpenSoundLimits();
 	static bool s_breakTrace = false;
 	if (!s_breakTrace && gEnv->pPhysicalWorld)
 	{
@@ -2096,6 +2210,12 @@ void CoopAI::GiveInventory(IActor* pTarget, const SInventory& inv, bool replace)
 			pItemSystem->GiveItem(pTarget, inv.items[i].c_str(), false, false, false);
 	if (!inv.current.empty() && pInv->GetCountOfClass(inv.current.c_str()) == 0)
 		currentGiven = pItemSystem->GiveItem(pTarget, inv.current.c_str(), false, true, false) != 0;
+	// the accessories on the weapons as they were (a given weapon has its
+	// defaults only)
+	for (std::map<string, std::vector<string> >::const_iterator it = inv.attached.begin(); it != inv.attached.end(); ++it)
+		if (EntityId id = pInv->GetItemByClass(gEnv->pEntitySystem->GetClassRegistry()->FindClass(it->first.c_str())))
+			if (CItem* pWeapon = static_cast<CItem*>(pItemSystem->GetItem(id)))
+				PutBackAccessories(pTarget, pWeapon, it->second);
 	// the ammo: here, and on a friend's own machine, which reloads from its
 	// own inventory (the network game's weapons came with 60 bullets more
 	// and hid it; the campaign's come with none: a friend could not reload)
@@ -2135,6 +2255,7 @@ void CoopAI::SetInventoryCarry(const char* level, const std::map<string, SInvent
 
 void CoopAI::OnGameLoaded()
 {
+	TakeLevelTOD("save loaded");
 	// entities the save brought back (soldiers spawned during play, script
 	// objects) are new game objects: the same network setup as on level load
 	s_aiAspectsOff.clear();
@@ -2918,6 +3039,9 @@ namespace
 				s_frames * 1000.0f / s_sum, s_worst, s_slow, gEnv->pSoundSystem ? gEnv->pSoundSystem->GetUsedVoices() : 0,
 				gEnv->pSoundSystem ? gEnv->pSoundSystem->GetCPUUsage() : 0.0f, soundMem / 1048576.0f, soundMemMax / 1048576.0f,
 				gEnv->pSoundSystem && gEnv->pSoundSystem->IsPaused() ? " PAUSED" : "");
+			if (gEnv->pSoundSystem && gEnv->pSoundSystem->GetUsedVoices() >= 52)
+				if (ICVar* pVar = gEnv->pConsole->GetCVar("s_PriorityThreshold"))
+					CryLogAlways("[CoopPerf] many voices: s_PriorityThreshold %d (0 = none dropped)", pVar->GetIVal());
 			s_sum = s_worst = 0.0f;
 			s_frames = s_slow = 0;
 		}
@@ -2932,6 +3056,8 @@ void CoopAI::ResetHitchTimer()
 
 void CoopAI::Update(float frameTime)
 {
+	WatchLevelTOD();
+	CoopMenu::LoadSettingsOnce();
 	LogHitch();
 	UpdateTestCursor();
 	UpdateTestCmdFile();
@@ -2960,6 +3086,8 @@ void CoopAI::Update(float frameTime)
 	UpdateAIWakeNearJoiners(frameTime);
 	UpdateSequenceSync(frameTime);
 	UpdateTimeOfDaySync(frameTime);
+	UpdateDialogLock(frameTime);
+	UpdateStealth(frameTime);
 	UpdateTeamMates(frameTime);
 	UpdateAIStateSync(frameTime);
 	UpdateCutscenePresentation();
@@ -4219,7 +4347,7 @@ namespace
 // map/radar markers and cutscenes follow the host (server -> clients)
 namespace
 {
-	enum ESyncKind { eSync_Radar = 1, eSync_Sequence = 2, eSync_TimeOfDay = 3, eSync_Hide = 5, eSync_AIState = 6, eSync_Progress = 7, eSync_DebugLook = 8, eSync_HostPlayer = 9, eSync_Usable = 10, eSync_PlayerSeat = 11, eSync_SuitMode = 12, eSync_Revive = 13 };
+	enum ESyncKind { eSync_Stealth = 14, eSync_Radar = 1, eSync_Sequence = 2, eSync_TimeOfDay = 3, eSync_Hide = 5, eSync_AIState = 6, eSync_Progress = 7, eSync_DebugLook = 8, eSync_HostPlayer = 9, eSync_Usable = 10, eSync_PlayerSeat = 11, eSync_SuitMode = 12, eSync_Revive = 13 };
 	// client: the host's player (the campaign's player; the others are extra)
 	EntityId s_hostPlayerId = 0;
 	// debugging (client): the local player's camera is kept on this entity
@@ -4380,6 +4508,349 @@ namespace
 	float s_teamMateTimer = 0.0f;
 	float s_todTimer = 0.0f;
 
+	// The time of day as the level runs it. An immersive network server's
+	// CryAction sets the time of day's range and speed at the end of every
+	// frame: the network day cycle (sv_timeofdayenable 1) or speed 0 with a
+	// range of whatever (0). The campaign's levels run their own: the mission
+	// file's speed and the flow graphs' Time:TimeOfDay (Island's night turns
+	// to dawn); a save keeps it. The server notes what the level set and puts
+	// it back after CryAction's frame.
+	ITimeOfDay::SAdvancedInfo s_todWanted;
+	ITimeOfDay::SAdvancedInfo s_todLevel;      // the mission file's, as the level loaded
+	bool s_todHave = false;
+	bool s_todHaveLevel = false;
+	bool s_todLogged = false;
+
+	// (while the level loads the server runs as single player: coop_sp_world)
+	bool TODServer()
+	{
+		return gEnv->bServer && CoopAI::IsCoopSession() && gEnv->p3DEngine && gEnv->p3DEngine->GetTimeOfDay();
+	}
+
+	bool SameTOD(const ITimeOfDay::SAdvancedInfo& a, const ITimeOfDay::SAdvancedInfo& b)
+	{
+		return fabsf(a.fAnimSpeed - b.fAnimSpeed) < 1e-6f && fabsf(a.fStartTime - b.fStartTime) < 1e-4f && fabsf(a.fEndTime - b.fEndTime) < 1e-4f;
+	}
+
+	// the level's own (a level loaded, a save loaded)
+	void TakeLevelTOD(const char* why)
+	{
+		s_todHave = false;
+		if (!TODServer())
+			return;
+		ITimeOfDay* pTOD = gEnv->p3DEngine->GetTimeOfDay();
+		pTOD->GetAdvancedInfo(s_todWanted);
+		if (!strcmp(why, "level loaded"))
+		{
+			s_todLevel = s_todWanted;
+			s_todHaveLevel = true;
+		}
+		// a checkpoint saved by 0.11.17..0.11.22 has CryAction's stopped
+		// time of day: speed 0, a range of whatever. The level's instead
+		else if (s_todHaveLevel && s_todWanted.fAnimSpeed == 0.0f && s_todLevel.fAnimSpeed != 0.0f
+			&& (s_todWanted.fStartTime < 0.0f || s_todWanted.fEndTime > 24.0f || s_todWanted.fEndTime - s_todWanted.fStartTime < 0.25f))
+		{
+			CryLogAlways("[CoopTOD] the save's time of day had stopped (speed 0, range %.2f-%.2f): the level's speed %.4f, range %.2f-%.2f",
+				s_todWanted.fStartTime, s_todWanted.fEndTime, s_todLevel.fAnimSpeed, s_todLevel.fStartTime, s_todLevel.fEndTime);
+			s_todWanted = s_todLevel;
+			pTOD->SetAdvancedInfo(s_todWanted);
+		}
+		s_todHave = true;
+		s_todLogged = false;
+		CryLogAlways("[CoopTOD] %s: %.2f h, speed %.4f, range %.2f-%.2f", why, gEnv->p3DEngine->GetTimeOfDay()->GetTime(),
+			s_todWanted.fAnimSpeed, s_todWanted.fStartTime, s_todWanted.fEndTime);
+	}
+
+	// during the frame (flow graphs, scripts, a load): a change is the level's
+	void WatchLevelTOD()
+	{
+		if (!s_todHave || !TODServer())
+			return;
+		ITimeOfDay::SAdvancedInfo now;
+		gEnv->p3DEngine->GetTimeOfDay()->GetAdvancedInfo(now);
+		if (!SameTOD(now, s_todWanted))
+		{
+			s_todWanted = now;
+			CryLogAlways("[CoopTOD] the level sets speed %.4f, range %.2f-%.2f (%.2f h)", now.fAnimSpeed, now.fStartTime, now.fEndTime,
+				gEnv->p3DEngine->GetTimeOfDay()->GetTime());
+		}
+	}
+
+	// CrySound drops a new sound without a word when (1) more than 80 % of
+	// s_MaxChannels (64) voices play and the sound's priority number is above
+	// s_PriorityThreshold (45): footsteps, reloading, the grenade launcher's
+	// click; or (2) more than s_MaxActiveSounds (100) are active: every sound,
+	// speech and alarms too, till the game was silent. A coop level keeps more
+	// of the world going (the AI near every player) and reached both. FMOD has
+	// 256 voices (s_SoftwareChannels) and takes the least important itself
+	void OpenSoundLimits()
+	{
+		if (!gEnv->pConsole || !CoopAI::IsCoopSession())
+			return;
+		// 0 = no priority rejection (a cheat cvar: forced)
+		if (ICVar* pVar = gEnv->pConsole->GetCVar("s_PriorityThreshold"))
+			if (pVar->GetIVal() != 0)
+				pVar->ForceSet("0");
+		if (ICVar* pVar = gEnv->pConsole->GetCVar("s_MaxActiveSounds"))
+			if (pVar->GetIVal() < 512)
+				pVar->Set(512);
+		ICVar* pThreshold = gEnv->pConsole->GetCVar("s_PriorityThreshold");
+		ICVar* pActive = gEnv->pConsole->GetCVar("s_MaxActiveSounds");
+		CryLogAlways("[CoopSound] sound limits: s_PriorityThreshold %d, s_MaxActiveSounds %d", pThreshold ? pThreshold->GetIVal() : -1,
+			pActive ? pActive->GetIVal() : -1);
+	}
+
+	// Every campaign level guards its story dialogs with one game token: a
+	// Dialog:PlayDialog sets it busy when it starts and free when it is done
+	// or aborted; the others wait for it to be free (1 s, again, for ever). A
+	// dialog that never ends (a save in its middle: its session is not
+	// brought back by the load, the players it spoke to were not in the save;
+	// the sound system restarted under it) leaves it busy: no story voice any
+	// more and what follows a dialog (Rescue's download at the camp's PC,
+	// objective 4) never happens; every later save keeps it so
+	struct SDialogLock { const char* level; const char* token; const char* busy; const char* free; };
+	const SDialogLock s_dialogLocks[] = {
+		{ "ascension", "Level.Dialogue.Dialogue_Playing", "true", "false" },
+		{ "core", "Level.Dialog.Dialog_is_playing", "true", "false" },
+		{ "fleet", "Level.Misc.Dialog_Buffer_Full", "true", "false" },
+		{ "harbor", "Level.General.Dialog_playing", "yes", "not" },
+		{ "ice", "Level.Dialog.Dialog_playing", "yes", "not" },
+		{ "island", "Level.Dialogue.Running", "true", "false" },
+		{ "mine", "Level.Misc.Dialog_Buffer_Full", "true", "false" },
+		{ "rescue", "Level.Misc.Dialog_buffer", "dialog", "not" },
+		{ "sphere", "Level.General.Dialog_playing", "1", "0" },
+		{ "tank", "Level.Dialog.dialog_playing", "1", "0" },
+		{ "village", "Level.Misc.Dialog_buffer", "dialog", "not" },
+	};
+	float s_dialogBusyFor = 0.0f;
+	float s_dialogLockTimer = 0.0f;
+
+	const SDialogLock* LevelDialogLock()
+	{
+		const char* level = g_pGame->GetIGameFramework()->GetLevelName();
+		if (!level)
+			return 0;
+		const char* name = LevelShortName(level);
+		if (!strnicmp(name, "coop_", 5))
+			name += 5;
+		for (size_t i = 0; i < sizeof(s_dialogLocks) / sizeof(s_dialogLocks[0]); ++i)
+			if (!stricmp(name, s_dialogLocks[i].level))
+				return &s_dialogLocks[i];
+		return 0;
+	}
+
+	IGameToken* DialogLockToken(const SDialogLock** ppLock)
+	{
+		const SDialogLock* pLock = LevelDialogLock();
+		IGameTokenSystem* pTokens = g_pGame->GetIGameFramework()->GetIGameTokenSystem();
+		if (ppLock)
+			*ppLock = pLock;
+		return pLock && pTokens ? pTokens->FindToken(pLock->token) : 0;
+	}
+
+	bool DialogLockBusy()
+	{
+		const SDialogLock* pLock = 0;
+		IGameToken* pToken = DialogLockToken(&pLock);
+		return pToken && pToken->GetValueAsString() && !stricmp(pToken->GetValueAsString(), pLock->busy);
+	}
+
+	// busy with no story line heard for 25 s (outside cutscenes): free again
+	void UpdateDialogLock(float frameTime)
+	{
+		s_dialogLockTimer += frameTime;
+		if (s_dialogLockTimer < 1.0f)
+			return;
+		const float dt = s_dialogLockTimer;
+		s_dialogLockTimer = 0.0f;
+		if (!gEnv->bServer || !CoopAI::IsCoopSession() || !g_pGame->GetIGameFramework()->IsGameStarted())
+			return;
+		if (!CoopAI::DialogBusy())
+		{
+			s_dialogBusyFor = 0.0f;
+			return;
+		}
+		s_dialogBusyFor += dt;
+		IViewSystem* pView = g_pGame->GetIGameFramework()->GetIViewSystem();
+		const float quiet = gEnv->pTimer->GetCurrTime() - s_dialogVoiceAt;
+		if (s_dialogVoices > 0 || quiet < 25.0f || s_dialogBusyFor < 25.0f || (pView && pView->IsPlayingCutScene()))
+			return;
+		const SDialogLock* pLock = 0;
+		if (IGameToken* pToken = DialogLockToken(&pLock))
+		{
+			pToken->SetValueAsString(pLock->free);
+			CryLogAlways("[CoopDialog] %s was '%s' for %.0f s with no dialog heard: set to '%s' (the story's dialogs go on)", pLock->token,
+				pLock->busy, s_dialogBusyFor, pLock->free);
+		}
+		s_dialogBusyFor = 0.0f;
+	}
+
+	// The radar's stealth meter (single player: the AI system's detection
+	// levels of the local player, GetDetectionLevels(0)). The AI system adds
+	// up what every soldier and vehicle sees of every player in the player's
+	// AI object (running levels), but copies them to what GetDetectionLevels
+	// returns (and zeroes them) for the first player object only: the host.
+	// The server does that copy for the others and sends each his own
+	// (CryAISystem 6156: running at +0x804, the copy at +0x814, 4 floats as
+	// SAIDetectionLevels; checked once through GetDetectionLevels itself)
+	const int STEALTH_RUNNING = 0x804, STEALTH_LEVELS = 0x814;
+	int s_stealthLayout = 0;            // 0 unchecked, 1 as above, -1 not (others get no meter)
+	struct SStealthSent { float bar, exposure, at; };
+	std::map<EntityId, SStealthSent> s_stealthSent;
+	float s_stealthBar = 0.0f, s_stealthExposure = 0.0f;               // the server's own player
+	float s_stealthMirrorBar = 0.0f, s_stealthMirrorExposure = 0.0f;   // a client's, from the server
+	float s_stealthLogAt = 0.0f;
+	string s_stealthLog;
+
+	bool StealthLayoutOk(IAIObject* pAI)
+	{
+		if (s_stealthLayout)
+			return s_stealthLayout > 0;
+		float* pLevels = (float*)((char*)pAI + STEALTH_LEVELS);
+		float keep[4];
+		memcpy(keep, pLevels, sizeof(keep));
+		const float test[4] = { 0.125f, 0.25f, 0.5f, 0.75f };
+		memcpy(pLevels, test, sizeof(test));
+		SAIDetectionLevels levels;
+		gEnv->pAISystem->GetDetectionLevels(pAI, levels);
+		memcpy(pLevels, keep, sizeof(keep));
+		s_stealthLayout = levels.puppetExposure == test[0] && levels.puppetThreat == test[1] && levels.vehicleExposure == test[2]
+			&& levels.vehicleThreat == test[3] ? 1 : -1;
+		CryLogAlways("[CoopStealth] the AI system's detection levels %s: the other players' stealth meter %s", s_stealthLayout > 0 ? "found" : "NOT found",
+			s_stealthLayout > 0 ? "works" : "stays empty");
+		return s_stealthLayout > 0;
+	}
+
+	// this frame's levels of a player who is not the AI system's first one
+	bool OtherPlayerLevels(IAIObject* pAI, SAIDetectionLevels& levels)
+	{
+		if (!StealthLayoutOk(pAI))
+			return false;
+		float* pRunning = (float*)((char*)pAI + STEALTH_RUNNING);
+		for (int i = 0; i < 4; ++i)
+			if (!(pRunning[i] >= 0.0f && pRunning[i] <= 1.0f))
+				return false;
+		memcpy((char*)pAI + STEALTH_LEVELS, pRunning, 4 * sizeof(float));
+		memset(pRunning, 0, 4 * sizeof(float));
+		gEnv->pAISystem->GetDetectionLevels(pAI, levels);
+		return true;
+	}
+
+	void UpdateStealth(float frameTime)
+	{
+		if (!gEnv->bServer || !gEnv->pAISystem || !CoopAI::IsCoopSession() || !g_pGame->GetIGameFramework()->IsGameStarted())
+			return;
+		IAIObject* pFirst = 0;
+		if (IAIObjectIter* pIt = gEnv->pAISystem->GetFirstAIObject(IAISystem::OBJFILTER_TYPE, AIOBJECT_PLAYER))
+		{
+			pFirst = pIt->GetObject();
+			pIt->Release();
+		}
+		IActor* pLocal = g_pGame->GetIGameFramework()->GetClientActor();
+		const float now = gEnv->pTimer->GetCurrTime();
+		const bool logNow = now - s_stealthLogAt >= 3.0f;
+		string line;
+		IActorIteratorPtr pIt = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+		while (IActor* pActor = pIt->Next())
+		{
+			IAIObject* pAI = pActor->IsPlayer() ? pActor->GetEntity()->GetAI() : 0;
+			if (!pAI || pAI->GetAIType() != AIOBJECT_PLAYER)
+				continue;
+			SAIDetectionLevels levels;
+			if (pAI == pFirst)
+				gEnv->pAISystem->GetDetectionLevels(0, levels);
+			else if (!OtherPlayerLevels(pAI, levels))
+				continue;
+			const float bar = max(levels.puppetExposure, levels.puppetThreat) * 100.0f;
+			const float exposure = max(levels.vehicleExposure, levels.vehicleThreat) * 100.0f;
+			if (logNow && (bar > 0.0f || exposure > 0.0f))
+			{
+				string one;
+				one.Format(" %s %.0f/%.0f", pActor->GetEntity()->GetName(), bar, exposure);
+				line += one;
+			}
+			if (pActor == pLocal)
+			{
+				s_stealthBar = bar;
+				s_stealthExposure = exposure;
+				continue;
+			}
+			const int channel = static_cast<CActor*>(pActor)->GetChannelId();
+			if (!channel)
+				continue;
+			SStealthSent& sent = s_stealthSent[pActor->GetEntityId()];
+			const bool moved = fabsf(bar - sent.bar) >= 2.0f || fabsf(exposure - sent.exposure) >= 2.0f
+				|| ((bar == 0.0f) != (sent.bar == 0.0f));
+			if (!moved || now - sent.at < 0.1f)
+				continue;
+			sent.bar = bar;
+			sent.exposure = exposure;
+			sent.at = now;
+			if (CGameRules* pRules = g_pGame->GetGameRules())
+				pRules->CoopSendSync(eSync_Stealth, (int)(bar + 0.5f), 0, "", "", (int)(exposure + 0.5f), 0.0f, channel);
+		}
+		if (logNow)
+		{
+			s_stealthLogAt = now;
+			// seen by the enemies (bar/exposure), while anybody is
+			if (!line.empty() || !s_stealthLog.empty())
+				CryLogAlways("[CoopStealth] seen:%s", line.empty() ? " nobody" : line.c_str());
+			s_stealthLog = line;
+		}
+	}
+
+	// coop_test_stealth: the AI system's detection levels of every player (server)
+	void CmdTestStealth(IConsoleCmdArgs*)
+	{
+		if (!gEnv->pAISystem)
+			return;
+		IAIObject* pFirst = 0;
+		if (IAIObjectIter* pIt = gEnv->pAISystem->GetFirstAIObject(IAISystem::OBJFILTER_TYPE, AIOBJECT_PLAYER))
+		{
+			pFirst = pIt->GetObject();
+			pIt->Release();
+		}
+		SAIDetectionLevels l0;
+		gEnv->pAISystem->GetDetectionLevels(0, l0);
+		CryLogAlways("[CoopTest] stealth: first player object %s; GetDetectionLevels(0) %.2f %.2f %.2f %.2f; meter %.0f/%.0f",
+			pFirst ? pFirst->GetName() : "-", l0.puppetExposure, l0.puppetThreat, l0.vehicleExposure, l0.vehicleThreat, s_stealthBar, s_stealthExposure);
+		IActorIteratorPtr pIt = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+		while (IActor* pActor = pIt->Next())
+		{
+			IAIObject* pAI = pActor->IsPlayer() ? pActor->GetEntity()->GetAI() : 0;
+			if (!pAI)
+				continue;
+			const float* r = (const float*)((const char*)pAI + STEALTH_RUNNING);
+			const float* s = (const float*)((const char*)pAI + STEALTH_LEVELS);
+			CryLogAlways("[CoopTest] stealth: %s type %d running %.2f %.2f %.2f %.2f levels %.2f %.2f %.2f %.2f", pActor->GetEntity()->GetName(),
+				pAI->GetAIType(), r[0], r[1], r[2], r[3], s[0], s[1], s[2], s[3]);
+		}
+	}
+
+	void LocalStealth(float& bar, float& exposure)
+	{
+		bar = gEnv->bServer ? s_stealthBar : s_stealthMirrorBar;
+		exposure = gEnv->bServer ? s_stealthExposure : s_stealthMirrorExposure;
+	}
+
+	// after CryAction's end of the frame: the level's again
+	void KeepLevelTOD()
+	{
+		if (!s_todHave || !TODServer())
+			return;
+		ITimeOfDay* pTOD = gEnv->p3DEngine->GetTimeOfDay();
+		ITimeOfDay::SAdvancedInfo now;
+		pTOD->GetAdvancedInfo(now);
+		if (SameTOD(now, s_todWanted))
+			return;
+		pTOD->SetAdvancedInfo(s_todWanted);
+		if (!s_todLogged)
+		{
+			s_todLogged = true;
+			CryLogAlways("[CoopTOD] the network game set speed %.4f: the level's %.4f kept", now.fAnimSpeed, s_todWanted.fAnimSpeed);
+		}
+	}
+
 	// server: the time of day (and how fast it runs) to the clients, every 2 s
 	void UpdateTimeOfDaySync(float frameTime, int channelId)
 	{
@@ -4398,6 +4869,8 @@ namespace
 			return;
 		ITimeOfDay::SAdvancedInfo info;
 		pTOD->GetAdvancedInfo(info);
+		if (s_todHave)
+			info = s_todWanted;
 		char adv[96];
 		_snprintf(adv, sizeof(adv), "%f %f %f", info.fAnimSpeed, info.fStartTime, info.fEndTime);
 		adv[sizeof(adv) - 1] = 0;
@@ -6400,6 +6873,18 @@ void CoopAI::OnSyncMirror(int kind, int op, uint32 entity, const char* name, con
 		s_debugLookPoint = op == 3 && text && sscanf(text, "%f %f %f", &s_debugLookAt.x, &s_debugLookAt.y, &s_debugLookAt.z) == 3;
 		s_debugLookUntil = gEnv->pTimer->GetCurrTime() + f;
 		Trace("DEBUG look at %s for %.0f s", pEntity ? pEntity->GetName() : "?", f);
+		return;
+	}
+	if (kind == eSync_Stealth && !gEnv->bServer)
+	{
+		s_stealthMirrorBar = (float)op;
+		s_stealthMirrorExposure = (float)type;
+		const float now = gEnv->pTimer->GetCurrTime();
+		if (now - s_stealthLogAt >= 3.0f)
+		{
+			s_stealthLogAt = now;
+			CryLogAlways("[CoopStealth] my meter from the server: %d/%d", op, type);
+		}
 		return;
 	}
 	if (kind == eSync_AIState && !gEnv->bServer)

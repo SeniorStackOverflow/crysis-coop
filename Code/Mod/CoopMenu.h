@@ -15,6 +15,9 @@ struct IFFont;
 namespace CoopMenu
 {
 	void Init();                                // coop_ui test command
+	// the player's co-op choices (AI companion, cloud, direct) from the last
+	// game: read once the game runs (every cvar there), written on a change
+	void LoadSettingsOnce();
 	// the Flash menu is on screen (inGame: the Esc menu): draws the panel
 	// when it is open
 	void RenderMenu(bool inGame);

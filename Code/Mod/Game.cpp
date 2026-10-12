@@ -420,6 +420,7 @@ int CGame::Update(bool haveFocus, unsigned int updateFlags)
 	}
 
 	m_pFramework->PostUpdate( true, updateFlags );
+	CoopAI::AfterFrameworkUpdate();
 	CoopAgent::EndFrame();
 	CoopSound::Update(haveFocus);
 

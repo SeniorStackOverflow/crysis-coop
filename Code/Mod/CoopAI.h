@@ -22,6 +22,8 @@ namespace CoopAI
 	void OnLoadingStart(const char* levelName);
 	void OnLoadingComplete();
 	void Update(float frameTime);
+	// after the framework's PostUpdate (CryAction's own end of the frame)
+	void AfterFrameworkUpdate();
 	void OnGameEnded();
 
 	// true in any network game, also while the coop server runs its level as
@@ -66,6 +68,10 @@ namespace CoopAI
 	// objects): enemy of the players? alertness 0 idle, 1 suspicious, 2 combat.
 	// false when unknown (and always on the server)
 	bool GetMirroredAI(EntityId id, bool& hostile, int& alertness, bool* pEnabled = 0);
+	// the radar's stealth meter of this machine's player in a coop game, as
+	// in single player: how much the enemies see (bar) and the vehicles'
+	// part (exposure), 0..100; false outside a coop game
+	bool GetStealth(float& bar, float& exposure);
 	// the host's player (on a client: as the server said; on the server: its own)
 	EntityId HostPlayerId();
 	// client: a living enemy sits in the vehicle (the vehicle's own check,
@@ -80,6 +86,9 @@ namespace CoopAI
 	// below him (a scripted fall such as the HALO jump moves him by script,
 	// so the actor does not report "flying")
 	bool IsAirborne(EntityId id);
+	// server: the level's "a dialog is playing" game token (every campaign
+	// level has one its story dialogs wait for) says busy
+	bool DialogBusy();
 	// server: the HUD:ProgressBar flow node did something (op 0 hide, 1 show,
 	// 2 progress): the clients do the same
 	void OnProgressBar(int op, int progress, int posX, int posY, const char* text, bool topText, bool locking);
@@ -107,6 +116,9 @@ namespace CoopAI
 		std::vector<std::pair<string, int> > ammo;
 		string current;
 		string name;            // the player's name when it was taken
+		// weapon class -> the accessories on it (scopes, silencer, grenade
+		// launcher, ammo kinds): a weapon given back comes with its defaults only
+		std::map<string, std::vector<string> > attached;
 	};
 	// who a player is from game to game: "id:<his relay player id>" (the host
 	// and friends joined through the relay), else "name:<player name>"

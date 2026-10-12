@@ -47,7 +47,14 @@ namespace
 	struct SUpload { std::vector<char> blob; int gen; };
 	std::map<string, SUpload> s_uploads;
 	std::vector<string> s_log;                          // for the main thread (the engine log is not thread safe)
-	std::thread s_thread;
+	// the game quits with _exit (CSystem::Quit): no Shutdown, and a joinable
+	// std::thread destroyed with the DLL ends the process in abort()
+	struct SThread : public std::thread
+	{
+		SThread& operator=(std::thread&& t) { std::thread::operator=(std::move(t)); return *this; }
+		~SThread() { if (joinable()) detach(); }
+	};
+	SThread s_thread;
 	std::atomic<bool> s_done(true);     // the thread has ended (see Shutdown)
 	bool s_stop = false;
 	string s_url;

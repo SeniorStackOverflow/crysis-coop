@@ -76,7 +76,7 @@ next to it and installs it before the game starts, without asking the player.
   * 20 new players per address and hour;
   * 2 MB/s per game and direction (a coop game uses about 5 KB/s).
 * Cloud:
-  * 10 campaigns per player;
+  * 10 campaigns per player; a new one replaces the player's least recently played campaign;
   * 16 MB per checkpoint;
   * one checkpoint per player every 10 s;
   * 2 GB in total;

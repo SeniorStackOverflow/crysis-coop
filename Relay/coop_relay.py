@@ -362,8 +362,11 @@ class Store:
             return E_BAD
         meta = self.campaigns.get(campaign)
         if meta is None:
-            if sum(1 for m in self.campaigns.values() if m["owner"] == pid) >= MAX_CAMPAIGNS:
-                return E_TOO_BIG
+            # a player's new campaign makes room by dropping his least recently played ones
+            own = sorted((m.get("updated", 0), c) for c, m in self.campaigns.items() if m["owner"] == pid)
+            for _, old in own[:max(0, len(own) - MAX_CAMPAIGNS + 1)]:
+                log.info("campaign %s of %s dropped for a new one (%d stored)", old, pid, MAX_CAMPAIGNS)
+                self.delete(old)
             meta = {"owner": pid, "members": [], "created": time.time()}
         elif not (meta["owner"] == pid or pid in meta.get("members", [])):
             return E_DENIED

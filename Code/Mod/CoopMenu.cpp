@@ -14,6 +14,7 @@
 #include "CoopSave.h"
 #include "Game.h"
 #include "IUIDraw.h"
+#include "ICmdLine.h"
 #include "IHardwareMouse.h"
 #include "Menus/FlashMenuObject.h"
 
@@ -337,10 +338,28 @@ namespace
 		return p && p->GetIVal() != 0;
 	}
 
+	// the engine does not keep the mod's cvars from game to game
+	const char* const SETTINGS_FILE = "%USER%/coop_settings.txt";
+	const char* const s_settings[] = { "coop_companion", "coop_cloud", "coop_direct" };
+
+	void SaveSettings()
+	{
+		char buf[ICryPak::g_nMaxPath];
+		const char* path = gEnv->pCryPak->AdjustFileName(SETTINGS_FILE, buf, ICryPak::FLAGS_NO_MASTER_FOLDER_MAPPING | ICryPak::FLAGS_FOR_WRITING);
+		FILE* f = path ? fopen(path, "wt") : 0;
+		if (!f)
+			return;
+		for (size_t i = 0; i < sizeof(s_settings) / sizeof(s_settings[0]); ++i)
+			if (ICVar* p = gEnv->pConsole->GetCVar(s_settings[i]))
+				fprintf(f, "%s=%d\n", s_settings[i], p->GetIVal());
+		fclose(f);
+	}
+
 	void FlipCVar(const char* name)
 	{
 		if (ICVar* p = gEnv->pConsole->GetCVar(name))
 			p->Set(p->GetIVal() ? 0 : 1);
+		SaveSettings();
 	}
 
 	string When(unsigned int stamp)
@@ -963,6 +982,39 @@ namespace
 				CryLogAlways("[CoopMenu] widget %d at %.0f,%.0f %.0fx%.0f", s_hits[i].id, s_hits[i].x, s_hits[i].y, s_hits[i].w, s_hits[i].h);
 		CryLogAlways("[CoopMenu] page %d, focus %d, %d widgets", (int)s_page, s_focus, (int)s_hits.size());
 	}
+}
+
+void CoopMenu::LoadSettingsOnce()
+{
+	static bool s_loaded = false;
+	if (s_loaded)
+		return;
+	s_loaded = true;
+	char buf[ICryPak::g_nMaxPath];
+	const char* path = gEnv->pCryPak->AdjustFileName(SETTINGS_FILE, buf, ICryPak::FLAGS_NO_MASTER_FOLDER_MAPPING | ICryPak::FLAGS_FOR_WRITING);
+	FILE* f = path ? fopen(path, "rt") : 0;
+	if (!f)
+		return;
+	char line[128];
+	while (fgets(line, sizeof(line), f))
+	{
+		char* eq = strchr(line, '=');
+		if (!eq)
+			continue;
+		*eq = 0;
+		for (size_t i = 0; i < sizeof(s_settings) / sizeof(s_settings[0]); ++i)
+			if (!stricmp(line, s_settings[i]))
+			{
+				// the command line's +coop_... wins (tests, shortcuts)
+				ICVar* p = gEnv->pConsole->GetCVar(s_settings[i]);
+				if (p && !gEnv->pSystem->GetICmdLine()->FindArg(eCLAT_Post, s_settings[i]))
+				{
+					p->Set(atoi(eq + 1));
+					CryLogAlways("[CoopMenu] %s %d (as in the last game)", s_settings[i], p->GetIVal());
+				}
+			}
+	}
+	fclose(f);
 }
 
 void CoopMenu::Init()
