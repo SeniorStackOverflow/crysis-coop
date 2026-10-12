@@ -1723,6 +1723,17 @@ function TeamInstantAction:CoopOnCheckpoint(name)
 	if (name == "loaded" or not self.coopSpots) then
 		self.coopSpots = {};
 	end
+	-- a checkpoint loaded into the running level (no level load): the
+	-- team's down state of before the load is over; out of black as in
+	-- single player
+	if (name == "loaded") then
+		local wasDown = self.coopLoadAsked or self.coopAllDownAt;
+		self.coopLoadAsked = nil;
+		self.coopAllDownAt = nil;
+		self.coopRevives = {};
+		self.coopDownSeen = {};
+		HUD.CoopReviveState(wasDown and 6 or 5, NULL_ENTITY, NULL_ENTITY, C.BACK_FADE_TIME);
+	end
 	local kept = self:CoopKeepSpots();
 	CoopLog("checkpoint "..tostring(name)..": "..kept.." players' places kept");
 	-- nobody in the world yet (the level's first checkpoint comes before the

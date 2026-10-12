@@ -733,6 +733,8 @@ namespace
 	ELoadState s_loadState = eLS_None;
 	SProgress s_load;
 	float s_loadWait = 0.0f;
+	bool s_loadInPlace = false;     // into the level that runs, no level load (a checkpoint of this level)
+	ICVar* s_pLoadInPlace = 0;
 	const float LOAD_TIMEOUT = 180.0f;
 
 	struct SEntry
@@ -835,6 +837,18 @@ namespace
 		s_campaign = progress.campaign;
 		s_campaignName = progress.name;
 		s_lastSave = progress.save;
+		// a checkpoint of the level that runs here: loaded into it, as single
+		// player's quick load does (no level load; the friends are told and
+		// join again, the load disconnects everybody but the host)
+		IGameFramework* pFramework = g_pGame->GetIGameFramework();
+		s_loadInPlace = s_pLoadInPlace && s_pLoadInPlace->GetIVal() && gEnv->bServer && CoopAI::IsCoopSession() && pFramework->IsGameStarted()
+			&& !s_readyLevel.empty() && !stricmp(s_readyLevel.c_str(), progress.level.c_str());
+		if (s_loadInPlace)
+		{
+			CryLogAlways("[CoopSave] %s runs already: the checkpoint is loaded into it (no level load)", progress.level.c_str());
+			s_loadState = eLS_WaitLevel;
+			return;
+		}
 		gEnv->pConsole->ExecuteString("exec coop_settings.cfg");
 		string cmd;
 		cmd.Format("map multiplayer/tia/coop_%s %s", progress.level.c_str(), CoopAI::MapOptions());
@@ -1184,6 +1198,8 @@ namespace
 
 void CoopSave::Init()
 {
+	s_pLoadInPlace = gEnv->pConsole->RegisterInt("coop_load_inplace", 1, 0,
+		"Crysis Coop: 1 = a checkpoint of the level that runs is loaded into it (no level load); 0 = the level is hosted again first");
 	s_pCheckpoints = gEnv->pConsole->RegisterInt("coop_checkpoints", 1, 0,
 		"Crysis Coop: 1 = the host saves the campaign progress at its checkpoints and at every level start (coop_continue)");
 	// (the help in the game's language, as the console shows it)
@@ -1272,8 +1288,14 @@ void CoopSave::Update(float frameTime)
 		// once the host plays the level (his player spawned)
 		s_loadWait += frameTime;
 		IActor* pHost = pFramework->GetClientActor();
-		if (pFramework->IsGameStarted() && pHost && pHost->GetHealth() > 0 && s_loadWait > 1.0f)
+		// in place: a moment for the relay to tell the friends (the host may
+		// be down: everybody is)
+		if (s_loadInPlace ? (s_loadWait > 1.5f && pFramework->IsGameStarted())
+			: (pFramework->IsGameStarted() && pHost && pHost->GetHealth() > 0 && s_loadWait > 1.0f))
+		{
+			s_loadInPlace = false;
 			LoadNow();
+		}
 		else if (s_loadWait > LOAD_TIMEOUT)
 		{
 			CryLogAlways("[CoopSave] the level did not get ready: the saved game is not loaded");
