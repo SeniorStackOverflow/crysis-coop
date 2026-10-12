@@ -132,7 +132,13 @@ namespace CoopAI
 	// that coop map (see coop_inv_restore)
 	void SetInventoryCarry(const char* level, const std::map<string, SInventory>& inventories);
 	// server: a saved game was loaded into the running level
-	void OnGameLoaded();
+	void OnGameLoaded(bool clientsKept = false);
+	// server: an entity of the level file (a fixed id, bound as part of the
+	// level on every machine), not one created during play
+	bool IsLevelEntity(EntityId id);
+	// server: the state a joining friend gets, again (after a load he
+	// stayed connected through)
+	void ResyncChannel(int channelId);
 
 	// an actor died (CActor::Kill, server and clients): traced, and his state
 	// a moment later (still in the vehicle? ragdoll?) too

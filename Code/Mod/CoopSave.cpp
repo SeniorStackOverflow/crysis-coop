@@ -25,6 +25,7 @@
 #include "IItemSystem.h"
 #include "ILevelSystem.h"
 #include "IViewSystem.h"
+#include "IVehicleSystem.h"
 #include "IPlayerProfiles.h"
 #include "ICryPak.h"
 #include "StringUtils.h"
@@ -56,6 +57,47 @@ namespace
 		r.lo = (const char*)h;
 		r.hi = r.lo + pNt->OptionalHeader.SizeOfImage;
 		return true;
+	}
+
+	// the entities each savegame has (taken when it is saved, and right after
+	// it is loaded: then the world is the save's): a load the friends stay
+	// connected through keeps every entity and removes afterwards the ones
+	// the save does not have
+	std::map<string, std::set<EntityId> > s_savedIds;
+
+	// the remote players and what they carry (never in a save)
+	void RemotePlayerIds(std::set<EntityId>& out)
+	{
+		IGameFramework* pFramework = g_pGame->GetIGameFramework();
+		IActor* pLocal = pFramework->GetClientActor();
+		IActorIteratorPtr pActors = pFramework->GetIActorSystem()->CreateActorIterator();
+		while (IActor* pActor = pActors->Next())
+		{
+			if (!pActor->IsPlayer() || pActor == pLocal)
+				continue;
+			out.insert(pActor->GetEntityId());
+			if (IInventory* pInv = pActor->GetInventory())
+				for (int k = 0; k < pInv->GetCount(); ++k)
+					if (IEntity* pItem = gEnv->pEntitySystem->GetEntity(pInv->GetItem(k)))
+					{
+						out.insert(pItem->GetId());
+						for (int c = 0; c < pItem->GetChildCount(); ++c)
+							out.insert(pItem->GetChild(c)->GetId());
+					}
+		}
+	}
+
+	void CaptureSaveableIds(const string& save)
+	{
+		std::set<EntityId> remote;
+		RemotePlayerIds(remote);
+		std::set<EntityId>& ids = s_savedIds[save];
+		ids.clear();
+		IEntityItPtr pIt = gEnv->pEntitySystem->GetEntityIterator();
+		pIt->MoveFirst();
+		while (IEntity* pEntity = pIt->Next())
+			if (!(pEntity->GetFlags() & ENTITY_FLAG_NO_SAVE) && !remote.count(pEntity->GetId()))
+				ids.insert(pEntity->GetId());
 	}
 
 	// committed, writable, unguarded memory
@@ -686,6 +728,7 @@ namespace
 
 		std::vector<EntityId> unsaved;
 		MarkRemotePlayersUnsaved(unsaved);
+		CaptureSaveableIds(save);
 		bool ok;
 		s_lastEngineFile.clear();
 		{
@@ -734,7 +777,234 @@ namespace
 	SProgress s_load;
 	float s_loadWait = 0.0f;
 	bool s_loadInPlace = false;     // into the level that runs, no level load (a checkpoint of this level)
+	bool s_loadKeepClients = false; // and the friends stay connected
 	ICVar* s_pLoadInPlace = 0;
+	ICVar* s_pLoadKeep = 0;
+
+	// ---- the friends (and the AI companion) stay connected through a load
+	// into the running level. CryAction's load (CGameSerialize::LoadGame)
+	// ends with GetGameServerNub()->SetMaxPlayers(1), which disconnects
+	// every client at once; and on a network server it deletes every entity
+	// not flagged unremovable (single player's level entities are, a network
+	// level's not): the friends' players and their things, the level's
+	// objects, so the clients would lose their whole world. For the load:
+	// that call skipped, the level's own entities, the friends' players and
+	// their things unremovable (kept with their ids and network binding, the
+	// save is serialized into them as in single player); after it what the
+	// load re-created or changed is sent to the clients again
+	const unsigned KICK_CALL_RVA = 0x122E65;    // CryAction 6156: E8 -> CGameServerNub::SetMaxPlayers, after "push 1"
+	const unsigned char KICK_CALL[5] = { 0xE8, 0xB6, 0xB2, 0x0B, 0x00 };
+	const unsigned char KICK_SKIP[5] = { 0x83, 0xC4, 0x04, 0x90, 0x90 };  // add esp,4 (the pushed 1)
+
+	bool PatchKick(bool skip)
+	{
+		HMODULE h = GetModuleHandleA("CryAction.dll");
+		if (!h)
+			return false;
+		unsigned char* p = (unsigned char*)h + KICK_CALL_RVA;
+		if (memcmp(p, skip ? KICK_CALL : KICK_SKIP, 5))
+			return false;
+		DWORD old = 0;
+		if (!VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &old))
+			return false;
+		memcpy(p, skip ? KICK_SKIP : KICK_CALL, 5);
+		VirtualProtect(p, 5, old, &old);
+		FlushInstructionCache(GetCurrentProcess(), p, 5);
+		return true;
+	}
+
+	struct SKeep
+	{
+		bool on;
+		std::vector<EntityId> flagged;              // made unremovable for the load
+		std::map<EntityId, IEntity*> before;        // every entity before it
+		std::map<EntityId, bool> alive;             // the AI's actors: alive before it
+		std::vector<int> channels;                  // the friends' channels
+		SKeep() : on(false) {}
+	};
+	SKeep s_keep;
+
+	void KeepUnremovable(IEntity* pEntity)
+	{
+		if (pEntity && !(pEntity->GetFlags() & ENTITY_FLAG_UNREMOVABLE))
+		{
+			pEntity->SetFlags(pEntity->GetFlags() | ENTITY_FLAG_UNREMOVABLE);
+			s_keep.flagged.push_back(pEntity->GetId());
+		}
+	}
+
+	// before the load: false = the old way (the friends are disconnected)
+	bool KeepBegin()
+	{
+		s_keep = SKeep();
+		if (!s_pLoadKeep || !s_pLoadKeep->GetIVal() || !gEnv->bServer)
+			return false;
+		IGameFramework* pFramework = g_pGame->GetIGameFramework();
+		IActor* pLocal = pFramework->GetClientActor();
+		std::vector<IActor*> players;
+		IActorIteratorPtr pActors = pFramework->GetIActorSystem()->CreateActorIterator();
+		while (IActor* pActor = pActors->Next())
+			if (pActor->IsPlayer() && pActor != pLocal && static_cast<CActor*>(pActor)->GetChannelId())
+				players.push_back(pActor);
+		if (players.empty())
+			return false;
+		if (!s_savedIds.count(s_load.save))
+		{
+			CryLogAlways("[CoopSave] %s was not saved or loaded in this game: the load disconnects the friends (they join again)", s_load.save.c_str());
+			return false;
+		}
+		if (!PatchKick(true))
+		{
+			CryLogAlways("[CoopSave] this CryAction.dll is not the one known: the load disconnects the friends (they join again)");
+			return false;
+		}
+		s_keep.on = true;
+		// a vehicle's seats are the save's after the load
+		for (size_t i = 0; i < players.size(); ++i)
+			if (IVehicle* pVehicle = players[i]->GetLinkedVehicle())
+				if (IVehicleSeat* pSeat = pVehicle->GetSeatForPassenger(players[i]->GetEntityId()))
+					pSeat->Exit(false, true);
+		IEntityItPtr pIt = gEnv->pEntitySystem->GetEntityIterator();
+		pIt->MoveFirst();
+		// every entity: the load serializes the save into the ones it has (as
+		// single player does with its level's), deletes none (a deleted one
+		// would be gone on the clients, a re-created one is not sent to them:
+		// the load runs as single player). What the save does not have goes
+		// afterwards, in the network game
+		// (what the clients do not have, local things like a flock's birds,
+		// the load makes anew as in single player)
+		INetContext* pNet = pFramework->GetNetContext();
+		while (IEntity* pEntity = pIt->Next())
+		{
+			s_keep.before[pEntity->GetId()] = pEntity;
+			if (CoopAI::IsLevelEntity(pEntity->GetId()) || (pNet && pNet->IsBound(pEntity->GetId())))
+				KeepUnremovable(pEntity);
+		}
+		pActors = pFramework->GetIActorSystem()->CreateActorIterator();
+		while (IActor* pActor = pActors->Next())
+			if (!pActor->IsPlayer())
+				s_keep.alive[pActor->GetEntityId()] = pActor->GetHealth() > 0;
+		for (size_t i = 0; i < players.size(); ++i)
+		{
+			IActor* pPlayer = players[i];
+			s_keep.channels.push_back(static_cast<CActor*>(pPlayer)->GetChannelId());
+			KeepUnremovable(pPlayer->GetEntity());
+			if (IInventory* pInv = pPlayer->GetInventory())
+				for (int k = 0; k < pInv->GetCount(); ++k)
+					if (IEntity* pItem = gEnv->pEntitySystem->GetEntity(pInv->GetItem(k)))
+					{
+						KeepUnremovable(pItem);
+						for (int c = 0; c < pItem->GetChildCount(); ++c)
+							KeepUnremovable(pItem->GetChild(c));
+					}
+		}
+		CryLogAlways("[CoopSave] %d friend(s) stay in the game through the load (%d entities kept)", (int)players.size(), (int)s_keep.flagged.size());
+		return true;
+	}
+
+	// right after CryAction's load
+	void KeepEnd()
+	{
+		if (!s_keep.on)
+			return;
+		if (!PatchKick(false))
+			CryLogAlways("[CoopSave] the player limit call could not be put back");
+		int gone = 0;
+		for (size_t i = 0; i < s_keep.flagged.size(); ++i)
+			if (IEntity* pEntity = gEnv->pEntitySystem->GetEntity(s_keep.flagged[i]))
+				pEntity->SetFlags(pEntity->GetFlags() & ~ENTITY_FLAG_UNREMOVABLE);
+			else
+				++gone;
+		if (gone)
+			CryLogAlways("[CoopSave] %d kept entities are gone after the load", gone);
+	}
+
+	// with the network game on again: what the clients do not know
+	void KeepResync()
+	{
+		if (!s_keep.on)
+			return;
+		IGameFramework* pFramework = g_pGame->GetIGameFramework();
+		CGameRules* pRules = g_pGame->GetGameRules();
+		int revived = 0, killed = 0, pickups = 0, removed = 0, bound = 0;
+		// made after the save (soldiers called in, things dropped, shots): not
+		// in the loaded world
+		const std::set<EntityId>& saved = s_savedIds[s_load.save];
+		std::set<EntityId> remote;
+		RemotePlayerIds(remote);
+		IActor* pLocal = pFramework->GetClientActor();
+		for (size_t i = 0; i < s_keep.flagged.size(); ++i)
+		{
+			const EntityId id = s_keep.flagged[i];
+			IEntity* pEntity = gEnv->pEntitySystem->GetEntity(id);
+			if (pEntity && !saved.count(id) && !remote.count(id) && (!pLocal || id != pLocal->GetEntityId())
+				&& !pFramework->GetIGameRulesSystem()->HaveGameRules(pEntity->GetClass()->GetName()))
+			{
+				gEnv->pEntitySystem->RemoveEntity(id);
+				++removed;
+			}
+		}
+		// what the load made (the save had it, the world no more): to the clients
+		INetContext* pNet = pFramework->GetNetContext();
+		IEntityItPtr pIt = gEnv->pEntitySystem->GetEntityIterator();
+		pIt->MoveFirst();
+		while (IEntity* pEntity = pIt->Next())
+		{
+			std::map<EntityId, IEntity*>::const_iterator b = s_keep.before.find(pEntity->GetId());
+			if (b != s_keep.before.end() && b->second == pEntity)
+				continue;
+			IGameObject* pGO = pFramework->GetGameObject(pEntity->GetId());
+			if (pGO && pNet && !pNet->IsBound(pEntity->GetId()) && pGO->BindToNetwork())
+				++bound;
+		}
+		IActorIteratorPtr pActors = pFramework->GetIActorSystem()->CreateActorIterator();
+		while (IActor* pActor = pActors->Next())
+		{
+			CActor* pA = static_cast<CActor*>(pActor);
+			const EntityId id = pActor->GetEntityId();
+			// the AI: dead after the save and alive in it, or the other way
+			std::map<EntityId, bool>::const_iterator was = s_keep.alive.find(id);
+			if (!pActor->IsPlayer() && was != s_keep.alive.end() && CoopAI::IsNetBound(id))
+			{
+				const bool now = pActor->GetHealth() > 0;
+				IEntity* pEntity = pActor->GetEntity();
+				if (now && !was->second)
+				{
+					pA->GetGameObject()->InvokeRMI(CActor::ClRevive(), CActor::ReviveParams(pEntity->GetWorldPos(), pEntity->GetWorldRotation(), 0),
+						eRMI_ToAllClients | eRMI_NoLocalCalls);
+					++revived;
+				}
+				else if (!now && was->second)
+				{
+					pA->GetGameObject()->InvokeRMI(CActor::ClSimpleKill(), CActor::NoParams(), eRMI_ToAllClients | eRMI_NoLocalCalls);
+					++killed;
+				}
+			}
+			// what everybody holds that the load made anew: picked up again
+			if (IInventory* pInv = pActor->GetInventory())
+				for (int k = 0; k < pInv->GetCount(); ++k)
+				{
+					const EntityId item = pInv->GetItem(k);
+					IEntity* pItem = gEnv->pEntitySystem->GetEntity(item);
+					std::map<EntityId, IEntity*>::const_iterator b = s_keep.before.find(item);
+					if (pItem && (b == s_keep.before.end() || b->second != pItem))
+					{
+						CoopAI::QueuePickup(id, item);
+						++pickups;
+					}
+				}
+		}
+		// the world as the friends would get it joining now
+		for (size_t i = 0; i < s_keep.channels.size(); ++i)
+		{
+			CoopAI::ResyncChannel(s_keep.channels[i]);
+			if (pRules)
+				pRules->CoopSendObjectives(s_keep.channels[i]);
+			CoopAI::QueueObjectiveResend(s_keep.channels[i]);
+		}
+		CryLogAlways("[CoopSave] the friends' games follow the load: %d removed (made after the save), %d made again, %d soldiers back, %d dead, %d things picked up again",
+			removed, bound, revived, killed, pickups);
+	}
 	const float LOAD_TIMEOUT = 180.0f;
 
 	struct SEntry
@@ -1048,10 +1318,15 @@ namespace
 			const bool mp = gEnv->bMultiplayer;
 			gEnv->bMultiplayer = false;
 			NetLoadBegin();
+			const bool keep = s_loadKeepClients && KeepBegin();
 			const DWORD t0 = GetTickCount();
 			ok = pFramework->LoadGame(s_load.save.c_str(), true, true);
 			CryLogAlways("[CoopSave] the saved game took %.1f s to load", (GetTickCount() - t0) / 1000.0f);
+			KeepEnd();
 			limitRestored = NetLoadEnd();
+			// (the limit was never lowered)
+			if (keep)
+				limitRestored = 1;
 			gEnv->bMultiplayer = mp;
 		}
 		s_loadState = eLS_None;
@@ -1095,7 +1370,18 @@ namespace
 				carry.erase(own);
 		}
 		CoopAI::SetInventoryCarry(s_load.level.c_str(), carry);
-		CoopAI::OnGameLoaded();
+		CoopAI::OnGameLoaded(s_keep.on);
+		if (s_keep.on)
+		{
+			// the friends back at their places of the checkpoint, with what
+			// they had there (as the host), before the places are renewed
+			CGameRules* pRules = g_pGame->GetGameRules();
+			if (IScriptTable* pScript = pRules ? pRules->GetEntity()->GetScriptTable() : 0)
+				Script::CallMethod(pScript, "CoopTeamToCheckpoint");
+			KeepResync();
+			s_keep = SKeep();
+		}
+		CaptureSaveableIds(s_load.save);
 		CoopText::Say("[CoopSave] progress loaded: %s, checkpoint %s (saved %s)", s_load.level.c_str(), s_load.checkpoint.c_str(), s_load.time.c_str());
 		// where the team goes back to when everybody is down
 		CoopRevive::OnCheckpoint("loaded");
@@ -1198,6 +1484,8 @@ namespace
 
 void CoopSave::Init()
 {
+	s_pLoadKeep = gEnv->pConsole->RegisterInt("coop_load_keep", 1, 0,
+		"Crysis Coop: 1 = friends stay connected through a checkpoint loaded into the running level; 0 = they are disconnected and join again");
 	s_pLoadInPlace = gEnv->pConsole->RegisterInt("coop_load_inplace", 1, 0,
 		"Crysis Coop: 1 = a checkpoint of the level that runs is loaded into it (no level load); 0 = the level is hosted again first");
 	s_pCheckpoints = gEnv->pConsole->RegisterInt("coop_checkpoints", 1, 0,
@@ -1293,8 +1581,10 @@ void CoopSave::Update(float frameTime)
 		if (s_loadInPlace ? (s_loadWait > 1.5f && pFramework->IsGameStarted())
 			: (pFramework->IsGameStarted() && pHost && pHost->GetHealth() > 0 && s_loadWait > 1.0f))
 		{
+			s_loadKeepClients = s_loadInPlace;
 			s_loadInPlace = false;
 			LoadNow();
+			s_loadKeepClients = false;
 		}
 		else if (s_loadWait > LOAD_TIMEOUT)
 		{

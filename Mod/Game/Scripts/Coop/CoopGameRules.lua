@@ -1890,6 +1890,33 @@ function TeamInstantAction:CoopBackToCheckpoint()
 	self.game:SendTextMessage(TextMessageInfo, "Back to the last checkpoint", TextMessageToAll);
 end
 
+-- Coop.dll: a checkpoint was loaded into the running level and the friends
+-- stayed connected (the load does not have them): as the host, each is back
+-- at his place of that checkpoint with what he had there (the carry)
+function TeamInstantAction:CoopTeamToCheckpoint()
+	local n = 0;
+	for i,p in ipairs(self.game:GetPlayers() or {}) do
+		if (p.actor and p.id ~= g_localActorId and p.actor:GetChannel() and p.actor:GetChannel() > 0) then
+			if (self.coopRevives) then
+				self.coopRevives[p.id] = nil;
+			end
+			local own = self.coopSpots and self.coopSpots[p:GetName()] ~= nil;
+			local pos, ang = self:CoopSpotOf(p, own and 0 or i);
+			if (pos) then
+				pos.z = pos.z + 0.2;
+			end
+			if (self:RevivePlayer(p.actor:GetChannel(), p, false, pos, ang)) then
+				if (pos) then
+					self:CoopWatchFall(p, pos, nil);
+				end
+				n = n + 1;
+				CoopLog(tostring(p:GetName()).." is back at the loaded checkpoint"..(own and "" or " (next to the host)"));
+			end
+		end
+	end
+	return n;
+end
+
 -- the downed come back next to the others (a checkpoint of the story was
 -- reached); the host first, the friends then join him
 function TeamInstantAction:CoopReviveAllDowned(reason)

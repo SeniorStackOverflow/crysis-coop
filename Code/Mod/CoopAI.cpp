@@ -860,6 +860,8 @@ namespace
 		return CryStringUtils::stristr(c, "bullet") || CryStringUtils::stristr(c, "shell") || !stricmp(c, "Default");
 	}
 
+	std::set<EntityId> s_levelEntityIds;
+
 	struct SSpawnLog : public IEntitySystemSink
 	{
 		FILE* f = nullptr;
@@ -893,6 +895,10 @@ namespace
 					params.nFlags |= ENTITY_FLAG_NEVER_NETWORK_STATIC;
 				return true;
 			}
+			// the level file's own entities (fixed ids): a checkpoint loaded
+			// into the running level keeps them, as single player does
+			if (s_inLoading && s_coopLevelLoading && params.id != 0 && gEnv->bServer)
+				s_levelEntityIds.insert(params.id);
 			if (!s_inLoading || !s_coopLevelLoading || params.id != 0)
 				return true;
 			if (IsNetworkedClass(params.pClass))
@@ -1871,6 +1877,7 @@ namespace
 
 void CoopAI::OnLoadingStart(const char* levelName)
 {
+	s_levelEntityIds.clear();
 	OpenOriginalLevelPak(levelName);
 	CoopNetSerClearTrace();
 	CoopSave::OnLoadingStart(levelName);
@@ -2060,6 +2067,17 @@ void CoopAI::OnLoadingComplete()
 		ScanUsableObjects(true);
 	if (gEnv->bServer && g_pGame)
 		CaptureHideBase();
+	// the level's own entities: what the level load made, but for the
+	// dynamic network objects among them (see SSpawnLog)
+	if (gEnv->bServer && s_coopLevelLoading && gEnv->pEntitySystem)
+	{
+		IEntityItPtr pIt = gEnv->pEntitySystem->GetEntityIterator();
+		pIt->MoveFirst();
+		while (IEntity* pEntity = pIt->Next())
+			if (!(pEntity->GetFlags() & ENTITY_FLAG_NEVER_NETWORK_STATIC))
+				s_levelEntityIds.insert(pEntity->GetId());
+		CryLogAlways("[CoopAI] %d entities of the level file", (int)s_levelEntityIds.size());
+	}
 	s_coopLevelLoading = false;
 	RegisterCommands();
 
@@ -2258,7 +2276,17 @@ void CoopAI::SetInventoryCarry(const char* level, const std::map<string, SInvent
 			(int)it->second.items.size(), (int)it->second.ammo.size(), s_invCarryLevel.c_str());
 }
 
-void CoopAI::OnGameLoaded()
+bool CoopAI::IsLevelEntity(EntityId id)
+{
+	return s_levelEntityIds.count(id) != 0;
+}
+
+void CoopAI::ResyncChannel(int channelId)
+{
+	SendSyncHistory(channelId);
+}
+
+void CoopAI::OnGameLoaded(bool clientsKept)
 {
 	TakeLevelTOD("save loaded");
 	// entities the save brought back (soldiers spawned during play, script
@@ -2275,7 +2303,9 @@ void CoopAI::OnGameLoaded()
 	// crews shot from nowhere. Bound again as the static objects they are,
 	// they reach the friends (their movement still does not: the vehicle
 	// mirror, UpdateVehicleMirror, moves them)
-	if (gEnv->bServer && gEnv->bMultiplayer)
+	// (friends who stayed connected through the load have them: an unbind
+	// would take the vehicles away from them; the load kept the vehicles)
+	if (gEnv->bServer && gEnv->bMultiplayer && !clientsKept)
 		if (INetContext* pNet = g_pGame->GetIGameFramework()->GetNetContext())
 		{
 			int n = 0;
