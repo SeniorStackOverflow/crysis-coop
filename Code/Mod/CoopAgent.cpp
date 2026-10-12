@@ -323,13 +323,24 @@ namespace
 		EntityId enemy;
 		float burstUntil, pauseUntil, reloadAt, switchAt;
 		bool attackHeld;
-		// moving
-		Vec3 checkPos;
-		float checkAt;
+		// moving: how it gets on toward where it goes (the least way left,
+		// since when), how often it got nowhere there, a few steps along
+		// what is in the way
+		Vec3 progGoal;
+		float progBest, progAt, progSeen, progPath;
 		int stuck;
-		float strafeUntil, strafeSide;
-		bool jump;
+		Vec3 slideDir;
+		float slideUntil;
+		std::vector<Vec3> local;           // a way round close by, found on its own
+		Vec3 localFor;                     // to where
+		float localAt;
+		int localStage, localPlans;
+		Vec3 nextCheckFor, toCheckFor;     // straight there, looked at when
+		float nextCheckAt, toCheckAt;
+		bool nextClear, toClear;
+		float wayCheckAt, wayCheckPath;    // the way's farthest point in reach, looked for when
 		float farSince, askAt;
+		float reportAt;                    // where it is in its own game, told to the host's then
 		// reviving
 		bool useHeld;
 		EntityId useFor;
@@ -352,6 +363,8 @@ namespace
 		Vec3 pathGoal;
 		float pathAt, pathAskAt;
 		float reviveSince;      // at the body of whom it revives, since
+		float reachFailSince;   // next to the body with something between, since
+		EntityId bodyToldFor;   // said where the host's game has his body
 		// staying alive in a fight: a side step, a crouch; falling back hurt
 		float dodgeUntil, dodgeSide;
 		bool retreating;
@@ -372,13 +385,22 @@ namespace
 		float peekUntil;        // fighting from cover: up shooting / down
 		bool peekUp;
 		SBrain(): order(eO_Free), spot(ZERO), haveSpot(false), fireAtWill(true), enemy(0), burstUntil(0), pauseUntil(0), reloadAt(0),
-			switchAt(0), attackHeld(false), checkPos(ZERO), checkAt(0), stuck(0), strafeUntil(0), strafeSide(1), jump(false),
-			farSince(-1), askAt(0), useHeld(false), useFor(0), useSince(0), lastHealth(-1), wasDown(false), named(false),
-			weaponAt(0), loot(0), lootSince(0), useAt(0), useBlocked(0), pathGoal(ZERO), pathAt(-100), pathAskAt(0), reviveSince(-1),
+			switchAt(0), attackHeld(false), progGoal(ZERO), progBest(1e9f), progAt(0), progSeen(-100), progPath(-100), stuck(0),
+			slideDir(ZERO), slideUntil(0), localFor(ZERO), localAt(-100), localStage(0), localPlans(0), nextCheckFor(ZERO), toCheckFor(ZERO),
+			nextCheckAt(0), toCheckAt(0), nextClear(true), toClear(true), wayCheckAt(0), wayCheckPath(-100), farSince(-1), askAt(0), reportAt(0), useHeld(false), useFor(0), useSince(0), lastHealth(-1), wasDown(false), named(false),
+			weaponAt(0), loot(0), lootSince(0), useAt(0), useBlocked(0), pathGoal(ZERO), pathAt(-100), pathAskAt(0), reviveSince(-1), reachFailSince(-1), bodyToldFor(0),
 			dodgeUntil(0), dodgeSide(1), retreating(false), hitAt(-100), lastFought(0), bursts(0), heldFire(0), stuckTimes(0), unseen(0), turning(0), statsAt(0), dropAt(0), downedFor(0), downedSince(0), enemySeenAt(-100),
 			cover(ZERO), haveCover(false), coverAskAt(0), retreatSince(-100), recoveredAt(-100),
 			coverAt(-100), peekUntil(0), peekUp(true) {}
 	} s_bot;
+
+	// where the downed teammates lie in the host's game, and when it said so
+	struct SHostBody
+	{
+		Vec3 pos;
+		float at;
+	};
+	std::map<string, SHostBody> s_hostBodies;
 
 	// what SteerInput hands the player input
 	struct SControl
@@ -507,6 +529,46 @@ namespace
 		return best;
 	}
 
+	// what the body bumps into on a walk: what a player collides with
+	// (walls, fences, rocks, trunks, houses, vehicles, heavy crates); not
+	// leaves, grass, bushes (nothing a player collides with), nor the
+	// ground (slopes are walked up)
+	const int WALK_GEOM = (geom_colltype_player << rwi_colltype_bit) | rwi_stop_at_pierceable;
+
+	// a loose thing too heavy to be pushed aside by walking into it
+	bool Heavy(IPhysicalEntity* pPhys)
+	{
+		if (!pPhys || pPhys->GetType() == PE_STATIC)
+			return true;
+		pe_status_dynamics dyn;
+		return !pPhys->GetStatus(&dyn) || dyn.mass <= 0.0f || dyn.mass > 60.0f;
+	}
+
+	// at a downed teammate: about level with him and nothing solid between
+	// (a fence, a wall: the use key is not pressed through it)
+	bool CanReach(CPlayer* pMe, const Vec3& pos, IActor* pDowned, const Vec3& body)
+	{
+		// the middle of the body lying there (it lies elsewhere in this
+		// game: about where the middle is at that place)
+		IEntity* pBody = pDowned->GetEntity();
+		AABB box;
+		pBody->GetWorldBounds(box);
+		Vec3 at = box.IsEmpty() || Dist2D(pBody->GetWorldPos(), body) > 1.0f ? body + Vec3(0, 0, 0.9f) : box.GetCenter();
+		if (fabsf(at.z - pos.z) > 1.6f)
+			return false;
+		IPhysicalEntity* skip[2];
+		int n = 0;
+		if (IPhysicalEntity* p = pMe->GetEntity()->GetPhysics())
+			skip[n++] = p;
+		if (IPhysicalEntity* p = pBody->GetPhysics())
+			skip[n++] = p;
+		const Vec3 from = pos + Vec3(0, 0, 1.0f);
+		const Vec3 dir = at - from;
+		ray_hit hit;
+		return !gEnv->pPhysicalWorld->RayWorldIntersection(from, dir, ent_static | ent_rigid | ent_sleeping_rigid, WALK_GEOM, &hit, 1, skip, n)
+			|| !Heavy(hit.pCollider) || hit.dist > dir.GetLength() - 0.4f;
+	}
+
 	IActor* DownedTeammate(CPlayer* pMe, const Vec3& pos, float range)
 	{
 		IActor* pBest = 0;
@@ -528,43 +590,302 @@ namespace
 		return pBest;
 	}
 
-	// nothing in the way at knee and chest height (a walk straight there)
+	// a walk straight from one place to another: a ball the width of the
+	// body swept at the knees, the waist and the chest through what does
+	// not move (a thin ray slipped past the post of a fence the body then
+	// was caught on), rays at the middle and both sides against what moves
+	// (a bin is pushed aside, a car or a pallet of crates is not)
 	bool ClearWay(CPlayer* pMe, const Vec3& from, const Vec3& to)
 	{
-		// walls, fences, rocks, trunks, crates (leaves and grass are walked
-		// through; the ground's slopes are walked up)
-		IPhysicalEntity* pSkip = pMe->GetEntity()->GetPhysics();
-		for (int i = 0; i < 2; ++i)
+		const Vec3 dir = to - from;
+		if (dir.x * dir.x + dir.y * dir.y < 0.04f)
+			return true;
+		IPhysicalEntity* pSkip = pMe ? pMe->GetEntity()->GetPhysics() : 0;
+		static const float s_heights[] = { 0.65f, 1.15f, 1.65f };
+		for (int i = 0; i < 3; ++i)
 		{
-			const Vec3 up(0, 0, i ? 1.2f : 0.6f);
+			primitives::sphere ball;
+			ball.center = from + Vec3(0, 0, s_heights[i]);
+			ball.r = 0.3f;
+			geom_contact* pContact = 0;
+			const float hit = gEnv->pPhysicalWorld->PrimitiveWorldIntersection(ball.type, &ball, dir, ent_static, &pContact, 0,
+				WALK_GEOM, 0, 0, 0, &pSkip, pSkip ? 1 : 0);
+			if (hit > 0.0f && pContact)
+				return false;
+		}
+		Vec3 side(dir.y, -dir.x, 0);
+		side.NormalizeSafe(Vec3(1, 0, 0));
+		for (int i = 0; i < 6; ++i)
+		{
+			const Vec3 at = from + Vec3(0, 0, i < 3 ? 0.65f : 1.25f) + side * (0.3f * (float)(i % 3 - 1));
 			ray_hit hit;
-			if (FirstBlock(from + up, to - from, ent_static | ent_rigid | ent_sleeping_rigid, &pSkip, pSkip ? 1 : 0, hit, eT_Walk))
+			if (gEnv->pPhysicalWorld->RayWorldIntersection(at, dir, ent_rigid | ent_sleeping_rigid, WALK_GEOM, &hit, 1, &pSkip, pSkip ? 1 : 0)
+				&& hit.pCollider && Heavy(hit.pCollider))
 				return false;
 		}
 		return true;
 	}
 
 	// the way to go when something is in the way right ahead: the nearest
-	// direction to the wanted one that is free for a few metres (the same
-	// side as last time first: no dithering left and right)
+	// direction to the wanted one the body walks free for a couple of
+	// metres (the same side as last time first: no dithering left and
+	// right). Looked at again a few times a second
 	Vec3 Steer(CPlayer* pMe, const Vec3& pos, const Vec3& dir)
 	{
 		static float s_side = 1.0f;
-		static const float s_angles[] = { 0.0f, 0.5f, 1.0f, 1.5f, 2.0f };
-		for (int i = 0; i < 5; ++i)
-			for (int k = 0; k < (i ? 2 : 1); ++k)
+		static float s_at = -100.0f;
+		static Vec3 s_pos(ZERO), s_in(ZERO), s_out(ZERO);
+		if (Now() - s_at < 0.15f && s_in.Dot(dir) > 0.995f && Dist2D(s_pos, pos) < 0.3f)
+			return s_out;
+		static const float s_angles[] = { 0.0f, 0.4f, 0.8f, 1.2f, 1.6f, 2.0f, 2.4f };
+		Vec3 out = dir;
+		bool found = false;
+		for (int i = 0; i < 7 && !found; ++i)
+			for (int k = 0; k < (i ? 2 : 1) && !found; ++k)
 			{
 				const float a = s_angles[i] * (k ? -s_side : s_side);
 				const float c = cosf(a), sn = sinf(a);
 				const Vec3 d(dir.x * c - dir.y * sn, dir.x * sn + dir.y * c, 0);
-				if (ClearWay(pMe, pos, pos + d * 2.5f))
+				if (ClearWay(pMe, pos, pos + d * 1.8f))
 				{
 					if (i)
 						s_side = k ? -s_side : s_side;
-					return d;
+					out = d;
+					found = true;
 				}
 			}
-		return dir;
+		s_at = Now();
+		s_pos = pos;
+		s_in = dir;
+		s_out = out;
+		return out;
+	}
+
+	// ------------------------------------------------------------------
+	// a way round close by, found on its own: half-metre squares around it
+	// (the ground's height in each, whether the body fits there) searched
+	// for the shortest walk. For what the host's navigation leaves out or
+	// cannot know: fence posts, bins, rocks, a parked truck, a pallet
+	const float GRID_CELL = 0.5f;
+	struct SGrid
+	{
+		float x0, y0, z;                   // the corner, the height it looks from
+		int n;                             // squares a side
+		std::vector<signed char> state;    // -1 not looked at yet, 0 the body does not fit, 1 it does
+		std::vector<float> ground;         // the ground's height
+		std::vector<unsigned char> cost;   // 1, more where a loose thing is pushed aside
+		std::vector<AABB> light;           // loose things pushed aside (walked round if it can)
+		std::vector<IPhysicalEntity*> skip;   // not in the way: itself, those loose things, bodies lying there
+		SGrid(): x0(0), y0(0), z(0), n(0) {}
+	} s_grid;
+
+	// the squares around a place (it stands in the middle of one)
+	void GridBegin(CPlayer* pMe, const Vec3& center, float radius)
+	{
+		SGrid& g = s_grid;
+		g.n = 2 * std::max(2, (int)(radius / GRID_CELL)) + 1;
+		g.x0 = center.x - g.n * GRID_CELL * 0.5f;
+		g.y0 = center.y - g.n * GRID_CELL * 0.5f;
+		g.z = center.z;
+		g.state.assign(g.n * g.n, -1);
+		g.ground.assign(g.n * g.n, center.z);
+		g.cost.assign(g.n * g.n, 1);
+		g.light.clear();
+		g.skip.clear();
+		if (IPhysicalEntity* p = pMe ? pMe->GetEntity()->GetPhysics() : 0)
+			g.skip.push_back(p);
+		IPhysicalEntity** list = 0;
+		const float size = g.n * GRID_CELL;
+		const int count = gEnv->pPhysicalWorld->GetEntitiesInBox(Vec3(g.x0, g.y0, g.z - 6.0f), Vec3(g.x0 + size, g.y0 + size, g.z + 6.0f),
+			list, ent_rigid | ent_sleeping_rigid);
+		for (int i = 0; i < count; ++i)
+		{
+			// a heavy one is in the way as it is (a truck standing askew),
+			// a light one is pushed aside, a body lying there is no obstacle
+			if (Heavy(list[i]) && list[i]->GetType() != PE_ARTICULATED)
+				continue;
+			if (std::find(g.skip.begin(), g.skip.end(), list[i]) == g.skip.end())
+				g.skip.push_back(list[i]);
+			pe_status_pos sp;
+			if (list[i]->GetType() != PE_ARTICULATED && list[i]->GetStatus(&sp))
+				g.light.push_back(AABB(sp.pos + sp.BBox[0] - Vec3(0.3f, 0.3f, 0.0f), sp.pos + sp.BBox[1] + Vec3(0.3f, 0.3f, 0.0f)));
+		}
+	}
+
+	// the body fits on that square (looked at once: the ground's height,
+	// then a ball at the knees, the waist, the chest)
+	bool GridFree(int cx, int cy)
+	{
+		SGrid& g = s_grid;
+		if (cx < 0 || cy < 0 || cx >= g.n || cy >= g.n)
+			return false;
+		const int i = cy * g.n + cx;
+		if (g.state[i] >= 0)
+			return g.state[i] == 1;
+		g.state[i] = 0;
+		const float x = g.x0 + (cx + 0.5f) * GRID_CELL, y = g.y0 + (cy + 0.5f) * GRID_CELL;
+		const float top = std::max(g.z, gEnv->p3DEngine->GetTerrainElevation(x, y)) + 2.0f;
+		IPhysicalEntity** pSkip = g.skip.empty() ? 0 : &g.skip[0];
+		const int nSkip = (int)g.skip.size();
+		ray_hit hit;
+		if (!gEnv->pPhysicalWorld->RayWorldIntersection(Vec3(x, y, top), Vec3(0, 0, -8.0f), ent_static | ent_terrain, WALK_GEOM, &hit, 1,
+			pSkip, nSkip))
+			return false;
+		g.ground[i] = hit.pt.z;
+		for (int k = 0; k < 3; ++k)
+		{
+			primitives::sphere ball;
+			ball.center = Vec3(x, y, hit.pt.z + 0.65f + 0.5f * k);
+			ball.r = 0.3f;
+			if (gEnv->pPhysicalWorld->PrimitiveWorldIntersection(ball.type, &ball, Vec3(ZERO), ent_static | ent_rigid | ent_sleeping_rigid, 0, 0,
+				WALK_GEOM, 0, 0, 0, pSkip, nSkip) > 0.0f)
+				return false;
+		}
+		const Vec3 mid(x, y, hit.pt.z + 0.8f);
+		for (size_t k = 0; k < g.light.size(); ++k)
+			if (g.light[k].IsContainPoint(mid))
+				g.cost[i] = 4;
+		g.state[i] = 1;
+		return true;
+	}
+
+	int GridIndex(const Vec3& p)
+	{
+		const SGrid& g = s_grid;
+		const int cx = (int)floorf((p.x - g.x0) / GRID_CELL), cy = (int)floorf((p.y - g.y0) / GRID_CELL);
+		return cx < 0 || cy < 0 || cx >= g.n || cy >= g.n ? -1 : cy * g.n + cx;
+	}
+
+	// a straight walk over the squares between two places: each of them
+	// free, no step up or down too high
+	bool GridLine(const Vec3& a, const Vec3& b)
+	{
+		SGrid& g = s_grid;
+		const int steps = std::max(1, (int)(Dist2D(a, b) / (GRID_CELL * 0.5f)));
+		int prev = -1;
+		for (int s = 0; s <= steps; ++s)
+		{
+			const int i = GridIndex(a + (b - a) * ((float)s / (float)steps));
+			if (i < 0 || !GridFree(i % g.n, i / g.n))
+				return false;
+			if (prev >= 0 && prev != i && fabsf(g.ground[i] - g.ground[prev]) > 0.45f)
+				return false;
+			prev = i;
+		}
+		return true;
+	}
+
+	// the shortest walk over the squares from where it stands to a place
+	// (or to the square nearest to it it gets to: the place may be off the
+	// squares or in a wall), only the corners of it; false: none
+	bool GridPath(const Vec3& from, const Vec3& to, std::vector<Vec3>& out, int* pLooked = 0, bool* pFound = 0)
+	{
+		out.clear();
+		if (pFound)
+			*pFound = false;
+		SGrid& g = s_grid;
+		const int n = g.n;
+		const int start = GridIndex(from);
+		if (start < 0)
+			return false;
+		// where it is, it fits (pressed against a fence a ball may touch it)
+		if (!GridFree(start % n, start / n))
+		{
+			g.state[start] = 1;
+			g.ground[start] = from.z;
+		}
+		const float edge = GRID_CELL * 0.5f;
+		const Vec3 goal(clamp_tpl(to.x, g.x0 + edge, g.x0 + n * GRID_CELL - edge), clamp_tpl(to.y, g.y0 + edge, g.y0 + n * GRID_CELL - edge), to.z);
+		const int target = GridIndex(goal);
+		const int tx = target % n, ty = target / n;
+		struct SOpen
+		{
+			float f;
+			int i;
+			bool operator<(const SOpen& o) const { return f > o.f; }
+		};
+		std::vector<float> cost(n * n, 1e9f);
+		std::vector<int> back(n * n, -1);
+		std::vector<bool> closed(n * n, false);
+		std::priority_queue<SOpen> open;
+		#define COOP_GRID_H(i) (GRID_CELL * (float)(std::max(abs((i) % n - tx), abs((i) / n - ty)) + 0.414f * std::min(abs((i) % n - tx), abs((i) / n - ty))))
+		cost[start] = 0.0f;
+		const SOpen o0 = { COOP_GRID_H(start), start };
+		open.push(o0);
+		int best = start, looked = 0;
+		float bestH = COOP_GRID_H(start);
+		const float startH = bestH;
+		bool found = false;
+		static const int s_dx[] = { 1, -1, 0, 0, 1, 1, -1, -1 };
+		static const int s_dy[] = { 0, 0, 1, -1, 1, -1, 1, -1 };
+		while (!open.empty() && looked < 4000)
+		{
+			const SOpen cur = open.top();
+			open.pop();
+			if (closed[cur.i])
+				continue;
+			closed[cur.i] = true;
+			++looked;
+			if (cur.i == target)
+			{
+				found = true;
+				best = target;
+				break;
+			}
+			const float h = COOP_GRID_H(cur.i);
+			if (h < bestH)
+			{
+				bestH = h;
+				best = cur.i;
+			}
+			const int cx = cur.i % n, cy = cur.i / n;
+			for (int k = 0; k < 8; ++k)
+			{
+				const int nx = cx + s_dx[k], ny = cy + s_dy[k];
+				const bool diag = k >= 4;
+				if (!GridFree(nx, ny) || (diag && (!GridFree(nx, cy) || !GridFree(cx, ny))))
+					continue;
+				const int ni = ny * n + nx;
+				if (closed[ni] || fabsf(g.ground[ni] - g.ground[cur.i]) > (diag ? 0.6f : 0.45f))
+					continue;
+				const float c = cost[cur.i] + (diag ? 1.414f : 1.0f) * GRID_CELL * (float)g.cost[ni];
+				if (c < cost[ni])
+				{
+					cost[ni] = c;
+					back[ni] = cur.i;
+					const SOpen on = { c + COOP_GRID_H(ni), ni };
+					open.push(on);
+				}
+			}
+		}
+		#undef COOP_GRID_H
+		if (pLooked)
+			*pLooked = looked;
+		if (pFound)
+			*pFound = found;
+		// not there, and nowhere a metre nearer to it either
+		if (!found && bestH > startH - 1.0f)
+			return false;
+		std::vector<Vec3> cells;
+		for (int i = best; i >= 0; i = back[i])
+			cells.push_back(Vec3(g.x0 + (i % n + 0.5f) * GRID_CELL, g.y0 + (i / n + 0.5f) * GRID_CELL, g.ground[i]));
+		std::reverse(cells.begin(), cells.end());
+		// the corners: from each to the farthest one in a straight walk
+		Vec3 at = from;
+		for (size_t i = 1; i < cells.size(); )
+		{
+			size_t reach = i;
+			for (size_t j = cells.size() - 1; j > i; --j)
+				if (GridLine(at, cells[j]))
+				{
+					reach = j;
+					break;
+				}
+			out.push_back(cells[reach]);
+			at = cells[reach];
+			i = reach + 1;
+		}
+		return !out.empty();
 	}
 
 	// asks the host's game for a way there (its AI navigation knows the
@@ -591,6 +912,31 @@ namespace
 			pRules->CoopSendSyncToServer(15, 6, 0, pThreat->GetEntity()->GetName(), "", 0, 0.0f);
 	}
 
+	// the length of a walk from here along points
+	float WayLeftOf(const Vec3& pos, const std::vector<Vec3>& points)
+	{
+		float left = 0.0f;
+		Vec3 at = pos;
+		for (size_t i = 0; i < points.size(); ++i)
+		{
+			left += Dist2D(at, points[i]);
+			at = points[i];
+		}
+		return left;
+	}
+
+	// the way left to the goal along the way it has (none: straight there)
+	float WayLeft(const Vec3& pos, const Vec3& to)
+	{
+		const std::vector<Vec3>& path = s_bot.path;
+		if (path.empty() || Dist2D(s_bot.pathGoal, to) >= 4.0f)
+			return Dist2D(pos, to);
+		float left = Dist2D(pos, path[0]);
+		for (size_t i = 1; i < path.size(); ++i)
+			left += Dist2D(path[i - 1], path[i]);
+		return left + Dist2D(path.back(), to);
+	}
+
 	// the point of the way to walk to now (or the goal itself)
 	Vec3 Waypoint(CPlayer* pMe, const Vec3& pos, const Vec3& to, float dist, bool blocked)
 	{
@@ -614,11 +960,21 @@ namespace
 			if (Dist2D(path[i], pos) < Dist2D(path[nearest], pos))
 				nearest = i;
 		path.erase(path.begin(), path.begin() + nearest);
-		while (!path.empty() && Dist2D(path[0], pos) < 1.3f)
+		while (!path.empty() && Dist2D(path[0], pos) < 1.0f)
 			path.erase(path.begin());
-		// a later point in plain sight: straight there
-		while (path.size() > 1 && Dist2D(path[1], pos) < 25.0f && ClearWay(pMe, pos, path[1]))
-			path.erase(path.begin());
+		// the farthest of the next points the body walks to straight (the
+		// corner of a fence is walked round, not cut)
+		if (Now() >= s_bot.wayCheckAt || s_bot.wayCheckPath != s_bot.pathAt)
+		{
+			s_bot.wayCheckAt = Now() + 0.25f;
+			s_bot.wayCheckPath = s_bot.pathAt;
+			for (size_t k = std::min(path.size(), (size_t)6); k-- > 1; )
+				if (Dist2D(path[k], pos) < 25.0f && ClearWay(pMe, pos, path[k]))
+				{
+					path.erase(path.begin(), path.begin() + k);
+					break;
+				}
+		}
 		if (path.empty() || (!blocked && dist < 6.0f))
 			return to;
 		// a fresh way now and then (it moves on, so does the one it goes to)
@@ -627,10 +983,41 @@ namespace
 		return path[0];
 	}
 
+	// something low right ahead to jump onto or over (a crate, a low wall);
+	// not a fence or a wall: it only ended up on whatever stood next to it
+	bool LowObstacleAhead(CPlayer* pMe, const Vec3& pos, const Vec3& dir)
+	{
+		IPhysicalEntity* pSkip = pMe->GetEntity()->GetPhysics();
+		const int ents = ent_static | ent_rigid | ent_sleeping_rigid;
+		ray_hit hit;
+		if (!gEnv->pPhysicalWorld->RayWorldIntersection(pos + Vec3(0, 0, 0.5f), dir * 1.2f, ents, WALK_GEOM, &hit, 1, &pSkip, pSkip ? 1 : 0))
+			return false;
+		return !gEnv->pPhysicalWorld->RayWorldIntersection(pos + Vec3(0, 0, 1.3f), dir * 1.6f, ents, WALK_GEOM, &hit, 1, &pSkip, pSkip ? 1 : 0);
+	}
+
+	// along the face of what is in the way ahead, the side nearer to where
+	// it wants to go
+	Vec3 AlongObstacle(CPlayer* pMe, const Vec3& pos, const Vec3& dir, const Vec3& toward)
+	{
+		IPhysicalEntity* pSkip = pMe->GetEntity()->GetPhysics();
+		Vec3 n = -dir;
+		ray_hit hit;
+		if (gEnv->pPhysicalWorld->RayWorldIntersection(pos + Vec3(0, 0, 1.0f), dir * 2.0f, ent_static | ent_rigid | ent_sleeping_rigid,
+			WALK_GEOM, &hit, 1, &pSkip, pSkip ? 1 : 0))
+			n = hit.n;
+		n.z = 0;
+		n.NormalizeSafe(-dir);
+		Vec3 along(n.y, -n.x, 0);
+		if (along.Dot(toward) < 0.0f)
+			along = -along;
+		return along;
+	}
+
 	// walk toward a point; true when there
 	bool MoveTo(CPlayer* pMe, const Vec3& to, float stopAt, bool mayRun, bool mayCatchUp, const char* toName)
 	{
 		const Vec3 pos = pMe->GetEntity()->GetWorldPos();
+		const float now = Now();
 		Vec3 d = to - pos;
 		d.z = 0;
 		const float dist = d.GetLength();
@@ -638,60 +1025,150 @@ namespace
 		{
 			s_ctl.moveDir.zero();
 			s_bot.stuck = 0;
-			s_bot.checkAt = Now() + 1.0f;
-			s_bot.checkPos = pos;
+			s_bot.progAt = now;
+			s_bot.slideUntil = 0.0f;
 			s_bot.farSince = -1;
 			return true;
 		}
-		// around what is in the way, by the host's navigation
-		const bool blocked = s_bot.stuck > 0 || !ClearWay(pMe, pos, to);
-		Vec3 next = Waypoint(pMe, pos, to, dist, blocked);
-		Vec3 dn = next - pos;
-		dn.z = 0;
-		Vec3 dir = dn.GetLength() > 0.1f ? dn.GetNormalized() : d / dist;
-		// stuck: jump, step aside, a way around; only when nothing helps for
-		// long, ask to be put next to the one it follows
-		if (Now() >= s_bot.checkAt)
+		// how it gets on: the least way left so far, and when it got there.
+		// Walking along a fence with the head against it is moving, not
+		// getting anywhere
+		if (Dist2D(s_bot.progGoal, to) > 2.0f || now - s_bot.progSeen > 1.5f)
 		{
-			const float moved = (pos - s_bot.checkPos).GetLength2D();
-			s_bot.stuck = moved < 0.5f ? s_bot.stuck + 1 : 0;
-			s_bot.checkPos = pos;
-			s_bot.checkAt = Now() + 1.0f;
-			if (s_bot.stuck == 1 || s_bot.stuck == 3)
-				s_ctl.jump = true;
-			if (s_bot.stuck == 2 || s_bot.stuck == 4 || s_bot.stuck == 8)
+			s_bot.progGoal = to;
+			s_bot.progBest = 1e9f;
+			s_bot.progAt = now;
+			s_bot.stuck = 0;
+			s_bot.slideUntil = 0.0f;
+		}
+		s_bot.progSeen = now;
+		// around what is in the way, by the host's navigation (straight
+		// there looked at a few times a second)
+		if (now >= s_bot.toCheckAt || Dist2D(s_bot.toCheckFor, to) > 0.5f)
+		{
+			s_bot.toCheckAt = now + 0.2f;
+			s_bot.toCheckFor = to;
+			s_bot.toClear = ClearWay(pMe, pos, to);
+		}
+		const bool blocked = s_bot.stuck > 0 || !s_bot.toClear;
+		const Vec3 next = Waypoint(pMe, pos, to, dist, blocked);
+		if (s_bot.progPath != s_bot.pathAt)
+		{
+			// a new way: measured along that one from now on (a way round
+			// is longer than the straight line it could not walk)
+			s_bot.progPath = s_bot.pathAt;
+			s_bot.progBest = 1e9f;
+		}
+		// the point it goes to next not in a straight walk (a fence post,
+		// a bin, a truck the host's navigation leaves out), or getting
+		// nowhere: the way round close by, found on its own (again when
+		// that point moves, now and then, and when it still gets nowhere)
+		if (now >= s_bot.nextCheckAt || Dist2D(s_bot.nextCheckFor, next) > 0.5f)
+		{
+			s_bot.nextCheckAt = now + 0.2f;
+			s_bot.nextCheckFor = next;
+			s_bot.nextClear = ClearWay(pMe, pos, next);
+		}
+		const float toNext = Dist2D(pos, next);
+		std::vector<Vec3>& local = s_bot.local;
+		// close to the goal: the whole way there on its own (the host's way
+		// may lead right through what it does not know: under a truck)
+		const Vec3 target = dist < 14.0f ? to : next;
+		const float toTarget = Dist2D(pos, target);
+		if ((!s_bot.nextClear && toNext < 16.0f) || s_bot.stuck > 0)
+		{
+			const bool moved = Dist2D(s_bot.localFor, target) > 1.5f || s_bot.localStage != s_bot.stuck;
+			if (moved || now - s_bot.localAt > 3.0f)
 			{
-				s_bot.strafeUntil = Now() + 1.2f;
-				s_bot.strafeSide = -s_bot.strafeSide;
+				int looked = 0;
+				bool found = false;
+				const float t0 = gEnv->pTimer->GetAsyncCurTime();
+				GridBegin(pMe, pos, std::min(16.0f, std::max(toTarget, toNext) + 6.0f));
+				if (!GridPath(pos, target, local, &looked, &found))
+					local.clear();
+				// not there within the squares (the way round is longer): to
+				// the host's way's next point then
+				if (!found && Dist2D(target, next) > 0.5f)
+				{
+					std::vector<Vec3> alt;
+					int more = 0;
+					bool there = false;
+					if (GridPath(pos, next, alt, &more, &there) && there)
+						local.swap(alt);
+					looked += more;
+				}
+				if (moved)
+				{
+					++s_bot.localPlans;
+					CryLogAlways("[CoopAgent] a way round to %s close by: %s (%d squares looked at, %.1f ms)", toName && *toName ? toName : "where it goes",
+						local.empty() ? "none" : string().Format("%d corners, %.1f m to the point %.1f m away", (int)local.size(),
+							WayLeftOf(pos, local), toTarget).c_str(), looked, (gEnv->pTimer->GetAsyncCurTime() - t0) * 1000.0f);
+				}
+				s_bot.localFor = target;
+				s_bot.localAt = now;
+				s_bot.localStage = s_bot.stuck;
+				s_bot.progBest = 1e9f;
 			}
-			if (s_bot.stuck == 3)
+			while (local.size() > 1 && Dist2D(local[0], pos) < 0.6f)
+				local.erase(local.begin());
+		}
+		else
+			local.clear();
+		const float tail = Dist2D(target, to) < 0.01f ? 0.0f : WayLeft(target, to);
+		const float left = local.empty() ? WayLeft(pos, to) : WayLeftOf(pos, local) + Dist2D(local.back(), target) + tail;
+		if (left < s_bot.progBest - 0.5f)
+		{
+			if (s_bot.progBest < 1e8f)
 			{
-				Event("stuck on the way (%.0f m to go): around it", dist);
-				++s_bot.stuckTimes;
-			}
-			if (s_bot.stuck == 5)
-			{
-				s_bot.pathAt = -100.0f;    // the way it had led nowhere: a new one
-				s_bot.pathAskAt = 0.0f;
-				AskPath(to);
-			}
-			if (s_bot.stuck >= 15 && mayCatchUp && dist > 8.0f)
-			{
-				Ask(1, toName);
+				s_bot.progAt = now;
 				s_bot.stuck = 0;
 			}
+			s_bot.progBest = left;
 		}
-		if (Now() < s_bot.strafeUntil)
+		Vec3 dn = (local.empty() ? next : local[0]) - pos;
+		dn.z = 0;
+		Vec3 dir = dn.GetLength() > 0.1f ? dn.GetNormalized() : d / dist;
+		// no nearer for a while: a fresh way from where it stands and a few
+		// steps along what is in the way (first to the side the way goes,
+		// then to the other, longer each time); a jump only onto something
+		// low. Long without getting anywhere, the one it follows: put next
+		// to him (never so to a downed teammate: it walks)
+		static const float s_stages[] = { 3.0f, 7.0f, 12.0f, 18.0f, 25.0f, 33.0f, 42.0f, 52.0f };
+		const float stalled = now - s_bot.progAt;
+		if (s_bot.stuck < 8 && stalled > s_stages[s_bot.stuck])
 		{
-			const Vec3 side(dir.y * s_bot.strafeSide, -dir.x * s_bot.strafeSide, 0);
-			dir = (dir * 0.3f + side).GetNormalized();
+			++s_bot.stuck;
+			++s_bot.stuckTimes;
+			s_bot.pathAt = -100.0f;    // the way it had led nowhere: a new one
+			s_bot.pathAskAt = 0.0f;
+			AskPath(to);
+			Vec3 along = AlongObstacle(pMe, pos, dir, dn.GetLength() > 0.1f ? dn : d);
+			if (!(s_bot.stuck & 1))
+				along = -along;
+			s_bot.slideDir = along;
+			s_bot.slideUntil = now + 1.0f + 0.5f * (float)s_bot.stuck;
+			const bool low = LowObstacleAhead(pMe, pos, dir);
+			if (low)
+				s_ctl.jump = true;
+			Event("no nearer to %s for %.0f s (%.0f m to go): a new way, a way round close by%s", toName && *toName ? toName : "where it goes",
+				stalled, dist, low ? ", a jump over something low" : "");
+		}
+		if (s_bot.stuck >= 4 && mayCatchUp && dist > 8.0f)
+			Ask(1, toName);
+		if (now < s_bot.slideUntil && local.empty())
+		{
+			// past its end: the way to the point is free again
+			if (ClearWay(pMe, pos, next))
+				s_bot.slideUntil = 0.0f;
+			else
+				dir = s_bot.slideDir;
 		}
 		// far behind for a while: put next to the one it follows
 		if (mayCatchUp && dist > 60.0f)
 		{
 			if (s_bot.farSince < 0)
-				s_bot.farSince = Now();
-			else if (Now() - s_bot.farSince > 4.0f)
+				s_bot.farSince = now;
+			else if (now - s_bot.farSince > 4.0f)
 			{
 				Ask(1, toName);
 				s_bot.farSince = -1;
@@ -699,7 +1176,9 @@ namespace
 		}
 		else
 			s_bot.farSince = -1;
-		s_ctl.moveDir = Steer(pMe, pos, dir);
+		// the way round close by goes between what is there: no steering
+		// off it (that took it back against the fence)
+		s_ctl.moveDir = local.empty() ? Steer(pMe, pos, dir) : dir;
 		s_ctl.sprint = mayRun && dist > 15.0f;
 		return false;
 	}
@@ -1862,10 +2341,10 @@ namespace
 		}
 		if (Now() >= s_bot.statsAt)
 		{
-			if (s_bot.bursts || s_bot.heldFire || s_bot.stuckTimes || s_bot.unseen || s_bot.turning)
-				CryLogAlways("[CoopAgent] the last minute: %d bursts fired; no shot: %d frames something in the way, %d enemy not in sight, %d turning to him; stuck %d times",
-					s_bot.bursts, s_bot.heldFire, s_bot.unseen, s_bot.turning, s_bot.stuckTimes);
-			s_bot.bursts = s_bot.heldFire = s_bot.stuckTimes = s_bot.unseen = s_bot.turning = 0;
+			if (s_bot.bursts || s_bot.heldFire || s_bot.stuckTimes || s_bot.unseen || s_bot.turning || s_bot.localPlans)
+				CryLogAlways("[CoopAgent] the last minute: %d bursts fired; no shot: %d frames something in the way, %d enemy not in sight, %d turning to him; stuck %d times, %d ways round found close by",
+					s_bot.bursts, s_bot.heldFire, s_bot.unseen, s_bot.turning, s_bot.stuckTimes, s_bot.localPlans);
+			s_bot.bursts = s_bot.heldFire = s_bot.stuckTimes = s_bot.unseen = s_bot.turning = s_bot.localPlans = 0;
 			s_bot.statsAt = Now() + 60.0f;
 		}
 		IViewSystem* pView = g_pGame->GetIGameFramework()->GetIViewSystem();
@@ -1939,6 +2418,19 @@ namespace
 		const Vec3 eye = EyePos(pMe);
 		IVehicle* pMyVehicle = pMe->GetLinkedVehicle();
 
+		// where it is in its own game, for the host's game: the answer is
+		// where the downed teammates lie there (a body falls its own way on
+		// each computer), and should the two games have it apart, it is put
+		// back where everybody sees it
+		if (Now() >= s_bot.reportAt && !pMyVehicle)
+		{
+			s_bot.reportAt = Now() + 2.0f;
+			string where;
+			where.Format("%.2f %.2f %.2f", pos.x, pos.y, pos.z);
+			if (CGameRules* pRules = g_pGame->GetGameRules())
+				pRules->CoopSendSyncToServer(15, 7, 0, where.c_str(), "", 0, 0.0f);
+		}
+
 		// a grenade throw begun is finished first (a second or two)
 		if (s_gren.phase != 0)
 		{
@@ -1963,8 +2455,21 @@ namespace
 		{
 			// it makes its way there (around walls and rocks, by the host's
 			// navigation), shooting back at whoever shoots at it; at the body
-			// an enemy close by is dealt with first (it would kill both)
-			const Vec3 body = pDowned->GetEntity()->GetWorldPos();
+			// an enemy close by is dealt with first (it would kill both). The
+			// body where the host's game has it: there the revive counts (in
+			// its own game the body may have fallen elsewhere, over a fence)
+			Vec3 body = pDowned->GetEntity()->GetWorldPos();
+			Vec3 hostBody;
+			if (CoopAgent::HostBodyPos(pDowned->GetEntityId(), hostBody))
+			{
+				if (Dist2D(hostBody, body) > 1.0f && s_bot.bodyToldFor != pDowned->GetEntityId())
+				{
+					s_bot.bodyToldFor = pDowned->GetEntityId();
+					Event("%s lies at %.1f %.1f %.1f in the host's game, %.1f m from where its own game has him: goes by the host's",
+						pDowned->GetEntity()->GetName(), hostBody.x, hostBody.y, hostBody.z, Dist2D(hostBody, body));
+				}
+				body = hostBody;
+			}
 			const float d = Dist2D(body, pos);
 			if (s_bot.downedFor != pDowned->GetEntityId())
 			{
@@ -1982,12 +2487,32 @@ namespace
 					s_bot.lastFought = enemy;
 				s_bot.enemy = enemy;
 			}
-			if (pEnemy)
+			// at the body: close, about level with it and nothing solid
+			// between (behind a fence it goes round, it does not press the
+			// use key through it). Close for long and still something
+			// between (he lies half in a rock): from there then. A revive
+			// under way goes on a step further off and with an enemy not
+			// close
+			const bool reach = d <= 1.6f && CanReach(pMe, pos, pDowned, body);
+			if (d <= 1.6f && !reach)
+			{
+				if (s_bot.reachFailSince < 0)
+				{
+					s_bot.reachFailSince = Now();
+					Event("next to %s, but something is in the way: around it", pDowned->GetEntity()->GetName());
+				}
+			}
+			else
+				s_bot.reachFailSince = -1;
+			const bool reviving = s_bot.useHeld && s_bot.useFor == pDowned->GetEntityId() && CoopRevive::IsBeingRevived(pDowned->GetEntityId());
+			const bool enemyClose = pEnemy && Dist2D(pEnemy->GetEntity()->GetWorldPos(), pos) < 10.0f;
+			const bool atBody = reach || (d <= 1.6f && s_bot.reachFailSince >= 0 && Now() - s_bot.reachFailSince > 8.0f) || (reviving && d <= 2.6f);
+			if (pEnemy && !(reviving && atBody && !enemyClose))
 				HoldUse(pMe, false, 0);
 			// badly hurt: out of the fire first (dead it revives nobody)
 			if (Survive(pMe, pos, eye, pEnemy))
 				return;
-			if (d > 1.6f && pEnemy && d > 4.0f && Dist2D(pEnemy->GetEntity()->GetWorldPos(), pos) < 40.0f
+			if (!atBody && pEnemy && d > 4.0f && Dist2D(pEnemy->GetEntity()->GetWorldPos(), pos) < 40.0f
 				&& Now() - s_bot.downedSince < 40.0f)
 			{
 				// an enemy close: the way is cleared first (from here or from
@@ -2000,9 +2525,9 @@ namespace
 					Dodge(pos, pEnemy);
 				s_bot.doing.Format("clearing the way to %s (%.0f m): fighting %s", pDowned->GetEntity()->GetName(), d, pEnemy->GetEntity()->GetName());
 			}
-			else if (d > 1.6f)
+			else if (!atBody)
 			{
-				MoveTo(pMe, body, 1.6f, !pEnemy, false, pDowned->GetEntity()->GetName());
+				MoveTo(pMe, body, 0.9f, !pEnemy, false, pDowned->GetEntity()->GetName());
 				s_bot.reviveSince = -1;
 				if (pEnemy)
 				{
@@ -2017,7 +2542,7 @@ namespace
 					s_bot.doing.Format("running to revive %s (%.0f m)", pDowned->GetEntity()->GetName(), d);
 				}
 			}
-			else if (pEnemy)
+			else if (pEnemy && !(reviving && !enemyClose))
 			{
 				s_ctl.moveDir.zero();
 				s_ctl.crouch = true;
@@ -2057,6 +2582,8 @@ namespace
 			return;
 		}
 		s_bot.reviveSince = -1;
+		s_bot.reachFailSince = -1;
+		s_bot.bodyToldFor = 0;
 		s_bot.downedFor = 0;
 		HoldUse(pMe, false, 0);
 		if (s_bot.order == eO_Revive)
@@ -3251,6 +3778,11 @@ namespace
 		// the host's own mode (a server refuses a client whose -devmode differs)
 		const bool devmode = wcsstr(GetCommandLineW(), L"-devmode") != 0;
 		std::wstring line = L"\"" + std::wstring(exe) + L"\" -mod " + mod + (devmode ? L" -devmode" : L"") + L" -userpath \"" + profile + L"\" -logfile companion.log" + wtail;
+		// testing: the host runs the lines of a file as console commands, the
+		// companion those of its own
+		ICVar* pCmdFile = gEnv->pConsole->GetCVar("coop_test_cmdfile");
+		if (pCmdFile && pCmdFile->GetString()[0])
+			line += L" +coop_test_cmdfile companion_cmd.txt";
 		std::vector<wchar_t> buf(line.begin(), line.end());
 		buf.push_back(0);
 		STARTUPINFOW si = {};
@@ -3524,6 +4056,7 @@ namespace
 		nodes.push_back(to);
 		// straightened: from each point to the farthest one in a straight walk
 		Vec3 at = from;
+		int sweeps = 40;
 		for (size_t i = 0; i < nodes.size(); )
 		{
 			size_t reach = i;
@@ -3531,7 +4064,10 @@ namespace
 			{
 				Vec3 end = nodes[j];
 				IAISystem::ENavigationType type = IAISystem::NAV_UNSET;
-				if (pAI->IsSegmentValid(mask, radius, at, end, type))
+				// the navigation leaves out fence posts, bins, rocks a little
+				// off its edges: the body is swept along too (a few times a
+				// way: they are not cheap)
+				if (pAI->IsSegmentValid(mask, radius, at, end, type) && (sweeps <= 0 || (--sweeps, ClearWay(0, at, end))))
 				{
 					reach = j;
 					break;
@@ -3848,6 +4384,56 @@ namespace
 		CryLogAlways("[CoopTest] view %d in %s's %s: %s", (int)next, pVehicle->GetEntity()->GetName(), pSeat->GetSeatName(), ok ? "set" : "refused");
 	}
 
+	// coop_test_grid [x y z] [radius] [x y z]: the squares the companion
+	// finds its way round on, around a place (this game's player by
+	// default), one log line a row: # the body does not fit, . it does, o
+	// a light loose thing to push aside, @ the place, and with a second
+	// place the way found there (* its corners)
+	void CmdTestGrid(IConsoleCmdArgs* pArgs)
+	{
+		Vec3 at(ZERO);
+		int arg = 1;
+		if (pArgs->GetArgCount() >= 4)
+		{
+			at = Vec3((float)atof(pArgs->GetArg(1)), (float)atof(pArgs->GetArg(2)), (float)atof(pArgs->GetArg(3)));
+			arg = 4;
+		}
+		else if (IActor* pMe = g_pGame->GetIGameFramework()->GetClientActor())
+			at = pMe->GetEntity()->GetWorldPos();
+		const float radius = clamp_tpl(pArgs->GetArgCount() > arg ? (float)atof(pArgs->GetArg(arg)) : 8.0f, 2.0f, 16.0f);
+		GridBegin(0, at, radius);
+		std::vector<Vec3> way;
+		int looked = 0;
+		if (pArgs->GetArgCount() >= arg + 4)
+		{
+			const Vec3 to((float)atof(pArgs->GetArg(arg + 1)), (float)atof(pArgs->GetArg(arg + 2)), (float)atof(pArgs->GetArg(arg + 3)));
+			const bool ok = GridPath(at, to, way, &looked);
+			CryLogAlways("[CoopTest] grid way from (%.1f %.1f) to (%.1f %.1f): %s, %d squares looked at", at.x, at.y, to.x, to.y,
+				ok ? string().Format("%d corners, %.1f m", (int)way.size(), WayLeftOf(at, way)).c_str() : "none", looked);
+			for (size_t i = 0; i < way.size(); ++i)
+				CryLogAlways("[CoopTest] grid corner %d: %.1f %.1f %.1f", (int)i, way[i].x, way[i].y, way[i].z);
+		}
+		const SGrid& g = s_grid;
+		CryLogAlways("[CoopTest] grid around (%.1f %.1f %.1f), %d x %d squares of %.1f m, rows north (+y) first, west (-x) left",
+			at.x, at.y, at.z, g.n, g.n, GRID_CELL);
+		for (int cy = g.n - 1; cy >= 0; --cy)
+		{
+			string row;
+			for (int cx = 0; cx < g.n; ++cx)
+			{
+				const int i = cy * g.n + cx;
+				char c = GridFree(cx, cy) ? (g.cost[i] > 1 ? 'o' : '.') : '#';
+				for (size_t k = 0; k < way.size(); ++k)
+					if (GridIndex(way[k]) == i)
+						c = '*';
+				if (GridIndex(at) == i)
+					c = '@';
+				row += c;
+			}
+			CryLogAlways("[CoopTest] grid %+5.1f |%s|", g.y0 + (cy + 0.5f) * GRID_CELL - at.y, row.c_str());
+		}
+	}
+
 	// coop_test_findobj [x y z] [radius] [filter]: the physical things near a
 	// place (this game's player by default): what they are (a level brush's
 	// model, an entity), where, their parts and how many breakable joints
@@ -4133,6 +4719,7 @@ void CoopAgent::Init()
 	gEnv->pConsole->AddCommand("coop_test_key", CmdTestKey, 0, "Crysis Coop testing: coop_test_key <action> <1|0>: this game's player presses (lets go of) a key's action");
 	gEnv->pConsole->AddCommand("coop_test_cam", CmdTestCam, 0, "Crysis Coop testing: coop_test_cam logs this game's camera, its view and the vehicle seat's view");
 	gEnv->pConsole->AddCommand("coop_test_vehview", CmdTestVehView, 0, "Crysis Coop testing: coop_test_vehview: the vehicle seat's next view for this game's player");
+	gEnv->pConsole->AddCommand("coop_test_grid", CmdTestGrid, 0, "Crysis Coop testing: coop_test_grid [x y z] [radius] [to x y z]: the squares the companion finds its way round on, and the way to a place");
 	gEnv->pConsole->AddCommand("coop_test_findobj", CmdTestFindObj, 0, "Crysis Coop testing: coop_test_findobj [x y z] [radius] [filter]: physical things near a place, their model, parts and breakable joints");
 	gEnv->pConsole->AddCommand("coop_test_physvars", CmdTestPhysVars, 0, "Crysis Coop testing: coop_test_physvars [multiplayer|breakscale|playerscanbreak value]: the physics settings that decide breaking");
 	gEnv->pConsole->AddCommand("coop_test_vehdamage", CmdTestVehDamage, 0, "Crysis Coop testing: coop_test_vehdamage [vehicle]: a vehicle's damage, whole and by component");
@@ -4245,6 +4832,41 @@ void CoopAgent::OnServerRequest(EntityId agent, int op, const char* name)
 	if (!pRules || !pAgent || pAgent->GetHealth() <= 0)
 		return;
 	IVehicle* pMine = pAgent->GetLinkedVehicle();
+	// where the companion is in its own game: far from here twice running,
+	// it is put back here (everybody else sees it here, and here the use
+	// key, the shots, the damage count)
+	if (op == 7)
+	{
+		static std::map<EntityId, int> s_off;
+		Vec3 there;
+		if (pMine || !name || sscanf(name, "%f %f %f", &there.x, &there.y, &there.z) != 3)
+			return;
+		const Vec3 here = pAgent->GetEntity()->GetWorldPos();
+		// where the downed teammates lie here (a body falls its own way on
+		// each computer: the companion goes to the one the revive counts at)
+		IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+		while (IActor* pActor = it->Next())
+			if (pActor != pAgent && IsDown(pActor))
+			{
+				const Vec3 at = pActor->GetEntity()->GetWorldPos();
+				pRules->CoopSendSync(16, 2, 0, pActor->GetEntity()->GetName(), string().Format("%.2f %.2f %.2f", at.x, at.y, at.z).c_str(), 0, 0.0f,
+					static_cast<CActor*>(pAgent)->GetChannelId());
+			}
+		const float off = Dist2D(here, there);
+		int& times = s_off[agent];
+		if (off < 2.0f && fabsf(here.z - there.z) < 2.5f)
+		{
+			times = 0;
+			return;
+		}
+		if (++times < 2)
+			return;
+		times = 0;
+		pRules->MovePlayer(static_cast<CActor*>(pAgent), here, pAgent->GetEntity()->GetWorldAngles());
+		CryLogAlways("[CoopAgent] %s was %.1f m off in its own game (at %.1f %.1f %.1f, here %.1f %.1f %.1f): put back here",
+			pAgent->GetEntity()->GetName(), off, there.x, there.y, there.z, here.x, here.y, here.z);
+		return;
+	}
 	if (op == 2)
 	{
 		if (IVehicleSeat* pSeat = pMine ? pMine->GetSeatForPassenger(agent) : 0)
@@ -4313,8 +4935,8 @@ void CoopAgent::OnServerRequest(EntityId agent, int op, const char* name)
 			for (size_t i = 0; i < path.size() && i < 20; ++i)
 				text += string().Format("%s%.1f %.1f %.1f", i ? ";" : "", path[i].x, path[i].y, path[i].z);
 		}
-		CryLogAlways("[CoopAgent] a way for %s: %d points over %.0f m%s", pAgent->GetEntity()->GetName(), (int)path.size(),
-			from.GetDistance(goal), text.empty() ? " (none found: it goes straight)" : "");
+		CryLogAlways("[CoopAgent] a way for %s: %d points over %.0f m%s%s", pAgent->GetEntity()->GetName(), (int)path.size(),
+			from.GetDistance(goal), text.empty() ? " (none found: it goes straight)" : ": ", text.c_str());
 		pRules->CoopSendSync(16, 0, 0, name, text.c_str(), 0, 0.0f, static_cast<CActor*>(pAgent)->GetChannelId());
 		return;
 	}
@@ -4368,6 +4990,17 @@ void CoopAgent::OnPath(int op, const char* goal, const char* text)
 {
 	if (!IsCompanion())
 		return;
+	if (op == 2)
+	{
+		// where a downed teammate lies in the host's game
+		SHostBody b;
+		if (goal && text && sscanf(text, "%f %f %f", &b.pos.x, &b.pos.y, &b.pos.z) == 3)
+		{
+			b.at = Now();
+			s_hostBodies[goal] = b;
+		}
+		return;
+	}
 	std::vector<Vec3>& path = s_bot.path;
 	path.clear();
 	for (const char* p = text; p && *p; )
@@ -4395,6 +5028,18 @@ void CoopAgent::OnPath(int op, const char* goal, const char* text)
 	}
 	if (!path.empty())
 		CoopAI::Trace("AGENT way: %d points to %s", (int)path.size(), goal ? goal : "");
+}
+
+bool CoopAgent::HostBodyPos(EntityId downed, Vec3& pos)
+{
+	IEntity* pEntity = IsCompanion() ? gEnv->pEntitySystem->GetEntity(downed) : 0;
+	if (!pEntity)
+		return false;
+	std::map<string, SHostBody>::const_iterator it = s_hostBodies.find(pEntity->GetName());
+	if (it == s_hostBodies.end() || Now() - it->second.at > 5.0f)
+		return false;
+	pos = it->second.pos;
+	return true;
 }
 
 float CoopAgent::CompanionSeconds()

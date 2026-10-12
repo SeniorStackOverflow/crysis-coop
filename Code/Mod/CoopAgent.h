@@ -43,6 +43,10 @@ namespace CoopAgent
 	// the companion: the host's answer to op 5 (op 0: a way to walk to "goal") or op 6 (op 1: cover at "goal")
 	// ("x y z;x y z;..." in text; empty: none found)
 	void OnPath(int op, const char* goal, const char* text);
+	// the companion: where a downed teammate lies in the host's game (told
+	// every couple of seconds; a body falls its own way on each computer);
+	// false: not known lately
+	bool HostBodyPos(EntityId downed, Vec3& pos);
 
 	// host: the companion's state for the co-op menu (0 not started yet,
 	// 1 joining, 2 in the game, 3 its game would not start, 4 waiting for

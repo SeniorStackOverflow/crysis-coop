@@ -3,6 +3,7 @@
 #include "CoopText.h"
 #include "CoopRevive.h"
 #include "CoopAI.h"
+#include "CoopAgent.h"
 #include "Game.h"
 #include "GameActions.h"
 #include "GameRules.h"
@@ -65,7 +66,13 @@ namespace
 		{
 			if (pActor == pPlayer || !IsDown(pActor))
 				continue;
-			const float d = pActor->GetEntity()->GetWorldPos().GetDistance(pos);
+			float d = pActor->GetEntity()->GetWorldPos().GetDistance(pos);
+			// the AI companion: also where the host's game has the body (it
+			// fell elsewhere in the companion's own game)
+			Vec3 hostBody;
+			if (CoopAgent::HostBodyPos(pActor->GetEntityId(), hostBody))
+				if (hostBody.GetDistance(pos) < d)
+					d = hostBody.GetDistance(pos);
 			if (d <= bestDist)
 			{
 				bestDist = d;
@@ -225,7 +232,11 @@ bool CoopRevive::OnUse(CPlayer* pPlayer, int activationMode)
 		const EntityId target = NearestDown(pPlayer, USE_RANGE, &distance);
 		if (!target)
 			return false;
-		CryLogAlways("[CoopRevive] use key on %s (%.1f m)", Name(target), distance);
+		const Vec3 here = pPlayer->GetEntity()->GetWorldPos();
+		IEntity* pTarget = gEnv->pEntitySystem->GetEntity(target);
+		const Vec3 him = pTarget ? pTarget->GetWorldPos() : Vec3(ZERO);
+		CryLogAlways("[CoopRevive] use key on %s (%.1f m: here %.1f %.1f %.1f, him %.1f %.1f %.1f)", Name(target), distance,
+			here.x, here.y, here.z, him.x, him.y, him.z);
 		s_holding = target;
 		SendInput(pPlayer, target, true);
 		return true;
