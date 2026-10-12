@@ -59,5 +59,10 @@ namespace CoopSave
 	void DeleteCampaign(const char* id);
 	void SaveNow();                     // host
 	void LoadCheckpoint(bool previous); // host: the campaign he plays
+	// host: the campaign he plays has a checkpoint to go back to
+	bool HasCheckpoint();
+	// in the game (no menu): the single player's save / load keys (F5, F9,
+	// F8 by default) save and load the co-op game; true: the key was taken
+	bool OnGameKey(const struct SInputEvent& event);
 	const char* CurrentCampaign();      // its name, "" none
 }

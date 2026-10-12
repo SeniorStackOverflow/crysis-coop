@@ -39,6 +39,7 @@ CoopConfig =
 		avexplosive=3, c4explosive=4, claymoreexplosive=3, rubberbullet=30*20, tacgunprojectile=5,
 	},
 	REVIVE_HEALTH = 0.5,                -- part of his health a revived player gets back
+	ALL_DOWN_LOAD = true,               -- everybody down: the last checkpoint is loaded (world, story, objectives), as in single player
 	ALL_DOWN_DELAY = 6,                 -- seconds everybody is down before the team is back at the last checkpoint
 	BACK_FADE_TIME = 1.5,               -- seconds the screen takes to come out of black there
 	SPAWN_INVULNERABILITY = 5,          -- seconds of invulnerability after (re)spawn

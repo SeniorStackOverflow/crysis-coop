@@ -13,6 +13,7 @@
 *************************************************************************/
 #include "StdAfx.h"
 #include "CoopAI.h"
+#include "CoopSave.h"
 #include "CoopRevive.h"
 #include "ScriptBind_HUD.h"
 #include "HUD.h"
@@ -72,6 +73,7 @@ void CScriptBind_HUD::RegisterMethods()
 	SCRIPT_REG_TEMPLFUNC(CoopIsVehicleCrewHostile, "vehicleId");
 	SCRIPT_REG_TEMPLFUNC(CoopIsAirborne, "playerId");
 	SCRIPT_REG_FUNC(CoopIsPlayingCutscene);
+	SCRIPT_REG_FUNC(CoopLoadCheckpoint);
 	SCRIPT_REG_TEMPLFUNC(CoopReviveState, "op, targetId, reviverId, seconds");
 	SCRIPT_REG_FUNC(ReloadLevel);
 	SCRIPT_REG_FUNC(ReloadLevelSavegame);
@@ -199,6 +201,16 @@ int CScriptBind_HUD::CoopReviveState(IFunctionHandler *pH, int op, ScriptHandle 
 {
 	CoopRevive::OnState(op, (EntityId)targetId.n, (EntityId)reviverId.n, seconds, true);
 	return pH->EndFunction();
+}
+
+// Crysis Coop (server): the whole team is down: the campaign's last
+// checkpoint is loaded, as in single player; false: there is none
+int CScriptBind_HUD::CoopLoadCheckpoint(IFunctionHandler *pH)
+{
+	if (!CoopSave::HasCheckpoint())
+		return pH->EndFunction(false);
+	CoopSave::LoadCheckpoint(false);
+	return pH->EndFunction(true);
 }
 
 int CScriptBind_HUD::CoopIsPlayingCutscene(IFunctionHandler *pH)

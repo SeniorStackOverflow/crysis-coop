@@ -45,6 +45,8 @@
 #include "Item.h"
 #include "Weapon.h"
 #include "IPlayerInput.h"
+#include "IMusicSystem.h"
+#include "IAnimationGraph.h"
 
 namespace
 {
@@ -76,6 +78,8 @@ namespace
 	void OpenSoundLimits();
 	void UpdateDialogLock(float frameTime);
 	void UpdateStealth(float frameTime);
+	void UpdateMusicSync(float frameTime, int channelId = 0);
+	void OnMusicSync(int op, const char* name, const char* text, int type, float f);
 	void LocalStealth(float& bar, float& exposure);
 	void CmdTestStealth(IConsoleCmdArgs*);
 	bool DialogLockBusy();
@@ -1636,7 +1640,8 @@ void CoopAI::Init()
 	}
 	if (gEnv->pConsole && !s_pFlowMirror)
 		s_pFlowMirror = gEnv->pConsole->RegisterString("coop_fg_mirror",
-			"HUD:;CrysisFX:;Image:;Camera:;Music:;Sound:;Animations:PlaySequence;Animations:StopSequence;Input:;MaterialFX:;Environment:;Entity:VideoPlayer;Entity:Material;Entity:MaterialParam",
+			"HUD:;CrysisFX:;Image:;Camera:;Music:;Sound:;Animations:PlaySequence;Animations:StopSequence;Input:;MaterialFX:;Environment:;Entity:VideoPlayer;Entity:Material;Entity:MaterialParam;"
+			"entity:MusicThemeSelector;entity:MusicMoodSelector;entity:MusicPlayPattern;entity:MusicEndTheme;entity:MusicStinger;entity:MusicLogicTrigger",
 			0, "Crysis Coop: flow node types repeated on the clients (\"Group:\" = the whole group, else that one type)");
 	if (gEnv->pConsole)
 	{
@@ -3088,6 +3093,7 @@ void CoopAI::Update(float frameTime)
 	UpdateTimeOfDaySync(frameTime);
 	UpdateDialogLock(frameTime);
 	UpdateStealth(frameTime);
+	UpdateMusicSync(frameTime);
 	UpdateTeamMates(frameTime);
 	UpdateAIStateSync(frameTime);
 	UpdateCutscenePresentation();
@@ -4335,7 +4341,26 @@ namespace
 
 	void RegisterFlowInspector()
 	{
-		if (s_flowInspectorRegistered || !gEnv->pFlowSystem)
+		if (!gEnv->pFlowSystem)
+			return;
+		// CryAction hands flow activations to the inspectors only while
+		// inspecting is on (fg_Inspector 1): the test configs had it, a game
+		// hosted from the menu not, and no flow node reached the clients
+		// (music, HUD effects, cameras, monitors' videos, cutscene places).
+		// Its own default inspector logs every activation ([fgi]): out
+		if (gEnv->bServer && CoopAI::IsCoopSession() && !gEnv->pFlowSystem->IsInspectingEnabled())
+		{
+			static bool s_defaultOut = false;
+			if (!s_defaultOut)
+			{
+				s_defaultOut = true;
+				if (IFlowGraphInspectorPtr pDefault = gEnv->pFlowSystem->GetDefaultInspector())
+					gEnv->pFlowSystem->UnregisterInspector(pDefault, 0);
+			}
+			gEnv->pFlowSystem->EnableInspecting(true);
+			CryLogAlways("[CoopFlow] flow inspecting on: the clients get the presentation flow nodes");
+		}
+		if (s_flowInspectorRegistered)
 			return;
 		gEnv->pFlowSystem->RegisterInspector(IFlowGraphInspectorPtr(&s_flowInspector), 0);
 		s_flowInspectorRegistered = true;
@@ -4347,7 +4372,7 @@ namespace
 // map/radar markers and cutscenes follow the host (server -> clients)
 namespace
 {
-	enum ESyncKind { eSync_Stealth = 14, eSync_Radar = 1, eSync_Sequence = 2, eSync_TimeOfDay = 3, eSync_Hide = 5, eSync_AIState = 6, eSync_Progress = 7, eSync_DebugLook = 8, eSync_HostPlayer = 9, eSync_Usable = 10, eSync_PlayerSeat = 11, eSync_SuitMode = 12, eSync_Revive = 13 };
+	enum ESyncKind { eSync_Music = 17, eSync_Stealth = 14, eSync_Radar = 1, eSync_Sequence = 2, eSync_TimeOfDay = 3, eSync_Hide = 5, eSync_AIState = 6, eSync_Progress = 7, eSync_DebugLook = 8, eSync_HostPlayer = 9, eSync_Usable = 10, eSync_PlayerSeat = 11, eSync_SuitMode = 12, eSync_Revive = 13 };
 	// client: the host's player (the campaign's player; the others are extra)
 	EntityId s_hostPlayerId = 0;
 	// debugging (client): the local player's camera is kept on this entity
@@ -4825,6 +4850,122 @@ namespace
 			CryLogAlways("[CoopTest] stealth: %s type %d running %.2f %.2f %.2f %.2f levels %.2f %.2f %.2f %.2f", pActor->GetEntity()->GetName(),
 				pAI->GetAIType(), r[0], r[1], r[2], r[3], s[0], s[1], s[2], s[3]);
 		}
+	}
+
+	// The music: CryAction's music logic chooses the mood by an intensity
+	// it adds up from the soldiers near this machine's player (enabled,
+	// hostile, alerted, within 100 m). A client has no AI: the server adds
+	// it up for every other player and sends it (op 0, with the highest
+	// alertness for "player spotted"); the level's theme and the logic's
+	// mode at a join and when the host's change (op 1); the theme selectors
+	// and the logic's start/stop are flow nodes (mirrored)
+	float s_musicSyncTimer = 0.0f;
+	string s_musicSentTheme, s_musicSentMode;
+	int s_musicAlert = 0;                   // client: the last alertness heard
+
+	IAnimationGraphState* MusicGraph()
+	{
+		return g_pGame && g_pGame->GetIGameFramework() ? g_pGame->GetIGameFramework()->GetMusicGraphState() : 0;
+	}
+
+	string MusicMode()
+	{
+		IAnimationGraphState* pGraph = MusicGraph();
+		if (!pGraph)
+			return "";
+		char buf[256] = "";
+		pGraph->GetInput(pGraph->GetInputId("Mode"), buf);
+		buf[sizeof(buf) - 1] = 0;
+		return buf;
+	}
+
+	void UpdateMusicSync(float frameTime, int channelId)
+	{
+		if (!gEnv->bServer || !gEnv->bMultiplayer || !CoopAI::IsCoopSession() || !gEnv->pAISystem)
+			return;
+		CGameRules* pRules = g_pGame->GetGameRules();
+		IMusicSystem* pMusic = gEnv->pSystem->GetIMusicSystem();
+		if (!pRules || !pMusic)
+			return;
+		const string theme = pMusic->GetTheme() ? pMusic->GetTheme() : "";
+		const string mode = MusicMode();
+		if (channelId || theme != s_musicSentTheme || mode != s_musicSentMode)
+		{
+			if (!channelId)
+			{
+				s_musicSentTheme = theme;
+				s_musicSentMode = mode;
+			}
+			pRules->CoopSendSync(eSync_Music, 1, 0, theme.c_str(), pMusic->GetMood() ? pMusic->GetMood() : "", mode == "running" ? 1 : 0, 0.0f, channelId);
+		}
+		if (channelId)
+			return;
+		s_musicSyncTimer += frameTime;
+		if (s_musicSyncTimer < 0.5f)
+			return;
+		s_musicSyncTimer = 0.0f;
+		IActor* pLocal = g_pGame->GetIGameFramework()->GetClientActor();
+		IActorIteratorPtr pPlayers = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+		while (IActor* pPlayer = pPlayers->Next())
+		{
+			const int channel = pPlayer->IsPlayer() && pPlayer != pLocal ? static_cast<CActor*>(pPlayer)->GetChannelId() : 0;
+			IAIObject* pPlayerAI = channel ? pPlayer->GetEntity()->GetAI() : 0;
+			if (!pPlayerAI)
+				continue;
+			const Vec3 at = pPlayer->GetEntity()->GetWorldPos();
+			float sum = 0.0f;
+			int alert = 0;
+			IActorIteratorPtr pIt = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+			while (IActor* pActor = pIt->Next())
+			{
+				if (pActor->IsPlayer() || pActor->GetHealth() <= 0)
+					continue;
+				IAIObject* pAI = pActor->GetEntity()->GetAI();
+				if (!pAI || pAI->GetAIType() != AIOBJECT_PUPPET || !pAI->IsEnabled() || !pAI->IsHostile(pPlayerAI, false))
+					continue;
+				const float d = pActor->GetEntity()->GetWorldPos().GetDistance(at);
+				if (d >= 100.0f)
+					continue;
+				IUnknownProxy* pProxy = pAI->GetProxy();
+				const int state = pProxy ? CLAMP(pProxy->GetAlertnessState(), 0, 3) : 0;
+				sum += (state + 1) * (100.0f - d) * (100.0f - d) * 0.01f;
+				alert = max(alert, state);
+			}
+			pRules->CoopSendSync(eSync_Music, 0, 0, "", "", alert, sum, channel);
+		}
+	}
+
+	// client
+	void OnMusicSync(int op, const char* name, const char* text, int type, float f)
+	{
+		IMusicLogic* pLogic = g_pGame->GetIGameFramework()->GetMusicLogic();
+		if (op == 0 && pLogic)
+		{
+			// as the logic does with its own sum: up at once, down by itself
+			IAnimationGraphState* pGraph = MusicGraph();
+			const float now = pGraph ? pGraph->GetInputAsFloat(pGraph->GetInputId("AI_Intensity")) : 0.0f;
+			if (f > now)
+				pLogic->SetEvent(eMUSICLOGICEVENT_SET_AI, f);
+			if (type > s_musicAlert)
+				pLogic->SetEvent(eMUSICLOGICEVENT_PLAYER_SPOTTED);
+			s_musicAlert = type;
+			return;
+		}
+		if (op != 1)
+			return;
+		IMusicSystem* pMusic = gEnv->pSystem->GetIMusicSystem();
+		if (pMusic && name && name[0] && (!pMusic->GetTheme() || stricmp(pMusic->GetTheme(), name)))
+		{
+			pMusic->SetTheme(name, true, false);
+			if (text && text[0])
+				pMusic->SetMood(text);
+			CryLogAlways("[CoopMusic] the host's theme \"%s\" (mood \"%s\")", name, text ? text : "");
+		}
+		const bool running = MusicMode() == "running";
+		if (pLogic && type && !running)
+			pLogic->Start();
+		else if (pLogic && !type && running)
+			pLogic->Stop();
 	}
 
 	void LocalStealth(float& bar, float& exposure)
@@ -6288,6 +6429,7 @@ namespace
 		for (std::map<string, float>::iterator it = s_seqServer.begin(); it != s_seqServer.end(); ++it)
 			pRules->CoopSendSync(eSync_Sequence, eSeq_Time, 0, it->first.c_str(), "", 0, it->second, channelId);
 		UpdateTimeOfDaySync(0.0f, channelId);
+		UpdateMusicSync(0.0f, channelId);
 		// hidden or shown as now: what the story changed, and what differs
 		// from the level file (a loaded game). The recorded state may be
 		// older than a load that came after it
@@ -6873,6 +7015,11 @@ void CoopAI::OnSyncMirror(int kind, int op, uint32 entity, const char* name, con
 		s_debugLookPoint = op == 3 && text && sscanf(text, "%f %f %f", &s_debugLookAt.x, &s_debugLookAt.y, &s_debugLookAt.z) == 3;
 		s_debugLookUntil = gEnv->pTimer->GetCurrTime() + f;
 		Trace("DEBUG look at %s for %.0f s", pEntity ? pEntity->GetName() : "?", f);
+		return;
+	}
+	if (kind == eSync_Music && !gEnv->bServer)
+	{
+		OnMusicSync(op, name, text, type, f);
 		return;
 	}
 	if (kind == eSync_Stealth && !gEnv->bServer)

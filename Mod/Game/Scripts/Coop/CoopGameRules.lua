@@ -1698,6 +1698,12 @@ function TeamInstantAction:CoopTickDowned()
 		end
 		return;
 	end
+	if (self.coopLoadAsked) then
+		if (_time - self.coopLoadAsked < 60) then
+			return;
+		end
+		CoopLog("the checkpoint was not loaded: the team comes back without it");
+	end
 	if (not self.coopAllDownAt) then
 		self.coopAllDownAt = _time + C.ALL_DOWN_DELAY;
 		CoopLog("everybody is down: back to the last checkpoint in "..C.ALL_DOWN_DELAY.." s");
@@ -1823,11 +1829,20 @@ function TeamInstantAction:CoopSpotOf(p, n)
 	return pos, ang;
 end
 
--- everybody is down: the whole team comes back where it was at the last
--- checkpoint, with what it carries now; nothing is loaded, so nobody is
--- disconnected and nobody sees a loading screen (the explicit "Back to the
--- last checkpoint" of the menu still loads it)
+-- everybody is down: as in single player, the last checkpoint is loaded:
+-- the world, the story and the objectives as they were there, and what
+-- everybody carried (the friends join again by themselves). With no
+-- checkpoint yet (C.ALL_DOWN_LOAD off, or the campaign has none) the team
+-- comes back where it was at the last checkpoint, with what it carries now
 function TeamInstantAction:CoopBackToCheckpoint()
+	-- (asked once: the load restarts the level; not under way a minute later:
+	-- the old way)
+	if (C.ALL_DOWN_LOAD and not self.coopLoadAsked and HUD.CoopLoadCheckpoint and HUD.CoopLoadCheckpoint()) then
+		self.coopLoadAsked = _time;
+		CoopLog("everybody is down: the last checkpoint is loaded");
+		self.game:SendTextMessage(TextMessageInfo, "Loading the last checkpoint", TextMessageToAll);
+		return;
+	end
 	local list, others = {}, 0;
 	for i,p in ipairs(self.game:GetPlayers() or {}) do
 		if (CoopInGame(p) and p:IsDead()) then

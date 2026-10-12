@@ -1145,6 +1145,19 @@ namespace
 		CoopSave::LoadCheckpoint(pArgs->GetArgCount() > 1 && !stricmp(pArgs->GetArg(1), "prev"));
 	}
 
+	// testing: coop_test_gamekey <key name>: a key press in the game as the
+	// keyboard would send it (f5, f9...)
+	void CmdTestGameKey(IConsoleCmdArgs* pArgs)
+	{
+		if (pArgs->GetArgCount() < 2)
+			return;
+		SInputEvent event;
+		event.deviceId = eDI_Keyboard;
+		event.state = eIS_Pressed;
+		event.keyName = pArgs->GetArg(1);
+		CryLogAlways("[CoopTest] game key %s: %s", pArgs->GetArg(1), CoopSave::OnGameKey(event) ? "taken" : "not a save/load key");
+	}
+
 	void CmdCampaigns(IConsoleCmdArgs*)
 	{
 		StartListing(true, false, "", false);
@@ -1178,6 +1191,7 @@ void CoopSave::Init()
 		CoopText::ForConsole("Crysis Coop: host a new co-op campaign: coop_host [level] [campaign name]  (default: the first level)"));
 	gEnv->pConsole->AddCommand("coop_continue", CmdContinue, 0,
 		CoopText::ForConsole("Crysis Coop: host a co-op campaign from its last checkpoint: coop_continue [number or name] [prev]  (default: the newest)"));
+	gEnv->pConsole->AddCommand("coop_test_gamekey", CmdTestGameKey, 0, "Crysis Coop testing: coop_test_gamekey <key>: the key pressed in the game");
 	gEnv->pConsole->AddCommand("coop_load", CmdLoad, 0,
 		CoopText::ForConsole("Crysis Coop: the host goes back to the last checkpoint (coop_load prev: the one before); friends join again by themselves"));
 	gEnv->pConsole->AddCommand("coop_campaigns", CmdCampaigns, 0, CoopText::ForConsole("Crysis Coop: the co-op campaigns on this PC and in the cloud"));
@@ -1418,6 +1432,72 @@ void CoopSave::LoadCheckpoint(bool previous)
 		return;
 	}
 	StartListing(false, false, s_campaign, previous);
+}
+
+bool CoopSave::HasCheckpoint()
+{
+	SProgress p;
+	return gEnv->bServer && !s_campaign.empty() && ReadProgress(CampaignFile(s_campaign, "progress.txt"), p) && !p.save.empty();
+}
+
+namespace
+{
+	// is this key bound to that action (the "singleplayer" action map has
+	// them; a network game turns that map off)
+	bool KeyOf(const char* action, const char* key)
+	{
+		IActionMapManager* pAM = g_pGame->GetIGameFramework()->GetIActionMapManager();
+		if (!pAM || !key || !key[0])
+			return false;
+		static const char* maps[] = { "singleplayer", "default" };
+		for (int m = 0; m < 2; ++m)
+		{
+			IActionMap* pMap = pAM->GetActionMap(maps[m]);
+			const char* keys[4] = { 0, 0, 0, 0 };
+			SActionMapBindInfo info = { action, keys, 0 };
+			if (!pMap || !pMap->GetBindInfo(ActionId(action), info, 4))
+				continue;
+			for (int i = 0; i < info.nKeys && i < 4; ++i)
+				if (keys[i] && !stricmp(keys[i], key))
+					return true;
+		}
+		return false;
+	}
+}
+
+bool CoopSave::OnGameKey(const SInputEvent& event)
+{
+	if (event.deviceId != eDI_Keyboard || event.state != eIS_Pressed || !CoopAI::IsCoopSession())
+		return false;
+	if (gEnv->pConsole->GetStatus() || !g_pGame->GetIGameFramework()->IsGameStarted())
+		return false;
+	const char* key = event.keyName.c_str();
+	const bool save = KeyOf("save", key);
+	const bool load = !save && (KeyOf("loadLastSave", key) || KeyOf("load", key));
+	if (!save && !load)
+		return false;
+	if (!gEnv->bServer)
+	{
+		if (CGameRules* pRules = g_pGame->GetGameRules())
+			pRules->OnTextMessage(eTextMessageError, "Only the host saves and loads the co-op game");
+		return true;
+	}
+	if (save)
+	{
+		CryLogAlways("[CoopSave] quick save key (%s)", key);
+		SaveNow();
+		if (CGameRules* pRules = g_pGame->GetGameRules())
+			pRules->OnTextMessage(eTextMessageInfo, s_menuStatus.empty() ? "Saving..." : s_menuStatus.c_str());
+	}
+	else if (HasCheckpoint())
+	{
+		CryLogAlways("[CoopSave] quick load key (%s): back to the last checkpoint", key);
+		Notify("The host loads the last checkpoint");
+		LoadCheckpoint(false);
+	}
+	else
+		TellHost("There is no checkpoint of this campaign to load yet");
+	return true;
 }
 
 const char* CoopSave::CurrentCampaign()

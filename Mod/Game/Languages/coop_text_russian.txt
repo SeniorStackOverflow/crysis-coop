@@ -196,3 +196,7 @@ Crysis Coop: join a friend's coop game: coop_join <code>  (no code: the last one
 Crysis Coop: leave the joined coop game (no joining again by itself)	Crysis Coop: выйти из кооп-игры друга (без повторного входа)
 Crysis Coop: the code friends join with, connection and latency	Crysis Coop: код для друзей, связь и задержка
 Crysis Coop: go to another coop map with every connected player (server)	Crysis Coop: перейти на другую кооп-карту со всеми игроками (сервер)
+Only the host saves and loads the co-op game	Сохраняет и загружает кооперативную игру только хост
+The host loads the last checkpoint	Хост загружает последний чекпоинт
+There is no checkpoint of this campaign to load yet	У этой кампании ещё нет чекпоинта для загрузки
+Loading the last checkpoint	Загрузка последнего чекпоинта

@@ -4,6 +4,8 @@
 #include "CoopAI.h"
 #include "Game.h"
 #include <ISound.h>
+#include <IMusicSystem.h>
+#include "IAnimationGraph.h"
 
 float CoopSoundOutputPeak(bool* pActive);	// CoopSoundMeter.cpp
 
@@ -58,10 +60,59 @@ namespace CoopSound
 		}
 	}
 
+	// the music: its theme and mood whenever they change (it was missing in
+	// coop fights), single player too for comparison
+	string s_musicTheme = "?", s_musicMood = "?", s_musicMode = "?";
+	float s_musicAt = 0.0f;
+
+	// the music logic's graph (CryAction): Mode running / pauseAll and what
+	// it chooses the mood by
+	string MusicLogicState(string& mode)
+	{
+		mode = "-";
+		IAnimationGraphState* pGraph = g_pGame && g_pGame->GetIGameFramework() ? g_pGame->GetIGameFramework()->GetMusicGraphState() : 0;
+		if (!pGraph)
+			return "";
+		char buf[256] = "";
+		pGraph->GetInput(pGraph->GetInputId("Mode"), buf);
+		buf[sizeof(buf) - 1] = 0;
+		mode = buf;
+		string s;
+		s.Format("logic %s, AI %.0f, player %.0f, game %.0f, music played %.0f s", buf, pGraph->GetInputAsFloat(pGraph->GetInputId("AI_Intensity")),
+			pGraph->GetInputAsFloat(pGraph->GetInputId("Player_Intensity")), pGraph->GetInputAsFloat(pGraph->GetInputId("Game_Intensity")),
+			pGraph->GetInputAsFloat(pGraph->GetInputId("PlayingTime_Music")));
+		return s;
+	}
+
+	void WatchMusic()
+	{
+		const float now = gEnv->pTimer->GetAsyncCurTime();
+		if (now - s_musicAt < 1.0f)
+			return;
+		s_musicAt = now;
+		IMusicSystem* pMusic = gEnv->pSystem->GetIMusicSystem();
+		if (!pMusic)
+			return;
+		const char* theme = pMusic->GetTheme();
+		const char* mood = pMusic->GetMood();
+		const string t = theme ? theme : "", m = mood ? mood : "";
+		string mode;
+		const string logic = MusicLogicState(mode);
+		if (t == s_musicTheme && m == s_musicMood && mode == s_musicMode)
+			return;
+		s_musicTheme = t;
+		s_musicMood = m;
+		s_musicMode = mode;
+		SMusicSystemStatus* pStatus = pMusic->GetStatus();
+		CryLogAlways("[CoopMusic] theme \"%s\", mood \"%s\"%s; %s", t.c_str(), m.c_str(), pStatus && pStatus->bPlaying ? ", playing" : ", not playing",
+			logic.c_str());
+	}
+
 	void Update(bool haveFocus)
 	{
 		if (!gEnv || !gEnv->pTimer || !gEnv->pConsole || gEnv->pSystem->IsDedicated())
 			return;
+		WatchMusic();
 		static bool s_registered = false;
 		if (!s_registered)
 		{

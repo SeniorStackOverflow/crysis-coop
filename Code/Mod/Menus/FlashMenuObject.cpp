@@ -542,6 +542,9 @@ bool CFlashMenuObject::OnInputEvent(const SInputEvent &rInputEvent)
 	// Crysis Coop: the open co-op menu takes the keyboard
 	if(m_bUpdate && CoopMenu::OnKey(rInputEvent))
 		return true;
+	// in the game: the save / load keys save and load the co-op game
+	if(!m_bUpdate && CoopSave::OnGameKey(rInputEvent))
+		return true;
 
 	if(rInputEvent.deviceId==eDI_Mouse || rInputEvent.deviceId==eDI_Keyboard)
 	{
@@ -3946,6 +3949,16 @@ void CFlashMenuObject::CloseWaitingScreen()
 			PlaySound(ESound_MenuAmbience,false);
 		}
 		g_pGame->GetIGameFramework()->PauseGame(false ,false);
+	}
+	// Crysis Coop: the loading screen's music ends in a coop game too (the
+	// network game kept it: the level played menu music till its first
+	// theme); a theme the level (or the save) set is left alone
+	else if(m_pMusicSystem && CoopAI::IsCoopSession())
+	{
+		const char* theme = m_pMusicSystem->GetTheme();
+		const char* mood = m_pMusicSystem->GetMood();
+		if((theme && !stricmp(theme, "menu")) || (mood && !stricmp(mood, "multiplayer_high")))
+			m_pMusicSystem->EndTheme(EThemeFade_FadeOut, 0, true);
 	}
 
 	if(m_apFlashMenuScreens[MENUSCREEN_FRONTENDLOADING]->IsLoaded())
