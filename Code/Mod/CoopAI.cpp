@@ -47,6 +47,7 @@
 #include "IPlayerInput.h"
 #include "IMusicSystem.h"
 #include "IAnimationGraph.h"
+#include "CoopAgent.h"
 
 namespace
 {
@@ -54,6 +55,8 @@ namespace
 	ICVar* s_pFlowMirror = nullptr;
 	void RegisterFlowInspector();
 	void ResetFlowMirror();
+	void RegisterWatch();
+	void UpdateWatch(float frameTime);
 	int s_totalAIShots = 0;
 	void ResetSync();
 	void CaptureHideBase();
@@ -1643,6 +1646,7 @@ void CoopAI::Init()
 		s_pTraceHz = gEnv->pConsole->RegisterFloat("coop_trace_hz", 5.0f, 0, "Crysis Coop debugging: coop_trace samples per second");
 		s_pTrace->SetFlags(s_pTrace->GetFlags() | VF_NOT_NET_SYNCED);
 		s_pTraceHz->SetFlags(s_pTraceHz->GetFlags() | VF_NOT_NET_SYNCED);
+		RegisterWatch();
 	}
 	if (gEnv->pConsole && !s_pFlowMirror)
 		s_pFlowMirror = gEnv->pConsole->RegisterString("coop_fg_mirror",
@@ -3136,6 +3140,8 @@ void CoopAI::Update(float frameTime)
 	UpdateDebugKillGunners(frameTime);
 	if (s_levelReady || s_levelReadyClient || (!IsNetGame() && !s_inLoading && g_pGame->GetIGameFramework()->IsGameStarted()))
 		TraceSample(frameTime);
+	if (!s_inLoading)
+		UpdateWatch(frameTime);
 
 	if (s_clientNetDumpTimer > 0.0f)
 	{
@@ -4260,6 +4266,164 @@ namespace
 	};
 	std::vector<SFlowMsg> s_flowHistory;
 
+	// coop_test_watch "<name>,<name>" (server): every flow activation in a graph
+	// with a node of one of these entities, and every second what their AI,
+	// vehicle and engine are doing
+	ICVar* s_pWatch = nullptr;
+	string s_watchList;                              // the value the caches are for
+	std::vector<string> s_watchNames;
+	std::map<IFlowGraph*, string> s_watchGraphs;     // graph -> the watched entity in it ("" none)
+	std::map<string, string> s_watchLast;
+	std::map<string, float> s_watchLastAt;
+	float s_watchTimer = 0.0f;
+
+	void RegisterWatch()
+	{
+		s_pWatch = gEnv->pConsole->RegisterString("coop_test_watch", "", 0,
+			"Crysis Coop debugging: coop_test_watch \"<name>,<name>\" logs every flow activation in the graphs of these entities and every second their AI, vehicle and engine (server)");
+		s_pWatch->SetFlags(s_pWatch->GetFlags() | VF_NOT_NET_SYNCED);
+	}
+
+	bool WatchOn()
+	{
+		const char* v = s_pWatch ? s_pWatch->GetString() : "";
+		if (s_watchList != v)
+		{
+			s_watchList = v;
+			s_watchNames.clear();
+			s_watchGraphs.clear();
+			s_watchLast.clear();
+			s_watchLastAt.clear();
+			string rest = s_watchList;
+			while (!rest.empty())
+			{
+				const size_t comma = rest.find(',');
+				string name = comma == string::npos ? rest : rest.substr(0, comma);
+				name.Trim();
+				if (!name.empty())
+					s_watchNames.push_back(name);
+				rest = comma == string::npos ? string() : rest.substr(comma + 1);
+			}
+		}
+		return !s_watchNames.empty();
+	}
+
+	// the watched entity that has a node in this graph, or 0
+	const char* WatchGraph(IFlowGraph* pGraph)
+	{
+		if (!WatchOn())
+			return 0;
+		std::map<IFlowGraph*, string>::iterator it = s_watchGraphs.find(pGraph);
+		if (it == s_watchGraphs.end())
+		{
+			string found;
+			IFlowNodeIteratorPtr pNodes = pGraph->CreateNodeIterator();
+			TFlowNodeId id;
+			while (found.empty() && pNodes && pNodes->Next(id))
+			{
+				const EntityId e = pGraph->GetEntityId(id);
+				IEntity* pE = e && e != (EntityId)EFLOWNODE_ENTITY_ID_GRAPH1 && e != (EntityId)EFLOWNODE_ENTITY_ID_GRAPH2 ? gEnv->pEntitySystem->GetEntity(e) : 0;
+				for (size_t i = 0; pE && found.empty() && i < s_watchNames.size(); ++i)
+					if (!stricmp(pE->GetName(), s_watchNames[i].c_str()))
+						found = pE->GetName();
+			}
+			it = s_watchGraphs.insert(std::make_pair(pGraph, found)).first;
+		}
+		return it->second.empty() ? 0 : it->second.c_str();
+	}
+
+	const char* PortName(IFlowGraph* pGraph, TFlowNodeId node, TFlowPortId port, bool output)
+	{
+		SFlowNodeConfig cfg;
+		pGraph->GetNodeConfiguration(node, cfg);
+		if (output)
+		{
+			for (int n = 0; cfg.pOutputPorts && cfg.pOutputPorts[n].name; ++n)
+				if (n == port)
+					return cfg.pOutputPorts[n].name;
+		}
+		else
+		{
+			for (int n = 0; cfg.pInputPorts && cfg.pInputPorts[n].name; ++n)
+				if (n == port)
+					return cfg.pInputPorts[n].name;
+		}
+		return "?";
+	}
+
+	void WatchFlow(IFlowGraph* pGraph, const SFlowAddress& from, const SFlowAddress& to, const char* type)
+	{
+		const char* watched = WatchGraph(pGraph);
+		if (!watched)
+			return;
+		string v;
+		if (const TFlowInputData* pData = pGraph->GetInputValue(to.node, to.port))
+			pData->GetValueWithConversion(v);
+		IEntity* pOwner = gEnv->pEntitySystem->GetEntity(pGraph->GetGraphEntity(0));
+		const char* fromType = pGraph->GetNodeTypeName(from.node);
+		CryLogAlways("[CoopFlowWatch] %s (%s): N%s %s.%s <- N%s %s.%s (input now %s)", pOwner ? pOwner->GetName() : "?", watched,
+			pGraph->GetNodeName(to.node), type, PortName(pGraph, to.node, to.port, false),
+			pGraph->GetNodeName(from.node), fromType ? fromType : "?", PortName(pGraph, from.node, from.port, from.isOutput), v.c_str());
+	}
+
+	void UpdateWatch(float frameTime)
+	{
+		if (!gEnv->bServer || !WatchOn())
+			return;
+		s_watchTimer += frameTime;
+		if (s_watchTimer < 1.0f)
+			return;
+		s_watchTimer = 0.0f;
+		const float now = gEnv->pTimer->GetCurrTime();
+		IVehicleSystem* pVS = g_pGame->GetIGameFramework()->GetIVehicleSystem();
+		IActorSystem* pAS = g_pGame->GetIGameFramework()->GetIActorSystem();
+		for (size_t i = 0; i < s_watchNames.size(); ++i)
+		{
+			const string& name = s_watchNames[i];
+			string s;
+			IEntity* pE = gEnv->pEntitySystem->FindEntityByName(name.c_str());
+			if (!pE)
+				s = "not in the level";
+			else
+			{
+				const Vec3 p = pE->GetWorldPos();
+				const Vec3 vel = TraceVelocity(pE);
+				s.Format("at (%.0f %.0f %.0f) speed %.1f%s%s", p.x, p.y, p.z, vel.GetLength(), pE->IsHidden() ? " hidden" : "", pE->IsActive() ? "" : " entity-inactive");
+				if (IAIObject* pAI = pE->GetAI())
+				{
+					s += string().Format("; ai enabled=%d", (int)pAI->IsEnabled());
+					if (IUnknownProxy* pProxy = pAI->GetProxy())
+						s += string().Format(" proxy=%d alert=%d character=%s", (int)pProxy->IsEnabled(), pProxy->GetAlertnessState(), pProxy->GetCharacter() ? pProxy->GetCharacter() : "-");
+					if (IPipeUser* pPU = pAI->CastToIPipeUser())
+					{
+						IAIObject* pTarget = pPU->GetAttentionTarget();
+						s += string().Format(" pipe=%d target=%s", pPU->GetGoalPipeId(), pTarget ? pTarget->GetName() : "-");
+					}
+				}
+				else
+					s += "; no ai";
+				const char* behaviour = TraceBehaviour(pE);
+				if (behaviour && *behaviour)
+					s += string().Format(" behaviour=%s", behaviour);
+				if (IVehicle* pVehicle = pVS ? pVS->GetVehicle(pE->GetId()) : 0)
+				{
+					IActor* pDriver = pVehicle->GetDriver();
+					s += string().Format("; driver %s%s; %s", pDriver ? pDriver->GetEntity()->GetName() : "-", pVehicle->IsDestroyed() ? " destroyed" : "",
+						CoopAgent::EngineState(pVehicle).c_str());
+				}
+				else if (IActor* pActor = pAS->GetActor(pE->GetId()))
+					s += string().Format("; health %d in %s", pActor->GetHealth(), pActor->GetLinkedVehicle() ? pActor->GetLinkedVehicle()->GetEntity()->GetName() : "-");
+			}
+			// changes at once, the same state every 10 s
+			if (s != s_watchLast[name] || now - s_watchLastAt[name] >= 10.0f)
+			{
+				CryLogAlways("[CoopWatch] %s %s%s", name.c_str(), s.c_str(), s == s_watchLast[name] ? " (same)" : "");
+				s_watchLast[name] = s;
+				s_watchLastAt[name] = now;
+			}
+		}
+	}
+
 	class CCoopFlowInspector : public IFlowGraphInspector
 	{
 	public:
@@ -4323,6 +4487,8 @@ namespace
 				return;
 			if (gEnv->bServer && gEnv->bMultiplayer && CoopAI::IsCoopSession())
 				WatchPlayerMover(pGraph, to.node, type, to.port);
+			if (gEnv->bServer)
+				WatchFlow(pGraph, from, to, type);
 			const bool mirror = gEnv->bServer && CoopAI::IsCoopSession() && IsMirroredType(type) && stricmp(type, "HUD:ProgressBar");
 			// dialogs (and in single player every presentation node) go to the trace
 			const bool trace = CoopAI::TraceOn() && (!strnicmp(type, "Dialog:", 7) || (!mirror && IsMirroredType(type)));
@@ -4361,6 +4527,8 @@ namespace
 
 	void ResetFlowMirror()
 	{
+		// (a graph's address may be another graph's in the next level)
+		s_watchGraphs.clear();
 		s_mirrorNodes.clear();
 		s_mirrorInitialized.clear();
 		s_mirrorGraph = 0;
@@ -4377,8 +4545,9 @@ namespace
 		// inspecting is on (fg_Inspector 1): the test configs had it, a game
 		// hosted from the menu not, and no flow node reached the clients
 		// (music, HUD effects, cameras, monitors' videos, cutscene places).
-		// Its own default inspector logs every activation ([fgi]): out
-		if (gEnv->bServer && CoopAI::IsCoopSession() && !gEnv->pFlowSystem->IsInspectingEnabled())
+		// Its own default inspector logs every activation ([fgi]): out.
+		// (coop_test_watch: in a single player game too)
+		if (gEnv->bServer && (CoopAI::IsCoopSession() || WatchOn()) && !gEnv->pFlowSystem->IsInspectingEnabled())
 		{
 			static bool s_defaultOut = false;
 			if (!s_defaultOut)

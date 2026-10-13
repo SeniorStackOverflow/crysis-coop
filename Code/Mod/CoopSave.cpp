@@ -825,6 +825,7 @@ namespace
 	bool s_loadKeepClients = false; // and the friends stay connected
 	ICVar* s_pLoadInPlace = 0;
 	ICVar* s_pLoadKeep = 0;
+	ICVar* s_pLoadAIReset = 0;
 
 	// ---- the friends (and the AI companion) stay connected through a load
 	// into the running level. CryAction's load (CGameSerialize::LoadGame)
@@ -853,6 +854,59 @@ namespace
 		if (!VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &old))
 			return false;
 		memcpy(p, skip ? KICK_SKIP : KICK_CALL, 5);
+		VirtualProtect(p, 5, old, &old);
+		FlushInstructionCache(GetCurrentProcess(), p, 5);
+		return true;
+	}
+
+	// ---- what the AI perceived, after a load. Each soldier and AI vehicle
+	// keeps the AI objects it perceived in a map keyed by them; the save names
+	// them by id and the load looks them up again. A friend or the companion
+	// the save does not have comes back as a null key, and the AI system
+	// crashed on that AI's first update (CryAISystem+0x14C8E2). The AI was
+	// reset after such a load instead, which turned off every crewed AI
+	// vehicle (they move by their own AI, switched on only when a driver gets
+	// in): a helicopter of a fly-over hung in the air with its rotor running,
+	// a convoy stood still. Now during the load the perception map is read
+	// through a check that leaves the null keys out, and the AI stays as saved
+	const unsigned PERCEPTION_ADD_CALL_RVA = 0x157E18;  // CryAISystem 6156, CPuppet's serialization: E8 -> add a perceived target (key, &target), thiscall, ret 8
+	const unsigned PERCEPTION_ADD_RVA = 0x156AA0;
+	const unsigned char PERCEPTION_BEFORE[12] = { 0x8B, 0x54, 0x24, 0x10, 0x8D, 0x4C, 0x24, 0x48, 0x51, 0x52, 0x8B, 0xCE };  // mov edx,[esp+10h]; lea ecx,[esp+48h]; push ecx; push edx; mov ecx,esi
+	DWORD s_perceptionAdd = 0;      // the AI system's own function
+	int s_perceptionDropped = 0;
+
+	__declspec(naked) void PerceptionAddChecked()
+	{
+		__asm
+		{
+			cmp dword ptr [esp + 4], 0
+			jne add_it
+			inc dword ptr [s_perceptionDropped]
+			ret 8
+		add_it:
+			jmp dword ptr [s_perceptionAdd]
+		}
+	}
+
+	// check: the call goes through PerceptionAddChecked (false: back to the AI system's own)
+	bool PatchPerception(bool check)
+	{
+		HMODULE h = GetModuleHandleA("CryAISystem.dll");
+		if (!h)
+			return false;
+		unsigned char* p = (unsigned char*)h + PERCEPTION_ADD_CALL_RVA;
+		const DWORD own = (DWORD)h + PERCEPTION_ADD_RVA;
+		const DWORD checked = (DWORD)&PerceptionAddChecked;
+		if (memcmp(p - sizeof(PERCEPTION_BEFORE), PERCEPTION_BEFORE, sizeof(PERCEPTION_BEFORE)) || p[0] != 0xE8)
+			return false;
+		const DWORD target = (DWORD)(p + 5) + *(int*)(p + 1);
+		if (target != (check ? own : checked))
+			return false;
+		DWORD old = 0;
+		if (!VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &old))
+			return false;
+		s_perceptionAdd = own;
+		*(int*)(p + 1) = (int)((check ? checked : own) - (DWORD)(p + 5));
 		VirtualProtect(p, 5, old, &old);
 		FlushInstructionCache(GetCurrentProcess(), p, 5);
 		return true;
@@ -1405,6 +1459,7 @@ namespace
 		pFramework->AllowLoad(true);
 		bool ok;
 		int limitRestored;
+		bool checked = false;
 		{
 			SQuietAILog quiet;
 			const bool mp = gEnv->bMultiplayer;
@@ -1412,9 +1467,14 @@ namespace
 			NetLoadBegin();
 			const bool keep = s_loadKeepClients && KeepBegin();
 			FreeAbsentSeats("before the load");
+			s_perceptionDropped = 0;
+			// (-1: testing, the load as before the check: it crashes again)
+			checked = (!s_pLoadAIReset || s_pLoadAIReset->GetIVal() >= 0) && PatchPerception(true);
 			const DWORD t0 = GetTickCount();
 			ok = pFramework->LoadGame(s_load.save.c_str(), true, true);
 			CryLogAlways("[CoopSave] the saved game took %.1f s to load", (GetTickCount() - t0) / 1000.0f);
+			if (checked && !PatchPerception(false))
+				CryLogAlways("[CoopSave] the AI's perception reading could not be put back");
 			FreeAbsentSeats("after the load");
 			KeepEnd();
 			limitRestored = NetLoadEnd();
@@ -1441,13 +1501,20 @@ namespace
 		// entry and the AI system crashes on that AI's first update (at once,
 		// or when it wakes). Turning their AI off before saving
 		// (QuietRemotePlayers) reaches only the AI updated meanwhile (not a
-		// vehicle whose crew died). The AI starts afresh instead (the
-		// soldiers where they were saved, their alarm forgotten)
-		if (s_load.players.size() > 1)
+		// vehicle whose crew died). The load leaves those entries out
+		// (PatchPerception) and the AI goes on as saved; only where that check
+		// could not be made (another CryAISystem.dll) it starts afresh (the
+		// soldiers where they were saved, their alarm forgotten, the crewed AI
+		// vehicles stopped)
+		const int reset = s_pLoadAIReset ? s_pLoadAIReset->GetIVal() : 1;
+		if (s_load.players.size() > 1 && (reset >= 2 || (reset == 1 && !checked)))
 		{
-			CryLogAlways("[CoopSave] a checkpoint of a campaign with %d players: the AI starts afresh (it crashed otherwise)", (int)s_load.players.size());
+			CryLogAlways("[CoopSave] a checkpoint of a campaign with %d players: the AI starts afresh (%s)", (int)s_load.players.size(),
+				reset >= 2 ? "coop_load_ai_reset 2" : "the AI's perception could not be checked during the load: another CryAISystem.dll");
 			gEnv->pAISystem->Reset(IAISystem::RESET_ENTER_GAME);
 		}
+		else if (checked)
+			CryLogAlways("[CoopSave] the AI goes on as saved: %d of its perceived targets were not in the game, left out", s_perceptionDropped);
 		// whoever hosts now gets his own equipment (the save has the one of
 		// the player who hosted then, who gets his back when he joins)
 		std::map<string, CoopAI::SInventory> carry = s_load.players;
@@ -1615,6 +1682,8 @@ void CoopSave::Init()
 		"Crysis Coop: 1 = friends stay connected through a checkpoint loaded into the running level; 0 = they are disconnected and join again");
 	s_pLoadInPlace = gEnv->pConsole->RegisterInt("coop_load_inplace", 1, 0,
 		"Crysis Coop: 1 = a checkpoint of the level that runs is loaded into it (no level load); 0 = the level is hosted again first");
+	s_pLoadAIReset = gEnv->pConsole->RegisterInt("coop_load_ai_reset", 1, 0,
+		"Crysis Coop: the AI after a checkpoint of a campaign with several players is loaded: 1 = as saved (it starts afresh only if what it perceived could not be checked), 0 = as saved always, 2 = it starts afresh (its alarm forgotten, the crewed AI vehicles stopped); -1 testing: as saved and unchecked");
 	s_pCheckpoints = gEnv->pConsole->RegisterInt("coop_checkpoints", 1, 0,
 		"Crysis Coop: 1 = the host saves the campaign progress at its checkpoints and at every level start (coop_continue)");
 	// (the help in the game's language, as the console shows it)

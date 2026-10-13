@@ -20,6 +20,7 @@
 #include "IPlayerInput.h"
 #include "Player.h"
 #include "NanoSuit.h"
+#include "VehicleMovementBase.h"
 #include "IVehicleSystem.h"
 #include "IViewSystem.h"
 #include "IItemSystem.h"
@@ -4227,28 +4228,45 @@ namespace
 		CryLogAlways("[CoopTest] %s carries %d %s now", pActor->GetEntity()->GetName(), count, pAmmo->GetName());
 	}
 
-	// the vehicles near the host's player: name, class, distance, seats (who sits there)
-	void CmdTestVehicles(IConsoleCmdArgs*)
+	string EngineStateOf(IVehicle* pVehicle)
+	{
+		// (every movement of the game's vehicles is one of the game's)
+		CVehicleMovementBase* pMovement = static_cast<CVehicleMovementBase*>(pVehicle->GetMovement());
+		return pMovement ? pMovement->CoopEngineState() : string("no movement");
+	}
+
+	// the vehicles near the host's player (all: everywhere): name, class, distance,
+	// seats (who sits there), the engine and its sounds
+	void CmdTestVehicles(IConsoleCmdArgs* pArgs)
 	{
 		IActor* pHost = g_pGame->GetIGameFramework()->GetClientActor();
 		IVehicleSystem* pVS = g_pGame->GetIGameFramework()->GetIVehicleSystem();
 		if (!pHost || !pVS)
 			return;
+		const bool all = pArgs->GetArgCount() > 1 && !stricmp(pArgs->GetArg(1), "all");
 		const Vec3 me = pHost->GetEntity()->GetWorldPos();
 		IVehicleIteratorPtr it = pVS->CreateVehicleIterator();
 		while (IVehicle* pVehicle = it->Next())
 		{
 			IEntity* pEntity = pVehicle->GetEntity();
 			const float d = pEntity->GetWorldPos().GetDistance(me);
-			if (d > 400.0f)
+			if (d > 400.0f && !all)
 				continue;
 			string seats;
 			for (unsigned int i = 1; i <= pVehicle->GetSeatCount(); ++i)
 				if (IVehicleSeat* pSeat = pVehicle->GetSeatById((TVehicleSeatId)i))
 					seats += string().Format(" %d:%s%s%s=%s", i, pSeat->GetSeatName(), pSeat->IsDriver() ? "(driver)" : "", pSeat->IsGunner() ? "(gunner)" : "",
 						pSeat->GetPassenger() ? NameOf(pSeat->GetPassenger()) : "-");
-			CryLogAlways("[CoopTest] vehicle %s %s at %.0f m (%.0f %.0f %.0f)%s%s", pEntity->GetName(), pEntity->GetClass()->GetName(), d,
-				pEntity->GetWorldPos().x, pEntity->GetWorldPos().y, pEntity->GetWorldPos().z, pVehicle->IsDestroyed() ? " destroyed" : pEntity->IsHidden() ? " hidden" : "", seats.c_str());
+			// its own AI (an AI vehicle moves by it) and its driver's
+			IActor* pDriver = pVehicle->GetDriver();
+			IAIObject* pAI = pEntity->GetAI();
+			IAIObject* pDriverAI = pDriver ? pDriver->GetEntity()->GetAI() : 0;
+			string ai = pAI ? string().Format("ai %s", pAI->IsEnabled() ? "on" : "off") : string("no ai");
+			if (pDriver && !pDriver->IsPlayer())
+				ai += string().Format(", AI driver's ai %s", pDriverAI ? (pDriverAI->IsEnabled() ? "on" : "off") : "none");
+			CryLogAlways("[CoopTest] vehicle %s %s at %.0f m (%.0f %.0f %.0f)%s%s; %s; %s", pEntity->GetName(), pEntity->GetClass()->GetName(), d,
+				pEntity->GetWorldPos().x, pEntity->GetWorldPos().y, pEntity->GetWorldPos().z, pVehicle->IsDestroyed() ? " destroyed" : pEntity->IsHidden() ? " hidden" : "", seats.c_str(),
+				ai.c_str(), EngineStateOf(pVehicle).c_str());
 		}
 	}
 
@@ -4691,6 +4709,11 @@ namespace
 	}
 }
 
+string CoopAgent::EngineState(IVehicle* pVehicle)
+{
+	return pVehicle ? EngineStateOf(pVehicle) : string();
+}
+
 void CoopAgent::Init()
 {
 	s_pCompanion = gEnv->pConsole->RegisterInt("coop_companion", 0, VF_DUMPTODISK,
@@ -4712,7 +4735,7 @@ void CoopAgent::Init()
 		pFree->SetFlags(pFree->GetFlags() | VF_NOT_NET_SYNCED);
 	gEnv->pConsole->AddCommand("coop_test_ammo", CmdTestAmmo, 0,
 		"Crysis Coop testing: coop_test_ammo <player> <ammo class> <count> sets what he carries of it (server)");
-	gEnv->pConsole->AddCommand("coop_test_vehicles", CmdTestVehicles, 0, "Crysis Coop testing: logs the vehicles near the host's player");
+	gEnv->pConsole->AddCommand("coop_test_vehicles", CmdTestVehicles, 0, "Crysis Coop testing: coop_test_vehicles [all] logs the vehicles near the host's player (all: everywhere), their seats and engines");
 	gEnv->pConsole->AddCommand("coop_test_silencer", CmdTestSilencer, 0, "Crysis Coop testing: coop_test_silencer <player> [0]: a silencer on (off) his weapon (server)");
 	gEnv->pConsole->AddCommand("coop_test_onehand", CmdTestOneHand, 0, "Crysis Coop testing: coop_test_onehand <player> [grab]: his weapon in the one-hand pose, or (grab) his left hand held up (this game)");
 	gEnv->pConsole->AddCommand("coop_test_anim", CmdTestAnim, 0, "Crysis Coop testing: coop_test_anim <player>: logs his animation graph inputs as this game plays them");

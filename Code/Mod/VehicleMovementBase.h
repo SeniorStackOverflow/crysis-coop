@@ -306,7 +306,10 @@ public:
 
   virtual void ProcessEvent(SEntityEvent& event);
   virtual void SetSoundMasterVolume(float vol);
-  
+
+  // Crysis Coop: the engine and its sounds, for a log line (coop_test_vehicles)
+  string CoopEngineState();
+
 protected:
 
   ILINE IPhysicalEntity* GetPhysics() const { return m_pVehicle->GetEntity()->GetPhysics(); }

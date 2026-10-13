@@ -1107,6 +1107,19 @@ ISound* CVehicleMovementBase::GetSound(EVehicleMovementSound eSID)
 }
 
 //------------------------------------------------------------------------
+string CVehicleMovementBase::CoopEngineState()
+{
+  static const char* const names[eSID_Max] = { "start", "run", "stop", "ambience", "bump", "splash", "gear", "slip", "acceleration", "boost", "damage" };
+  string s;
+  s.Format("engine powered=%d starting=%d off=%d disabled=%d", (int)m_isEnginePowered, (int)m_isEngineStarting, (int)m_isEngineGoingOff, (int)m_isEngineDisabled);
+  for (int i = 0; i < eSID_Max; ++i)
+    if (ISound* pSound = GetSound((EVehicleMovementSound)i))
+      s += string().Format(" %s:%s%s vol %.2f to %.0f m", names[i], pSound->IsPlaying() ? "playing" : "silent", pSound->IsPlayingVirtual() ? "(virtual)" : "",
+        pSound->GetVolume(), pSound->GetMaxDistance());
+  return s;
+}
+
+//------------------------------------------------------------------------
 void CVehicleMovementBase::StopSounds()
 {
   m_surfaceSoundStats.Reset();

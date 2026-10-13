@@ -19,6 +19,7 @@
 #pragma once
 
 class CPlayer;
+struct IVehicle;
 
 namespace CoopAgent
 {
@@ -47,6 +48,9 @@ namespace CoopAgent
 	// every couple of seconds; a body falls its own way on each computer);
 	// false: not known lately
 	bool HostBodyPos(EntityId downed, Vec3& pos);
+
+	// a vehicle's engine and its sounds, for a log line (diagnostics)
+	string EngineState(IVehicle* pVehicle);
 
 	// host: the companion's state for the co-op menu (0 not started yet,
 	// 1 joining, 2 in the game, 3 its game would not start, 4 waiting for
