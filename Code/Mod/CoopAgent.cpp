@@ -2422,11 +2422,11 @@ namespace
 		// where the downed teammates lie there (a body falls its own way on
 		// each computer), and should the two games have it apart, it is put
 		// back where everybody sees it
-		if (Now() >= s_bot.reportAt && !pMyVehicle)
+		if (Now() >= s_bot.reportAt)
 		{
 			s_bot.reportAt = Now() + 2.0f;
 			string where;
-			where.Format("%.2f %.2f %.2f", pos.x, pos.y, pos.z);
+			where.Format("%.2f %.2f %.2f %s", pos.x, pos.y, pos.z, pMyVehicle ? pMyVehicle->GetEntity()->GetName() : "-");
 			if (CGameRules* pRules = g_pGame->GetGameRules())
 				pRules->CoopSendSyncToServer(15, 7, 0, where.c_str(), "", 0, 0.0f);
 		}
@@ -4837,9 +4837,10 @@ void CoopAgent::OnServerRequest(EntityId agent, int op, const char* name)
 	// key, the shots, the damage count)
 	if (op == 7)
 	{
-		static std::map<EntityId, int> s_off;
+		static std::map<EntityId, int> s_off, s_seat;
 		Vec3 there;
-		if (pMine || !name || sscanf(name, "%f %f %f", &there.x, &there.y, &there.z) != 3)
+		char vehicle[128] = "-";
+		if (!name || sscanf(name, "%f %f %f %127s", &there.x, &there.y, &there.z, vehicle) < 3)
 			return;
 		const Vec3 here = pAgent->GetEntity()->GetWorldPos();
 		// where the downed teammates lie here (a body falls its own way on
@@ -4852,6 +4853,27 @@ void CoopAgent::OnServerRequest(EntityId agent, int op, const char* name)
 				pRules->CoopSendSync(16, 2, 0, pActor->GetEntity()->GetName(), string().Format("%.2f %.2f %.2f", at.x, at.y, at.z).c_str(), 0, 0.0f,
 					static_cast<CActor*>(pAgent)->GetChannelId());
 			}
+		// seated here, walking in its own game (put into a seat it never saw
+		// itself get into: after a load, from afar): out of the seat here, it
+		// is where its own game has it
+		const bool seatedThere = strcmp(vehicle, "-") != 0;
+		int& seatTimes = s_seat[agent];
+		if (pMine && !seatedThere)
+		{
+			if (++seatTimes >= 2)
+			{
+				seatTimes = 0;
+				// (where it is, its own game tells this one as it walks on)
+				if (IVehicleSeat* pSeat = pMine->GetSeatForPassenger(agent))
+					pSeat->Exit(false, true);
+				CryLogAlways("[CoopAgent] %s sat in %s here, walks at %.1f %.1f %.1f in its own game: out of the seat here", pAgent->GetEntity()->GetName(),
+					pMine->GetEntity()->GetName(), there.x, there.y, there.z);
+			}
+			return;
+		}
+		seatTimes = 0;
+		if (pMine || seatedThere)
+			return;
 		const float off = Dist2D(here, there);
 		int& times = s_off[agent];
 		if (off < 2.0f && fabsf(here.z - there.z) < 2.5f)

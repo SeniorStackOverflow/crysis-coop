@@ -8,6 +8,8 @@
 #include "GameActions.h"
 #include "GameRules.h"
 #include "IPlayerInput.h"
+#include "Item.h"
+#include "IVehicleSystem.h"
 #include "Player.h"
 #include "IUIDraw.h"
 
@@ -173,6 +175,58 @@ namespace
 			Script::CallMethod(pRules->GetEntity()->GetScriptTable(), "KillPlayer", pEntity->GetScriptTable());
 	}
 
+	// testing: coop_test_unseat: this game's player out of his vehicle here
+	// only (the server is not told: seated there, walking here)
+	void CmdTestUnseat(IConsoleCmdArgs*)
+	{
+		CPlayer* pPlayer = static_cast<CPlayer*>(LocalActor());
+		IVehicle* pVehicle = pPlayer ? pPlayer->GetLinkedVehicle() : 0;
+		if (!pVehicle)
+			return;
+		const Vec3 at = pVehicle->GetEntity()->GetWorldPos() + Vec3(3.0f, 0, 0.5f);
+		pPlayer->LinkToVehicle(0);
+		pPlayer->GetEntity()->DetachThis();
+		pPlayer->GetEntity()->SetWorldTM(Matrix34::Create(Vec3(1, 1, 1), pPlayer->GetEntity()->GetWorldRotation(), at));
+		CryLogAlways("[CoopTest] %s out of %s in this game only", pPlayer->GetEntity()->GetName(), pVehicle->GetEntity()->GetName());
+	}
+
+	// testing: coop_test_view [tag]: the local player's view and hands (third
+	// person, ragdoll, the physics, the weapon's view mode, its accessories,
+	// how far the camera is from the eyes)
+	void CmdTestView(IConsoleCmdArgs* pArgs)
+	{
+		CPlayer* pPlayer = static_cast<CPlayer*>(LocalActor());
+		if (!pPlayer)
+			return;
+		const char* tag = pArgs->GetArgCount() > 1 ? pArgs->GetArg(1) : "";
+		IPhysicalEntity* pPhys = pPlayer->GetEntity()->GetPhysics();
+		const SActorStats* pStats = pPlayer->GetActorStats();
+		SMovementState state;
+		if (IMovementController* pMC = pPlayer->GetMovementController())
+			pMC->GetMovementState(state);
+		Vec3 cam(ZERO);
+		if (IView* pView = g_pGame->GetIGameFramework()->GetIViewSystem()->GetActiveView())
+			cam = pView->GetCurrentParams()->position;
+		CItem* pItem = static_cast<CItem*>(pPlayer->GetCurrentItem());
+		string acc;
+		if (pItem)
+		{
+			const CItem::TAccessoryMap* pAcc = pItem->GetAttachedAccessories();
+			for (CItem::TAccessoryMap::const_iterator it = pAcc->begin(); it != pAcc->end(); ++it)
+			{
+				IEntity* pA = gEnv->pEntitySystem->GetEntity(it->second);
+				acc += string().Format("%s%s%s", acc.empty() ? "" : ",", it->first.c_str(), pA && pA->IsHidden() ? "(hidden)" : "");
+			}
+		}
+		CryLogAlways("[CoopTest] view %s: health %d, third person %d, ragdoll %d, physics %d, spectator %d/%s, camera %.2f m from the eyes; "
+			"item %s fp %d viewmode %d hidden %d selected %d owner %s, accessories %s",
+			tag, pPlayer->GetHealth(), (int)pPlayer->IsThirdPerson(), pStats ? (int)pStats->isRagDoll : -1, pPhys ? pPhys->GetType() : -1,
+			(int)pPlayer->GetSpectatorMode(), Name(pPlayer->GetSpectatorTarget()), cam.GetDistance(state.eyePosition),
+			pItem ? pItem->GetEntity()->GetName() : "-", pItem ? (int)pItem->GetStats().fp : -1, pItem ? (int)pItem->GetStats().viewmode : -1,
+			pItem ? (int)pItem->GetEntity()->IsHidden() : -1, pItem ? (int)pItem->IsSelected() : -1,
+			pItem ? Name(pItem->GetOwnerId()) : "-", acc.c_str());
+	}
+
 	// testing: coop_test_revive press|release: the local player's use key,
 	// through the player's input like the key; checkpoint: a story
 	// checkpoint was reached (server)
@@ -209,6 +263,8 @@ void CoopRevive::Init()
 	if (!gEnv->pConsole || s_pAutoRespawn)
 		return;
 	gEnv->pConsole->AddCommand("coop_test_kill", CmdTestKill, 0, "Crysis Coop testing: coop_test_kill <player name> kills him (server)");
+	gEnv->pConsole->AddCommand("coop_test_unseat", CmdTestUnseat, 0, "Crysis Coop testing: coop_test_unseat: this game's player out of his vehicle here only (the server is not told)");
+	gEnv->pConsole->AddCommand("coop_test_view", CmdTestView, 0, "Crysis Coop testing: coop_test_view [tag]: the local player's view, physics, weapon view mode and accessories");
 	gEnv->pConsole->AddCommand("coop_test_revive", CmdTestRevive, 0,
 		"Crysis Coop testing: press|release the local player's use key; checkpoint: as if a story checkpoint was reached (server)");
 	// the server's rule: synced to the clients (their HUD follows it)

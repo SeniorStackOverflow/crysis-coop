@@ -1428,8 +1428,26 @@ function TeamInstantAction:CoopSpawnVehicleCopy(class, pos, ang, player)
 	return v;
 end
 
-function TeamInstantAction:CoopPutIntoVehicle(player, v, seat)
-	player:SetWorldPos(v:GetWorldPos(g_Vectors.temp_v1));
+function TeamInstantAction:CoopPutIntoVehicle(player, v, seat, nearNow)
+	local remote = player.actor and player.actor:GetChannel() and player.actor:GetChannel() > 0 and player.id ~= g_localActorId;
+	if (remote and not nearNow) then
+		-- a friend: next to it first in his own game (put into a seat from
+		-- afar, his game never saw him get in: seated here, walking there),
+		-- in a moment later
+		local p = CopyVec(v:GetWorldPos(g_Vectors.temp_v1));
+		local right = v:GetDirectionVector(0);
+		p.x = p.x + right.x * 2.5;
+		p.y = p.y + right.y * 2.5;
+		p.z = p.z + 0.5;
+		self.game:MovePlayer(player.id, p, player:GetWorldAngles(g_Vectors.temp_v2));
+		self.coopVehicleEnters = self.coopVehicleEnters or {};
+		self.coopVehicleEnters[player.id] = { v = v.id, seat = seat, t = _time + 0.7 };
+		CoopLog(string.format("%s put next to %s, into seat %s in a moment", tostring(player:GetName()), tostring(v:GetName()), tostring(seat)));
+		return;
+	end
+	if (not remote) then
+		player:SetWorldPos(v:GetWorldPos(g_Vectors.temp_v1));
+	end
 	local ok = v.vehicle:EnterVehicle(player.id, seat, false);
 	-- a restored or newly spawned vehicle has its engine off: with the driver
 	-- in place, "disable + enable" starts it (a VTOL would drop otherwise)
@@ -1441,6 +1459,20 @@ function TeamInstantAction:CoopPutIntoVehicle(player, v, seat)
 end
 
 function TeamInstantAction:CoopProcessVehicleReturns()
+	if (self.coopVehicleEnters) then
+		for id, job in pairs(self.coopVehicleEnters) do
+			if (_time >= job.t) then
+				self.coopVehicleEnters[id] = nil;
+				local player, v = System.GetEntity(id), System.GetEntity(job.v);
+				if (player and v and v.vehicle and not v.vehicle:IsDestroyed() and self:CoopIsAlive(player)) then
+					local seat = CoopFreeSeat(v, job.seat, player.id);
+					if (seat) then
+						self:CoopPutIntoVehicle(player, v, seat, true);
+					end
+				end
+			end
+		end
+	end
 	if (not self.coopVehicleReturns) then
 		return;
 	end
@@ -1907,6 +1939,9 @@ function TeamInstantAction:CoopTeamToCheckpoint()
 			end
 			if (self:RevivePlayer(p.actor:GetChannel(), p, false, pos, ang)) then
 				if (pos) then
+					-- his own game moves him there too (it has the say over
+					-- where he is: the revive alone left him where he fell)
+					self.game:MovePlayer(p.id, pos, ang);
 					self:CoopWatchFall(p, pos, nil);
 				end
 				n = n + 1;

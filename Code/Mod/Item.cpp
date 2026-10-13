@@ -1479,11 +1479,15 @@ void CItem::PickUp(EntityId pickerId, bool sound, bool select, bool keepHistory)
 	{
 		if (!pActor->CheckInventoryRestrictions(GetEntity()->GetClass()->GetName()))
 		{
+			if (CoopAI::IsCoopSession())
+				CryLogAlways("[CoopInv] %s cannot pick up %s: carries the most weapons of its kind", pActor->GetEntity()->GetName(), GetEntity()->GetName());
 			g_pGame->GetGameRules()->SendTextMessage(eTextMessageError, "@mp_CannotCarryMore", eRMI_ToClientChannel, pActor->GetChannelId());
 			return;
 		}
 		else if(!CheckAmmoRestrictions(pickerId))
 		{
+			if (CoopAI::IsCoopSession())
+				CryLogAlways("[CoopInv] %s cannot pick up %s: its ammunition is full", pActor->GetEntity()->GetName(), GetEntity()->GetName());
 			g_pGame->GetGameRules()->SendTextMessage(eTextMessageCenter, "@ammo_maxed_out", eRMI_ToClientChannel, pActor->GetChannelId(), (string("@")+GetEntity()->GetClass()->GetName()).c_str());
 			return;
 		}

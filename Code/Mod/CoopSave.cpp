@@ -21,6 +21,7 @@
 #include "CoopRelay.h"
 #include "Game.h"
 #include "GameRules.h"
+#include "Item.h"
 #include "IActorSystem.h"
 #include "IItemSystem.h"
 #include "ILevelSystem.h"
@@ -994,6 +995,23 @@ namespace
 					}
 				}
 		}
+		// the host is where the load put him, alive: on the clients too (they
+		// had him lying where he went down)
+		if (pLocal && pLocal->GetHealth() > 0)
+		{
+			IEntity* pEntity = pLocal->GetEntity();
+			CActor* pA = static_cast<CActor*>(pLocal);
+			const int team = pRules ? pRules->GetTeam(pLocal->GetEntityId()) : 0;
+			IVehicle* pVehicle = pLocal->GetLinkedVehicle();
+			IVehicleSeat* pSeat = pVehicle ? pVehicle->GetSeatForPassenger(pLocal->GetEntityId()) : 0;
+			// (in his vehicle's seat: a revive on the ground would take him out of it there)
+			if (pSeat)
+				pA->GetGameObject()->InvokeRMI(CActor::ClReviveInVehicle(), CActor::ReviveInVehicleParams(pVehicle->GetEntityId(), pSeat->GetSeatId(), team),
+					eRMI_ToAllClients | eRMI_NoLocalCalls);
+			else
+				pA->GetGameObject()->InvokeRMI(CActor::ClRevive(), CActor::ReviveParams(pEntity->GetWorldPos(), pEntity->GetWorldRotation(), team),
+					eRMI_ToAllClients | eRMI_NoLocalCalls);
+		}
 		// the world as the friends would get it joining now
 		for (size_t i = 0; i < s_keep.channels.size(); ++i)
 		{
@@ -1365,6 +1383,30 @@ namespace
 			{
 				CoopAI::GiveInventory(pHost, own->second, true);
 				CryLogAlways("[CoopSave] %s hosts this time: his own equipment (%d items)", pHost->GetEntity()->GetName(), (int)own->second.items.size());
+			}
+			else if (own != carry.end())
+			{
+				// The weapon he dropped when he went down is in his hands in
+				// the save; loaded into the running level the save went into
+				// that dropped one, and at times it was never picked up again:
+				// in his inventory, owned by nobody (his rifles seen from the
+				// side, invisible, no reload, no accessories; the next revive
+				// gave them back without the accessories). His equipment of
+				// the checkpoint again then
+				string nobodys;
+				if (IInventory* pInv = pHost->GetInventory())
+					for (int k = 0; k < pInv->GetCount(); ++k)
+					{
+						CItem* pItem = static_cast<CItem*>(pFramework->GetIItemSystem()->GetItem(pInv->GetItem(k)));
+						if (pItem && pItem->GetIWeapon() && pItem->GetOwnerId() != pHost->GetEntityId())
+							nobodys += (nobodys.empty() ? "" : ", ") + string(pItem->GetEntity()->GetClass()->GetName());
+					}
+				if (!nobodys.empty())
+				{
+					CoopAI::GiveInventory(pHost, own->second, true);
+					CryLogAlways("[CoopSave] after the load %s carried %s owned by nobody (dropped when he went down): his equipment of the checkpoint again (%d items)",
+						pHost->GetEntity()->GetName(), nobodys.c_str(), (int)own->second.items.size());
+				}
 			}
 			if (own != carry.end())
 				carry.erase(own);
