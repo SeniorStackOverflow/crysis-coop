@@ -57,6 +57,7 @@ namespace
 	void ResetFlowMirror();
 	void RegisterWatch();
 	void UpdateWatch(float frameTime);
+	void UpdateIdleGunners(float frameTime);
 	int s_totalAIShots = 0;
 	void ResetSync();
 	void CaptureHideBase();
@@ -756,6 +757,7 @@ namespace
 
 	void CmdWeaponInfo(IConsoleCmdArgs*);   // below
 	void CmdTestSave(IConsoleCmdArgs*);
+	void CmdTestAIClear(IConsoleCmdArgs*);
 	void CmdAIWeapons(IConsoleCmdArgs*);
 
 	void RegisterCommands()
@@ -767,6 +769,7 @@ namespace
 		gEnv->pConsole->AddCommand("coop_ai_weapons", CmdAIWeapons, 0, "Crysis Coop: log what the soldiers near the local player hold");
 		gEnv->pConsole->AddCommand("coop_test_stealth", CmdTestStealth, 0, "Crysis Coop testing: coop_test_stealth logs the AI system's detection levels of every player (server)");
 		gEnv->pConsole->AddCommand("coop_test_save", CmdTestSave, 0, "Crysis Coop testing: coop_test_save [name] saves as the single player menu does");
+		gEnv->pConsole->AddCommand("coop_test_ai_clear", CmdTestAIClear, 0, "Crysis Coop testing: coop_test_ai_clear <name> [proxy]: AIEVENT_CLEAR to that AI (proxy: its proxy reset too)");
 		gEnv->pConsole->AddCommand("coop_weapon_info", CmdWeaponInfo, 0, "Crysis Coop: log the damage of the local player's weapon and the item settings in use");
 		gEnv->pConsole->AddCommand("coop_dump_entities", CmdDumpEntities, 0, "Crysis Coop: write all entities to coop_entities_<side>_<tag>.txt");
 		gEnv->pConsole->AddCommand("coop_vehicle_restore", CmdVehicleRestore, 0, "Crysis Coop: restore a destroyed vehicle by entity name (server)");
@@ -1797,6 +1800,33 @@ namespace
 	}
 
 	// testing: a save as the single player menu's "Save" makes it
+	void CmdTestAIClear(IConsoleCmdArgs* pArgs)
+	{
+		IEntity* pEntity = pArgs->GetArgCount() > 1 ? gEnv->pEntitySystem->FindEntityByName(pArgs->GetArg(1)) : 0;
+		IAIObject* pAI = pEntity ? pEntity->GetAI() : 0;
+		if (!pAI)
+		{
+			CryLogAlways("[CoopTest] coop_test_ai_clear: no AI by that name");
+			return;
+		}
+		// cancel: only its current goal pipe id cancelled (CancelSubPipe), nothing else
+		if (pArgs->GetArgCount() > 2 && !stricmp(pArgs->GetArg(2), "cancel"))
+		{
+			IPipeUser* pPU = pAI->CastToIPipeUser();
+			const int id = pPU ? pPU->GetGoalPipeId() : -1;
+			const bool cancelled = pPU && id > 0 && pPU->CancelSubPipe(id);
+			const bool removed = pPU && id > 0 && pPU->RemoveSubPipe(id);
+			CryLogAlways("[CoopTest] %s: subpipe %d cancelled %d removed %d, pipe now %d", pEntity->GetName(), id, (int)cancelled, (int)removed, pPU ? pPU->GetGoalPipeId() : -1);
+			return;
+		}
+		pAI->Event(AIEVENT_CLEAR, 0);
+		const bool proxy = pArgs->GetArgCount() > 2 && !stricmp(pArgs->GetArg(2), "proxy");
+		if (proxy && pAI->GetProxy())
+			pAI->GetProxy()->Reset(AIOBJRESET_INIT);
+		IPipeUser* pPU = pAI->CastToIPipeUser();
+		CryLogAlways("[CoopTest] %s: AIEVENT_CLEAR%s, pipe now %d", pEntity->GetName(), proxy ? " and its proxy reset" : "", pPU ? pPU->GetGoalPipeId() : -1);
+	}
+
 	void CmdTestSave(IConsoleCmdArgs* pArgs)
 	{
 		string name = pArgs->GetArgCount() > 1 ? pArgs->GetArg(1) : "coop_test_save";
@@ -3142,6 +3172,8 @@ void CoopAI::Update(float frameTime)
 		TraceSample(frameTime);
 	if (!s_inLoading)
 		UpdateWatch(frameTime);
+	if (gEnv->bServer && gEnv->bMultiplayer && s_levelReady && !s_inLoading && IsCoopSession())
+		UpdateIdleGunners(frameTime);
 
 	if (s_clientNetDumpTimer > 0.0f)
 	{
@@ -7375,6 +7407,88 @@ void CoopAI::OnAIShot(EntityId shooterId, IEntity* pWeapon, bool mounted, const 
 	if (CGameRules* pRules = g_pGame->GetGameRules())
 		pRules->CoopSendShot(shooterId, pWeapon->GetClass()->GetName(), pos, dir,
 			mounted ? pWeapon->GetId() : 0, mounted ? pWeapon->GetName() : 0);
+}
+
+// ---------------------------------------------------------------------------
+// A soldier at the gun of a vehicle without a driver who sees an enemy and
+// does not shoot. Seen in Rescue after a checkpoint load: the bridge truck's
+// gunner first saw the player right next to him, on the truck; his goal pipe
+// then held a sub-pipe that never ended, and with the vehicle's AI off (no
+// driver) nothing selected another one: he looked at the players for minutes
+// without a shot (tests: 0 shots in 3 of 3 runs after a load that keeps the
+// AI as saved, 400-570 a minute after the AI reset of 0.11.30). That sub-pipe
+// cancelled, he fires (529 hits). A gunner who sees an enemy and has not
+// fired for 5 s gets his current sub-pipe cancelled (server)
+namespace
+{
+	float s_gunnerTimer = 0.0f;
+	std::map<EntityId, float> s_gunnerIdleSince;
+	std::map<EntityId, int> s_gunnerFreed;
+
+	void UpdateIdleGunners(float frameTime)
+	{
+		s_gunnerTimer += frameTime;
+		if (s_gunnerTimer < 1.0f)
+			return;
+		s_gunnerTimer = 0.0f;
+		const float now = gEnv->pTimer->GetCurrTime();
+		IVehicleSystem* pVS = g_pGame->GetIGameFramework()->GetIVehicleSystem();
+		IActorSystem* pAS = g_pGame->GetIGameFramework()->GetIActorSystem();
+		std::set<EntityId> seen;
+		IVehicleIteratorPtr pVehicles = pVS->CreateVehicleIterator();
+		while (IVehicle* pVehicle = pVehicles->Next())
+		{
+			if (pVehicle->IsDestroyed() || pVehicle->GetEntity()->IsHidden())
+				continue;
+			// (with a driver the vehicle's AI is on: it is its business)
+			IActor* pDriver = pVehicle->GetDriver();
+			if (pDriver && pDriver->GetHealth() > 0)
+				continue;
+			for (unsigned int i = 1; i <= pVehicle->GetSeatCount(); ++i)
+			{
+				IVehicleSeat* pSeat = pVehicle->GetSeatById((TVehicleSeatId)i);
+				if (!pSeat || !pSeat->IsGunner() || pSeat->IsDriver())
+					continue;
+				IActor* pGunner = pAS->GetActor(pSeat->GetPassenger());
+				if (!pGunner || pGunner->IsPlayer() || pGunner->GetHealth() <= 0)
+					continue;
+				IEntity* pEntity = pGunner->GetEntity();
+				IAIObject* pAI = pEntity->GetAI();
+				IPipeUser* pPipeUser = pAI && pAI->IsEnabled() ? pAI->CastToIPipeUser() : 0;
+				IAIObject* pTarget = pPipeUser ? pPipeUser->GetAttentionTarget() : 0;
+				if (!pTarget || !pAI->IsHostile(pTarget))
+					continue;
+				const EAITargetType type = pPipeUser->GetAttentionTargetType();
+				if (type != AITARGET_VISUAL && type != AITARGET_ENEMY)
+					continue;
+				const EntityId id = pEntity->GetId();
+				seen.insert(id);
+				float& idleSince = s_gunnerIdleSince[id];
+				std::map<EntityId, float>::const_iterator shot = s_lastShotSent.find(id);
+				if ((shot != s_lastShotSent.end() && now - shot->second < 5.0f) || idleSince <= 0.0f)
+				{
+					// firing, or just seen idle: from now on
+					idleSince = now;
+					continue;
+				}
+				if (now - idleSince < 5.0f)
+					continue;
+				idleSince = now;
+				const int pipe = pPipeUser->GetGoalPipeId();
+				const bool cancelled = pipe > 0 && pPipeUser->CancelSubPipe(pipe);
+				if (++s_gunnerFreed[id] <= 3)
+					CryLogAlways("[CoopAI] %s at the gun of %s (no driver) sees %s and has not fired for 5 s: sub-pipe %d %s",
+						pEntity->GetName(), pVehicle->GetEntity()->GetName(), pTarget->GetName(), pipe, cancelled ? "cancelled" : "not cancelled");
+			}
+		}
+		for (std::map<EntityId, float>::iterator it = s_gunnerIdleSince.begin(); it != s_gunnerIdleSince.end(); )
+		{
+			if (seen.count(it->first))
+				++it;
+			else
+				s_gunnerIdleSince.erase(it++);
+		}
+	}
 }
 
 namespace
