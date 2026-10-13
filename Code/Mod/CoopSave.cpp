@@ -101,6 +101,50 @@ namespace
 				ids.insert(pEntity->GetId());
 	}
 
+	// how the host's inventory differs from his equipment of the checkpoint:
+	// a thing missing or owned by nobody, another one in his hands, other
+	// accessories on a weapon ("" = none)
+	string EquipmentDiff(IActor* pHost, const CoopAI::SInventory& rec)
+	{
+		IInventory* pInv = pHost->GetInventory();
+		if (!pInv)
+			return "no inventory";
+		IItemSystem* pItems = g_pGame->GetIGameFramework()->GetIItemSystem();
+		IEntityClassRegistry* pClasses = gEnv->pEntitySystem->GetClassRegistry();
+		string missing, nobodys, diff;
+		for (size_t i = 0; i < rec.items.size(); ++i)
+		{
+			IEntityClass* pClass = pClasses->FindClass(rec.items[i].c_str());
+			const EntityId id = pClass ? pInv->GetItemByClass(pClass) : 0;
+			CItem* pItem = id ? static_cast<CItem*>(pItems->GetItem(id)) : 0;
+			if (!pItem)
+				missing += (missing.empty() ? "" : ",") + rec.items[i];
+			else if (pItem->GetOwnerId() != pHost->GetEntityId())
+				nobodys += (nobodys.empty() ? "" : ",") + rec.items[i];
+		}
+		if (!missing.empty())
+			diff += "missing " + missing + "; ";
+		if (!nobodys.empty())
+			diff += "owned by nobody " + nobodys + "; ";
+		IEntity* pCurrent = gEnv->pEntitySystem->GetEntity(pInv->GetCurrentItem());
+		if (!rec.current.empty() && (!pCurrent || stricmp(pCurrent->GetClass()->GetName(), rec.current.c_str())))
+			diff += string("in his hands ") + (pCurrent ? pCurrent->GetClass()->GetName() : "nothing") + " instead of " + rec.current + "; ";
+		for (std::map<string, std::vector<string> >::const_iterator it = rec.attached.begin(); it != rec.attached.end(); ++it)
+		{
+			IEntityClass* pClass = pClasses->FindClass(it->first.c_str());
+			CItem* pWeapon = pClass ? static_cast<CItem*>(pItems->GetItem(pInv->GetItemByClass(pClass))) : 0;
+			if (!pWeapon)
+				continue;
+			std::set<string> want(it->second.begin(), it->second.end()), have;
+			const CItem::TAccessoryMap* pAcc = pWeapon->GetAttachedAccessories();
+			for (CItem::TAccessoryMap::const_iterator a = pAcc->begin(); a != pAcc->end(); ++a)
+				have.insert(a->first.c_str());
+			if (want != have)
+				diff += it->first + " with " + string().Format("%d of its %d accessories", (int)have.size(), (int)want.size()) + "; ";
+		}
+		return diff;
+	}
+
 	// committed, writable, unguarded memory
 	bool Writable(const void* p, size_t size)
 	{
@@ -1384,29 +1428,38 @@ namespace
 				CoopAI::GiveInventory(pHost, own->second, true);
 				CryLogAlways("[CoopSave] %s hosts this time: his own equipment (%d items)", pHost->GetEntity()->GetName(), (int)own->second.items.size());
 			}
-			else if (own != carry.end())
+			else
 			{
 				// The weapon he dropped when he went down is in his hands in
 				// the save; loaded into the running level the save went into
-				// that dropped one, and at times it was never picked up again:
-				// in his inventory, owned by nobody (his rifles seen from the
-				// side, invisible, no reload, no accessories; the next revive
-				// gave them back without the accessories). His equipment of
-				// the checkpoint again then
-				string nobodys;
-				if (IInventory* pInv = pHost->GetInventory())
-					for (int k = 0; k < pInv->GetCount(); ++k)
-					{
-						CItem* pItem = static_cast<CItem*>(pFramework->GetIItemSystem()->GetItem(pInv->GetItem(k)));
-						if (pItem && pItem->GetIWeapon() && pItem->GetOwnerId() != pHost->GetEntityId())
-							nobodys += (nobodys.empty() ? "" : ", ") + string(pItem->GetEntity()->GetClass()->GetName());
-					}
-				if (!nobodys.empty())
+				// the things he had then, and at times they were never picked
+				// up again: owned by nobody in his inventory (his rifles seen
+				// from the side, invisible, no reload, no accessories), or not
+				// there at all (nothing in his hands). The next revive gave
+				// back what that showed (no accessories). Not as he had it at
+				// the checkpoint: his equipment of the checkpoint again
+				// (his own record; none: the one of who hosted then, which the
+				// save gave him)
+				const CoopAI::SInventory* pRec = 0;
+				if (own != carry.end())
+					pRec = &own->second;
+				else
 				{
-					CoopAI::GiveInventory(pHost, own->second, true);
-					CryLogAlways("[CoopSave] after the load %s carried %s owned by nobody (dropped when he went down): his equipment of the checkpoint again (%d items)",
-						pHost->GetEntity()->GetName(), nobodys.c_str(), (int)own->second.items.size());
+					std::map<string, CoopAI::SInventory>::const_iterator then = s_load.players.find(s_load.host);
+					if (then != s_load.players.end())
+						pRec = &then->second;
 				}
+				const string diff = pRec ? EquipmentDiff(pHost, *pRec) : string();
+				if (!pRec)
+					CryLogAlways("[CoopSave] after the load: no equipment of the checkpoint for %s to compare", pHost->GetEntity()->GetName());
+				else if (!diff.empty())
+				{
+					CoopAI::GiveInventory(pHost, *pRec, true);
+					CryLogAlways("[CoopSave] after the load %s's things were not as at the checkpoint (%s): his equipment of the checkpoint again (%d items)",
+						pHost->GetEntity()->GetName(), diff.c_str(), (int)pRec->items.size());
+				}
+				else
+					CryLogAlways("[CoopSave] after the load %s has his equipment of the checkpoint (%d items)", pHost->GetEntity()->GetName(), (int)pRec->items.size());
 			}
 			if (own != carry.end())
 				carry.erase(own);
