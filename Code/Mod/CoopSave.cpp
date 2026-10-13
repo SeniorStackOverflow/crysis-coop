@@ -1367,6 +1367,36 @@ namespace
 		}
 	}
 
+	// A vehicle seat keeps the passenger it was saved with even when that
+	// player is not in the game: the other players' entities are not in the
+	// save, the seat's passenger id is. The next load of a checkpoint then
+	// asks that passenger for his health and crashes on the missing actor
+	// (CryAction CVehicleSeat::Serialize; the user's game 2026-10-13: the
+	// companion saved in the host's car, everybody down before it joined).
+	// Such seats are freed before and after every load
+	void FreeAbsentSeats(const char* when)
+	{
+		IGameFramework* pFramework = g_pGame->GetIGameFramework();
+		IActorSystem* pActors = pFramework->GetIActorSystem();
+		IVehicleSystem* pVehicles = pFramework->GetIVehicleSystem();
+		if (!pActors || !pVehicles)
+			return;
+		IVehicleIteratorPtr pIt = pVehicles->CreateVehicleIterator();
+		while (IVehicle* pVehicle = pIt->Next())
+		{
+			for (TVehicleSeatId id = 1; id <= (TVehicleSeatId)pVehicle->GetSeatCount(); ++id)
+			{
+				IVehicleSeat* pSeat = pVehicle->GetSeatById(id);
+				const EntityId passenger = pSeat ? pSeat->GetPassenger(true) : 0;
+				if (!passenger || pActors->GetActor(passenger))
+					continue;
+				pSeat->Exit(false, true);
+				CryLogAlways("[CoopSave] %s: seat %s of %s held a passenger who is not in the game (id %u): %s", when, pSeat->GetSeatName(),
+					pVehicle->GetEntity()->GetName(), passenger, pSeat->GetPassenger(true) ? "NOT FREED" : "freed");
+			}
+		}
+	}
+
 	void LoadNow()
 	{
 		IGameFramework* pFramework = g_pGame->GetIGameFramework();
@@ -1381,9 +1411,11 @@ namespace
 			gEnv->bMultiplayer = false;
 			NetLoadBegin();
 			const bool keep = s_loadKeepClients && KeepBegin();
+			FreeAbsentSeats("before the load");
 			const DWORD t0 = GetTickCount();
 			ok = pFramework->LoadGame(s_load.save.c_str(), true, true);
 			CryLogAlways("[CoopSave] the saved game took %.1f s to load", (GetTickCount() - t0) / 1000.0f);
+			FreeAbsentSeats("after the load");
 			KeepEnd();
 			limitRestored = NetLoadEnd();
 			// (the limit was never lowered)
