@@ -2031,7 +2031,7 @@ void CoopSave::Init()
 	// off by default: after such a load the AI companion could not join (its
 	// break replay timed out: "%p times out", 2026-10-15); the soldiers are
 	// armed again after every load instead (coop_load_rearm)
-	gEnv->pConsole->RegisterInt("coop_load_ids", 0, 0, "Crysis Coop: 1 = a load gets the save's entity ids right (slots of things the save does not have freed first; a joining AI companion may then wait for ever), 0 = CryAction alone (default)");
+	gEnv->pConsole->RegisterInt("coop_load_ids", 1, 0, "Crysis Coop: 1 = a load gets the save's entity ids right (slots of things the save does not have freed first) (default), 0 = CryAction alone (from a slot held by something else on, every entity gets the next one's data)");
 	gEnv->pConsole->RegisterInt("coop_load_rearm", 1, 0, "Crysis Coop: 1 = after a load the soldiers whose guns are not theirs and ready get their equipment again, 0 = not (testing)");
 	gEnv->pConsole->RegisterInt("coop_test_rearm_trace", 0, 0, "Crysis Coop testing: 1 = log how many soldiers are not armed as saved before and right after a load's LoadGame");
 	gEnv->pConsole->RegisterInt("coop_test_load_extra", 0, 0, "Crysis Coop testing: 1 = log the entities right after a load's LoadGame that the save does not have");
