@@ -26,6 +26,7 @@
 #include "IMovieSystem.h"
 #include "IViewSystem.h"
 #include "ISound.h"
+#include "CoopSound.h"
 #include "NanoSuit.h"
 #include <stdarg.h>
 #include <algorithm>
@@ -80,6 +81,7 @@ namespace
 	void WatchLevelTOD();
 	void KeepLevelTOD();
 	void OpenSoundLimits();
+	void UpdateSoundLimits(float frameTime);
 	void UpdateDialogLock(float frameTime);
 	void UpdateStealth(float frameTime);
 	void UpdateMusicSync(float frameTime, int channelId = 0);
@@ -759,6 +761,8 @@ namespace
 	void CmdTestSave(IConsoleCmdArgs*);
 	void CmdTestAIClear(IConsoleCmdArgs*);
 	void CmdAIWeapons(IConsoleCmdArgs*);
+	void CmdSoundCensus(IConsoleCmdArgs*);
+	void LogSoundCensus(const char* why);
 
 	void RegisterCommands()
 	{
@@ -767,6 +771,9 @@ namespace
 			return;
 		gEnv->pConsole->AddCommand("coop_aistats", CmdStats, 0, "Crysis Coop: log AI object statistics");
 		gEnv->pConsole->AddCommand("coop_ai_weapons", CmdAIWeapons, 0, "Crysis Coop: log what the soldiers near the local player hold");
+		gEnv->pConsole->RegisterInt("coop_sound_voices", 64, 0,
+			"Crysis Coop: while more voices than this play, the less important new sounds (priority over 45, as in single player) do not start: FMOD mixes 64 at most, the others are not heard (0 = every sound starts)");
+		gEnv->pConsole->AddCommand("coop_sound_census", CmdSoundCensus, 0, "Crysis Coop: log the sounds the entities play now (playing, virtual, waiting for their data) and the most frequent ones");
 		gEnv->pConsole->AddCommand("coop_test_stealth", CmdTestStealth, 0, "Crysis Coop testing: coop_test_stealth logs the AI system's detection levels of every player (server)");
 		gEnv->pConsole->AddCommand("coop_test_save", CmdTestSave, 0, "Crysis Coop testing: coop_test_save [name] saves as the single player menu does");
 		gEnv->pConsole->AddCommand("coop_test_ai_clear", CmdTestAIClear, 0, "Crysis Coop testing: coop_test_ai_clear <name> [proxy]: AIEVENT_CLEAR to that AI (proxy: its proxy reset too)");
@@ -884,6 +891,8 @@ namespace
 			// they are simply sent to the clients.
 			if (!params.pClass)
 				return true;
+			if (gEnv->bServer && CoopSave::IsLoadingSave())
+				CoopSave::FreeSavedIdSlot(params);
 			// the gamerules keep their fixed static binding on every machine.
 			// When the next level replaces this one in the same game (coop map
 			// change) they are created while the old level is still marked as
@@ -1799,6 +1808,64 @@ namespace
 		CryLogAlways("[CoopAIWeap] %d soldiers within 150 m: %d hold a weapon, %d hold nothing:%s", soldiers, holding, empty, emptyNames.c_str());
 	}
 
+	// which sounds play now: those of the entities (their sound proxies), how
+	// many are heard, play virtual (not heard), wait for their data, and the
+	// most frequent ones. The user's big fight at the helicopter base had 180
+	// voices with the sound late and choppy (2026-10-14)
+	void LogSoundCensus(const char* why)
+	{
+		if (!gEnv->pSoundSystem || !gEnv->pEntitySystem)
+			return;
+		std::map<string, int> byName;
+		int heard = 0, virt = 0, loading = 0, entities = 0;
+		IEntityItPtr pIt = gEnv->pEntitySystem->GetEntityIterator();
+		pIt->MoveFirst();
+		while (IEntity* pEntity = pIt->Next())
+		{
+			IEntitySoundProxy* pProxy = (IEntitySoundProxy*)pEntity->GetProxy(ENTITY_PROXY_SOUND);
+			if (!pProxy)
+				continue;
+			bool any = false;
+			for (uint32 i = 0; i < 256; ++i)
+			{
+				ISound* pSound = pProxy->GetSoundByIndex(i);
+				if (!pSound)
+					break;
+				const bool isLoading = pSound->IsLoading();
+				const bool isVirtual = pSound->IsPlayingVirtual();
+				const bool isHeard = pSound->IsPlaying() && !isVirtual;
+				if (!isLoading && !isVirtual && !isHeard)
+					continue;
+				any = true;
+				heard += isHeard;
+				virt += isVirtual;
+				loading += isLoading;
+				const char* name = pSound->GetName();
+				if (name && !strnicmp(name, "sounds/", 7))
+					name += 7;
+				++byName[string(name ? name : "?") + (isLoading ? " (loading)" : isVirtual ? " (virtual)" : "")];
+			}
+			entities += any;
+		}
+		std::vector<std::pair<int, string> > top;
+		for (std::map<string, int>::const_iterator it = byName.begin(); it != byName.end(); ++it)
+			top.push_back(std::make_pair(it->second, it->first));
+		std::sort(top.begin(), top.end());
+		string list;
+		for (int i = (int)top.size() - 1; i >= 0 && i >= (int)top.size() - 12; --i)
+			list += string().Format(" %s x%d", top[i].second.c_str(), top[i].first);
+		int mem = 0, memMax = 0;
+		gEnv->pSoundSystem->GetSoundMemoryUsageInfo(&mem, &memMax);
+		CryLogAlways("[CoopSound] %s: %d voices; sounds of %d entities: %d heard, %d virtual, %d waiting for their data; memory %.1f MB; most:%s",
+			why, gEnv->pSoundSystem->GetUsedVoices(), entities, heard, virt, loading, mem / 1048576.0f, list.c_str());
+		CryLogAlways("[CoopSound] %s: %s", why, CoopSound::FmodLine().c_str());
+	}
+
+	void CmdSoundCensus(IConsoleCmdArgs*)
+	{
+		LogSoundCensus("now");
+	}
+
 	// testing: a save as the single player menu's "Save" makes it
 	void CmdTestAIClear(IConsoleCmdArgs* pArgs)
 	{
@@ -1999,7 +2066,10 @@ void CoopAI::OnLoadingStart(const char* levelName)
 namespace
 {
 	// diagnostics: physical breaks on this machine (trees, planks, glass...),
-	// to compare what the server broke with what a client shows
+	// to compare what the server broke with what a client shows; and when the
+	// last one was (a companion joins once things stopped breaking)
+	float s_lastBreakAt = -1000.0f;
+
 	const char* BreakSource(void* pForeignData, int iForeignData)
 	{
 		if (iForeignData == PHYS_FOREIGN_ID_ENTITY && pForeignData)
@@ -2010,6 +2080,7 @@ namespace
 	int OnPhysPartCreated(const EventPhys* pEvent)
 	{
 		const EventPhysCreateEntityPart* p = static_cast<const EventPhysCreateEntityPart*>(pEvent);
+		s_lastBreakAt = gEnv->pTimer->GetAsyncCurTime();
 		pe_status_pos pos;
 		Vec3 at(0, 0, 0);
 		if (p->pEntNew && p->pEntNew->GetStatus(&pos))
@@ -2022,6 +2093,7 @@ namespace
 	int OnPhysJointBroken(const EventPhys* pEvent)
 	{
 		const EventPhysJointBroken* p = static_cast<const EventPhysJointBroken*>(pEvent);
+		s_lastBreakAt = gEnv->pTimer->GetAsyncCurTime();
 		CoopAI::Trace("BREAK joint of %s at (%.1f,%.1f,%.1f)", BreakSource(p->pForeignData[0], p->iForeignData[0]), p->pt.x, p->pt.y, p->pt.z);
 		return 1;
 	}
@@ -2066,6 +2138,16 @@ bool CoopAI::GetStealth(float& bar, float& exposure)
 bool CoopAI::DialogBusy()
 {
 	return DialogLockBusy();
+}
+
+bool CoopAI::LevelLoading()
+{
+	return s_inLoading;
+}
+
+float CoopAI::SecondsSinceBreak()
+{
+	return gEnv->pTimer->GetAsyncCurTime() - s_lastBreakAt;
 }
 
 void CoopAI::AfterFrameworkUpdate()
@@ -3109,8 +3191,11 @@ namespace
 				gEnv->pSoundSystem ? gEnv->pSoundSystem->GetCPUUsage() : 0.0f, soundMem / 1048576.0f, soundMemMax / 1048576.0f,
 				gEnv->pSoundSystem && gEnv->pSoundSystem->IsPaused() ? " PAUSED" : "");
 			if (gEnv->pSoundSystem && gEnv->pSoundSystem->GetUsedVoices() >= 52)
+			{
 				if (ICVar* pVar = gEnv->pConsole->GetCVar("s_PriorityThreshold"))
 					CryLogAlways("[CoopPerf] many voices: s_PriorityThreshold %d (0 = none dropped)", pVar->GetIVal());
+				LogSoundCensus("many voices");
+			}
 			s_sum = s_worst = 0.0f;
 			s_frames = s_slow = 0;
 		}
@@ -3156,6 +3241,7 @@ void CoopAI::Update(float frameTime)
 	UpdateSequenceSync(frameTime);
 	UpdateTimeOfDaySync(frameTime);
 	UpdateDialogLock(frameTime);
+	UpdateSoundLimits(frameTime);
 	UpdateStealth(frameTime);
 	UpdateMusicSync(frameTime);
 	UpdateTeamMates(frameTime);
@@ -4837,23 +4923,56 @@ namespace
 	// s_PriorityThreshold (45): footsteps, reloading, the grenade launcher's
 	// click; or (2) more than s_MaxActiveSounds (100) are active: every sound,
 	// speech and alarms too, till the game was silent. A coop level keeps more
-	// of the world going (the AI near every player) and reached both. FMOD has
-	// 256 voices (s_SoftwareChannels) and takes the least important itself
+	// of the world going (the AI near every player) and reached both.
+	// But FMOD mixes only 64 voices (CrySoundSystem's setSoftwareChannels(64);
+	// 256 channels): with every sound let through, a big fight had 120-180
+	// voices, two thirds of them virtual (not heard), FMOD swapping them by
+	// importance and loudness, and a sound's quiet parts stuck virtual at
+	// their start made it late (CoopSound's Unstick stops them). The less
+	// important new sounds are dropped again, but only once more than 64
+	// channels play (coop_sound_voices; s_MaxChannels at 125 % of it:
+	// CrySound's gate is 80 %): in a crowd that big it halved the heard
+	// sounds cut off midway. Stuck parts no longer swell the count, so an
+	// ordinary fight (30-50 channels) keeps its footsteps. s_MaxActiveSounds
+	// stays 512
+	int s_soundVoicesSet = -1;
+
 	void OpenSoundLimits()
 	{
 		if (!gEnv->pConsole || !CoopAI::IsCoopSession())
 			return;
-		// 0 = no priority rejection (a cheat cvar: forced)
+		ICVar* pVoices = gEnv->pConsole->GetCVar("coop_sound_voices");
+		const int voices = pVoices ? pVoices->GetIVal() : 64;
+		s_soundVoicesSet = voices;
+		// a cheat cvar: forced; 0 = no priority rejection
 		if (ICVar* pVar = gEnv->pConsole->GetCVar("s_PriorityThreshold"))
-			if (pVar->GetIVal() != 0)
-				pVar->ForceSet("0");
+			if (pVar->GetIVal() != (voices > 0 ? 45 : 0))
+				pVar->ForceSet(voices > 0 ? "45" : "0");
+		if (voices > 0)
+			if (ICVar* pVar = gEnv->pConsole->GetCVar("s_MaxChannels"))
+				pVar->Set((voices * 5 + 3) / 4);
 		if (ICVar* pVar = gEnv->pConsole->GetCVar("s_MaxActiveSounds"))
 			if (pVar->GetIVal() < 512)
 				pVar->Set(512);
 		ICVar* pThreshold = gEnv->pConsole->GetCVar("s_PriorityThreshold");
+		ICVar* pChannels = gEnv->pConsole->GetCVar("s_MaxChannels");
 		ICVar* pActive = gEnv->pConsole->GetCVar("s_MaxActiveSounds");
-		CryLogAlways("[CoopSound] sound limits: s_PriorityThreshold %d, s_MaxActiveSounds %d", pThreshold ? pThreshold->GetIVal() : -1,
-			pActive ? pActive->GetIVal() : -1);
+		CryLogAlways("[CoopSound] sound limits: s_PriorityThreshold %d, s_MaxChannels %d (less important new sounds dropped above %d voices), s_MaxActiveSounds %d",
+			pThreshold ? pThreshold->GetIVal() : -1, pChannels ? pChannels->GetIVal() : -1, voices > 0 ? voices : 0, pActive ? pActive->GetIVal() : -1);
+	}
+
+	// coop_sound_voices changed in the game: the limits again
+	float s_soundLimitTimer = 0.0f;
+
+	void UpdateSoundLimits(float frameTime)
+	{
+		s_soundLimitTimer += frameTime;
+		if (s_soundLimitTimer < 1.0f || !gEnv->pConsole || !CoopAI::IsCoopSession())
+			return;
+		s_soundLimitTimer = 0.0f;
+		ICVar* pVoices = gEnv->pConsole->GetCVar("coop_sound_voices");
+		if (pVoices && s_soundVoicesSet >= 0 && pVoices->GetIVal() != s_soundVoicesSet)
+			OpenSoundLimits();
 	}
 
 	// Every campaign level guards its story dialogs with one game token: a

@@ -3463,6 +3463,62 @@ namespace
 		return TRUE;
 	}
 
+	// ---- the breaks it makes again while it joins. The host's game keeps
+	// every break (those its load made again too) and a game that joins makes
+	// each again, one after another; one it cannot make the same is given up
+	// after g_breaktimeoutframes frames (the host's 140, synced to this game).
+	// The companion's game makes about one frame a second while it joins:
+	// the glass of a house a palm tree fell on right after a load (the user's
+	// save of 2026-10-14 with coop_load_ids 1) held it more than two minutes
+	// and the host told the player it cannot join. A break it can make is
+	// made within two frames (35 of 36 in the first, measured): while its
+	// level loads one waits JOIN_BREAK_FRAMES frames. (A joining game may
+	// change only a cvar the host does not sync; that flag at the connect,
+	// while the host's cvars come, cut the connection: "Disconnect ...
+	// cause=25". So only once the level loads, both back after)
+	const int JOIN_BREAK_FRAMES = 3;
+	ICVar* s_pBreakTimeout = 0;
+	int s_hostBreakTimeout = 140;      // the host's value
+	int s_breakTimeoutFlags = 0;       // the cvar's own flags
+	bool s_joinBreakTimeout = false;   // JOIN_BREAK_FRAMES while its level loads
+
+	void UpdateBreakTimeout(bool loading)
+	{
+		if (!s_pBreakTimeout)
+		{
+			s_pBreakTimeout = gEnv->pConsole->GetCVar("g_breaktimeoutframes");
+			if (!s_pBreakTimeout)
+				return;
+		}
+		if (!loading)
+		{
+			if (s_joinBreakTimeout)
+			{
+				s_joinBreakTimeout = false;
+				s_pBreakTimeout->Set(s_hostBreakTimeout);
+				s_pBreakTimeout->SetFlags(s_breakTimeoutFlags);
+				CryLogAlways("[CoopAgent] its level loaded: a break it makes again waits %d frames again (%d now)", s_hostBreakTimeout, s_pBreakTimeout->GetIVal());
+			}
+			return;
+		}
+		if (!s_joinBreakTimeout)
+		{
+			s_joinBreakTimeout = true;
+			s_hostBreakTimeout = s_pBreakTimeout->GetIVal();
+			s_breakTimeoutFlags = s_pBreakTimeout->GetFlags();
+			s_pBreakTimeout->SetFlags(s_breakTimeoutFlags | VF_NOT_NET_SYNCED);
+			s_pBreakTimeout->Set(std::min(JOIN_BREAK_FRAMES, s_hostBreakTimeout));
+			CryLogAlways("[CoopAgent] its level loads: a break it makes again waits %d frames (now %d; the host's game %d)",
+				JOIN_BREAK_FRAMES, s_pBreakTimeout->GetIVal(), s_hostBreakTimeout);
+		}
+		// (the host's value again: ours)
+		else if (s_pBreakTimeout->GetIVal() > JOIN_BREAK_FRAMES)
+		{
+			s_hostBreakTimeout = s_pBreakTimeout->GetIVal();
+			s_pBreakTimeout->Set(JOIN_BREAK_FRAMES);
+		}
+	}
+
 	void UpdateCompanionGame()
 	{
 		// the window: named, and out of sight (the host does it too, at once)
@@ -3531,6 +3587,24 @@ namespace
 			s_nextConnect = Now() + 5.0f;
 		}
 		s_wasIn = in;
+		// joining: from the connect until the level load after it is over
+		// (its player is there long before; no load within a minute: in)
+		static int s_joinPhase = 0;        // 0 out or in the game, 1 connected, 2 its level loads
+		static float s_connectedAt = 0.0f;
+		static bool s_wasJoined = false;
+		if (!in)
+			s_joinPhase = 0;
+		else if (!s_wasJoined && s_joinPhase == 0)
+		{
+			s_joinPhase = 1;
+			s_connectedAt = Now();
+		}
+		if (s_joinPhase == 1 && CoopAI::LevelLoading())
+			s_joinPhase = 2;
+		if ((s_joinPhase == 2 && !CoopAI::LevelLoading()) || (s_joinPhase == 1 && Now() - s_connectedAt > 60.0f))
+			s_joinPhase = 0;
+		s_wasJoined = in && s_joinPhase == 0;
+		UpdateBreakTimeout(s_joinPhase == 2);
 		bool hostReady = true;
 		if (const int parent = s_pParent->GetIVal())
 		{
@@ -3854,10 +3928,22 @@ namespace
 	// (Continue), no cutscene playing, its player there for a few seconds.
 	// (A join during the fullscreen intro crashed the host's game in the
 	// engine's file streaming, CCachedFileData::GetData; and the companion
-	// would only stand there anyway.)
+	// would only stand there anyway.) And nothing broke for a while: the
+	// host's game keeps every break for the games that join, each when its
+	// record ends (120 frames, ~4 s), and a game that joins while that list
+	// still grows gets its entities only after it made every break again,
+	// one a frame at its one frame a second (the user's save of 2026-10-14
+	// with coop_load_ids 1: a palm tree on a house, the house fell in after
+	// the load for 30 s; the companion joined 150 s after the load, or never
+	// when a break it could not make held it for 140 frames). While things
+	// keep breaking (a fight) it waits at most 30 s
+	const float BREAK_QUIET_SECONDS = 6.0f;
+	const float BREAK_QUIET_WAIT_MAX = 30.0f;
+
 	bool HostWorldReady()
 	{
 		static float s_since = -1.0f;
+		static bool s_ready = false;
 		CHUD* pHUD = g_pGame->GetHUD();
 		const bool now = !CoopSave::IsBusy() && g_pGame->GetIGameFramework()->GetClientActor() != 0
 			&& g_pGame->GetIGameFramework()->GetClientActor()->GetHealth() > 0
@@ -3865,11 +3951,24 @@ namespace
 		if (!now)
 		{
 			s_since = -1.0f;
+			s_ready = false;
 			return false;
 		}
+		if (s_ready)
+			return true;
 		if (s_since < 0.0f)
 			s_since = Now();
-		return Now() - s_since > 3.0f;
+		const float settled = Now() - s_since;
+		if (settled <= 3.0f)
+			return false;
+		const float sinceBreak = CoopAI::SecondsSinceBreak();
+		if (sinceBreak < BREAK_QUIET_SECONDS && settled < 3.0f + BREAK_QUIET_WAIT_MAX)
+			return false;
+		s_ready = true;
+		if (settled > 3.5f)
+			CryLogAlways("[CoopAgent] the host's game is ready %.0f s after its player is there (%s)", settled,
+				sinceBreak >= BREAK_QUIET_SECONDS ? "things stopped breaking" : "things still break: it waited long enough");
+		return true;
 	}
 
 	float s_readySince = -1.0f;    // when the host's game became ready (-1: not ready)

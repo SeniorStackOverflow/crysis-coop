@@ -1018,6 +1018,327 @@ namespace
 			CryLogAlways("[CoopSave] %d kept entities are gone after the load", gone);
 	}
 
+	// ---- the entity ids of a save. CryAction spawns a save's dynamic things
+	// with their saved ids, after it broke the save's broken objects again (each
+	// piece with the id it had, SetNextSpawnId). A slot holds one entity: when
+	// a thing's slot was held by something else (a piece the save no longer
+	// has, made again, or anything the save does not have), SpawnEntity handed
+	// out that one ("[LoadGame] Spawned Entity ID=128935, DSG11618 (DSG1), with
+	// wrong ID=63399", a piece of a tree) and from there on CryAction matched
+	// every entity of the save with the data of the next one: ~2000 things, the
+	// soldiers' equipment of the whole level not theirs. The user's manual save
+	// of 2026-10-14 loaded 219 soldiers who could not fire; loaded into the
+	// running level it crashed. Before the load every slot the save needs is
+	// made free and kept for its id; a piece made again whose old slot belongs
+	// to a thing of the save gets a new id
+	const unsigned SLOT_USED_RVA = 0x32F87;    // CryEntitySystem 6156, IsIDUsed: cmp word ptr [ecx+eax*4+72h],0FFFEh (salt buffer at +70h)
+	const unsigned char SLOT_USED_CODE[7] = { 0x66, 0x81, 0x7C, 0x81, 0x72, 0xFE, 0xFF };
+	const unsigned SALT_BUFFER_OFFSET = 0x70;
+	const unsigned FORCED_ID_RVA = 0x36049;    // CryEntitySystem 6156, SpawnEntity: mov eax,[edi+404D4h] (SetNextSpawnId's id)
+	const unsigned char FORCED_ID_CODE[6] = { 0x8B, 0x87, 0xD4, 0x04, 0x04, 0x00 };
+	const unsigned FORCED_ID_OFFSET = 0x404D4;
+	std::map<unsigned, EntityId> s_savedSlots;  // slot -> the saved id kept there for the load
+	std::set<unsigned> s_saveSlots;              // every slot the save has an entity in
+	unsigned s_freeSlotCursor = 0;              // where a slot the save does not use is looked for
+	bool s_loadIds = false;                     // coop_load_ids
+
+	bool EntitySystemKnown()
+	{
+		static int s_known = -1;
+		if (s_known < 0)
+		{
+			HMODULE h = GetModuleHandleA("CryEntitySystem.dll");
+			s_known = h && !memcmp((const char*)h + SLOT_USED_RVA, SLOT_USED_CODE, sizeof(SLOT_USED_CODE))
+				&& !memcmp((const char*)h + FORCED_ID_RVA, FORCED_ID_CODE, sizeof(FORCED_ID_CODE)) ? 1 : 0;
+			if (!s_known)
+				CryLogAlways("[CoopSave] this CryEntitySystem.dll is not the one known: the save's entity ids are not looked after");
+		}
+		return s_known == 1;
+	}
+
+	// the entity that holds the slot of id, when it is not that id (0: none)
+	IEntity* SlotHolder(IEntitySystem* pES, EntityId id)
+	{
+		if (pES->GetEntity(id) || !pES->IsIDUsed(id))
+			return 0;
+		const unsigned index = id & 0xFFFF;
+		const unsigned short salt = *(const unsigned short*)((const char*)pES + SALT_BUFFER_OFFSET + index * 4);
+		const EntityId other = ((EntityId)salt << 16) | index;
+		return other != id ? pES->GetEntity(other) : 0;
+	}
+
+	// gone now (a load into the running level made the world unremovable;
+	// what the load marks for removal goes at the next update)
+	bool RemoveNow(IEntitySystem* pES, IEntity* pEntity)
+	{
+		const EntityId id = pEntity->GetId();
+		pEntity->SetFlags(pEntity->GetFlags() & ~ENTITY_FLAG_UNREMOVABLE);
+		// (bound to the network, CryAction leaves its removal to the network)
+		INetContext* pNet = g_pGame->GetIGameFramework()->GetNetContext();
+		const bool bound = pNet && pNet->IsBound(id);
+		if (bound && !pNet->UnbindObject(id))
+			pNet->SafelyUnbind(id);
+		pES->RemoveEntity(id, true);
+		if (pES->GetEntity(id))
+			pES->DeletePendingEntities();
+		if (pES->GetEntity(id))
+			CryLogAlways("[CoopSave] %u stays: bound %d (now %d), multiplayer %d", id, (int)bound, pNet ? (int)pNet->IsBound(id) : -1, (int)gEnv->bMultiplayer);
+		return !pES->GetEntity(id);
+	}
+
+	// the ids of a save's entities (its EntityIDList)
+	bool ReadSavedIds(const string& save, std::vector<EntityId>& ids)
+	{
+		std::vector<char> file;
+		if (!ReadFile(EngineSavePath(save), file) || file.size() < 16)
+			return false;
+		// "RGMH" <version> <header size>, then sections <tag> <size> <data>
+		size_t off = memcmp(&file[0], "RGMH", 4) ? 0 : *(const uint32*)&file[8];
+		while (off + 8 <= file.size())
+		{
+			const uint32 size = *(const uint32*)&file[off + 4];
+			if (off + 8 + size > file.size())
+				return false;
+			if (!memcmp(&file[off], "DATC", 4) && size > 4)
+			{
+				// <uncompressed size> <zlib data>
+				size_t textSize = *(const uint32*)&file[off + 8];
+				if (!textSize || textSize > 256 * 1024 * 1024)
+					return false;
+				std::vector<char> text(textSize + 1);
+				if (!gEnv->pSystem->DecompressDataBlock(&file[off + 12], size - 4, &text[0], textSize))
+					return false;
+				text[textSize] = 0;
+				const char* list = strstr(&text[0], "<EntityIDList");
+				const char* end = list ? strstr(list, "</EntityIDList>") : 0;
+				if (!end)
+					return false;
+				for (const char* p = strstr(list, "v=\""); p && p < end; p = strstr(p + 3, "v=\""))
+					if (const EntityId id = (EntityId)strtoul(p + 3, 0, 10))
+						ids.push_back(id);
+				return true;
+			}
+			off += 8 + size;
+		}
+		return false;
+	}
+
+	void PrepareSavedIds(const string& save)
+	{
+		s_savedSlots.clear();
+		s_saveSlots.clear();
+		s_freeSlotCursor = 0xFFFC;  // the last slot (the salt buffer's fields follow it)
+		if (!EntitySystemKnown())
+			return;
+		std::vector<EntityId> ids;
+		if (!ReadSavedIds(save, ids))
+		{
+			CryLogAlways("[CoopSave] the entity ids of %s could not be read", save.c_str());
+			return;
+		}
+		IEntitySystem* pES = gEnv->pEntitySystem;
+		int freed = 0, kept = 0;
+		string names;
+		for (size_t i = 0; i < ids.size(); ++i)
+			s_saveSlots.insert(ids[i] & 0xFFFF);
+		for (size_t i = 0; i < ids.size(); ++i)
+		{
+			const EntityId id = ids[i];
+			if (pES->GetEntity(id))
+				continue;
+			if (IEntity* pOther = SlotHolder(pES, id))
+			{
+				if (names.length() < 600)
+					names += string().Format(" %s (%s, %u for %u)", pOther->GetName(), pOther->GetClass()->GetName(), pOther->GetId(), id);
+				if (RemoveNow(pES, pOther))
+					++freed;
+			}
+			if (!pES->IsIDUsed(id))
+			{
+				pES->ReserveEntityId(id);
+				s_savedSlots[id & 0xFFFF] = id;
+				++kept;
+			}
+		}
+		CryLogAlways("[CoopSave] the save's %d entity ids: %d slots kept for them, %d made free (held by things the save does not have)%s%s",
+			(int)ids.size(), kept, freed, names.empty() ? "" : ":", names.c_str());
+	}
+
+	// an id in a free slot no entity of the save has (0: none), the slot's
+	// next salt as the entity system would give it
+	EntityId FreeIdOutsideSave(IEntitySystem* pES)
+	{
+		for (; s_freeSlotCursor > 0x8000; --s_freeSlotCursor)
+		{
+			if (s_saveSlots.count(s_freeSlotCursor) || pES->IsIDUsed(s_freeSlotCursor))
+				continue;
+			const unsigned short salt = *(const unsigned short*)((const char*)pES + SALT_BUFFER_OFFSET + s_freeSlotCursor * 4);
+			if (salt >= 0x7FFF)
+				continue;
+			return ((EntityId)(salt + 1) << 16) | s_freeSlotCursor--;
+		}
+		return 0;
+	}
+
+	// testing (coop_test_load_extra): the entities right after a load that
+	// the save does not have, by class, the geometry ones with their places
+	void LogEntitiesOutsideSave(const string& save)
+	{
+		std::vector<EntityId> ids;
+		if (!ReadSavedIds(save, ids))
+			return;
+		std::set<EntityId> saved(ids.begin(), ids.end());
+		std::map<string, int> byClass;
+		string geometry;
+		int count = 0;
+		IEntityItPtr pIt = gEnv->pEntitySystem->GetEntityIterator();
+		while (IEntity* pEntity = pIt->Next())
+		{
+			if (saved.count(pEntity->GetId()) || (pEntity->GetFlags() & ENTITY_FLAG_NO_SAVE))
+				continue;
+			++count;
+			++byClass[pEntity->GetClass()->GetName()];
+			if (!stricmp(pEntity->GetClass()->GetName(), "Default") && geometry.length() < 3000)
+			{
+				const Vec3 pos = pEntity->GetWorldPos();
+				geometry += string().Format(" %u %s (%.1f,%.1f,%.1f)", pEntity->GetId(), pEntity->GetName(), pos.x, pos.y, pos.z);
+			}
+		}
+		string classes;
+		for (std::map<string, int>::const_iterator it = byClass.begin(); it != byClass.end(); ++it)
+			classes += string().Format(" %s %d", it->first.c_str(), it->second);
+		CryLogAlways("[CoopTest] right after LoadGame %d entities the save does not have:%s; geometry:%s", count, classes.c_str(), geometry.c_str());
+		// and the save's ids without their entity (another one in the slot: its id)
+		string missing;
+		int gone = 0;
+		for (size_t i = 0; i < ids.size(); ++i)
+		{
+			if (gEnv->pEntitySystem->GetEntity(ids[i]))
+				continue;
+			++gone;
+			if (missing.length() < 3000)
+			{
+				IEntity* pOther = SlotHolder(gEnv->pEntitySystem, ids[i]);
+				missing += pOther ? string().Format(" %u(slot: %u %s)", ids[i], pOther->GetId(), pOther->GetName()) : string().Format(" %u", ids[i]);
+			}
+		}
+		CryLogAlways("[CoopTest] right after LoadGame %d ids of the save have no entity:%s", gone, missing.c_str());
+	}
+
+	// ---- the soldiers' guns after a load. A soldier who dies in the network
+	// game loses his things (KillPlayer destroys his inventory, the gun he
+	// dropped goes 45 s later); the load brings him back alive and his things
+	// with him. A second load of the checkpoint into the running level after
+	// he died again (everybody down twice) did not always: a gun "in his
+	// hands" that was never selected (the AI cannot fire it; a shotgun fired
+	// at the truck it lay by, "by nobody"), his rifle or grenades gone; the
+	// user's convoy surrounded him for minutes without a shot. (The load
+	// matched things with the wrong data: see the entity ids above.) After
+	// every load a soldier whose primary weapon is not his and ready gets his
+	// equipment pack again
+	bool ArmedAsSaved(IActor* pActor, const char* primary, string& why)
+	{
+		IItemSystem* pItems = g_pGame->GetIGameFramework()->GetIItemSystem();
+		IInventory* pInv = pActor->GetInventory();
+		const EntityId self = pActor->GetEntityId();
+		bool hasPrimary = false;
+		for (int i = 0; i < pInv->GetCount(); ++i)
+		{
+			const EntityId id = pInv->GetItem(i);
+			IItem* pItem = pItems->GetItem(id);
+			if (!pItem)
+			{
+				why.Format("thing %u of his inventory is gone", id);
+				return false;
+			}
+			if (pItem->GetOwnerId() != self)
+			{
+				why.Format("his %s belongs to %u", pItem->GetEntity()->GetClass()->GetName(), pItem->GetOwnerId());
+				return false;
+			}
+			if (!stricmp(pItem->GetEntity()->GetClass()->GetName(), primary))
+				hasPrimary = true;
+		}
+		if (!hasPrimary)
+		{
+			why.Format("no %s", primary);
+			return false;
+		}
+		const EntityId current = pInv->GetCurrentItem();
+		CItem* pCurrent = current ? static_cast<CItem*>(pItems->GetItem(current)) : 0;
+		if (current && (!pCurrent || pCurrent->GetOwnerId() != self || !pCurrent->GetStats().selected))
+		{
+			why.Format("%s in his hands, not selected", pCurrent ? pCurrent->GetEntity()->GetClass()->GetName() : "a gone thing");
+			return false;
+		}
+		return true;
+	}
+
+	int RearmSoldiers(bool checkOnly = false)
+	{
+		IGameFramework* pFramework = g_pGame->GetIGameFramework();
+		CGameRules* pRules = g_pGame->GetGameRules();
+		IScriptTable* pRulesScript = pRules ? pRules->GetEntity()->GetScriptTable() : 0;
+		if (!pRulesScript)
+			return 0;
+		int rearmed = 0;
+		string names;
+		IActorIteratorPtr pActors = pFramework->GetIActorSystem()->CreateActorIterator();
+		while (IActor* pActor = pActors->Next())
+		{
+			IEntity* pEntity = pActor->GetEntity();
+			IScriptTable* pScript = pEntity->GetScriptTable();
+			IAIObject* pAI = pEntity->GetAI();
+			if (pActor->IsPlayer() || pActor->GetHealth() <= 0 || !pAI || !pScript || !pActor->GetInventory())
+				continue;
+			// (primaryWeapon comes from his equipment pack; without a pack it is
+			// BasicAI's "FY71" of a pilot who never had one)
+			SmartScriptTable props;
+			const char* pack = 0;
+			const char* primary = 0;
+			if (!pScript->GetValue("Properties", props) || !props->GetValue("equip_EquipmentPack", pack) || !pack || !*pack
+				|| !pScript->GetValue("primaryWeapon", primary) || !primary || !*primary)
+				continue;
+			string why;
+			if (ArmedAsSaved(pActor, primary, why))
+				continue;
+			if (checkOnly)
+			{
+				if (rearmed < 40)
+					names += string().Format(" %s (%s)", pEntity->GetName(), why.c_str());
+				++rearmed;
+				continue;
+			}
+			// as the level's start equips him (holstered unless his gun is ready);
+			// in combat with it in his hands
+			Script::CallMethod(pRulesScript, "EquipActor", SmartScriptTable(pScript));
+			const bool alerted = pAI->GetProxy() && pAI->GetProxy()->GetAlertnessState() > 0;
+			if (alerted && !pActor->GetLinkedVehicle())
+			{
+				Script::CallMethod(pScript, "HolsterItem", false);
+				Script::CallMethod(pScript, "SelectPrimaryWeapon");
+			}
+			IItem* pNow = pFramework->GetIItemSystem()->GetItem(pActor->GetInventory()->GetCurrentItem());
+			if (rearmed < 12)
+				names += string().Format(" %s (%s; now %s%s)", pEntity->GetName(), why.c_str(), pNow ? pNow->GetEntity()->GetClass()->GetName() : "holstered",
+					alerted ? ", alerted" : "");
+			++rearmed;
+		}
+		if (rearmed && checkOnly)
+			CryLogAlways("[CoopSave] %d soldiers do not have their guns as saved:%s", rearmed, names.c_str());
+		else if (rearmed)
+			CryLogAlways("[CoopSave] after the load %d soldiers did not have their guns as saved, their equipment again:%s", rearmed, names.c_str());
+		return rearmed;
+	}
+
+	// after a load (coop_load_rearm 0: not, for testing)
+	void RearmAfterLoad()
+	{
+		ICVar* pRearm = gEnv->pConsole->GetCVar("coop_load_rearm");
+		if (!pRearm || pRearm->GetIVal())
+			RearmSoldiers();
+	}
+
 	// with the network game on again: what the clients do not know
 	void KeepResync()
 	{
@@ -1110,6 +1431,7 @@ namespace
 				pA->GetGameObject()->InvokeRMI(CActor::ClRevive(), CActor::ReviveParams(pEntity->GetWorldPos(), pEntity->GetWorldRotation(), team),
 					eRMI_ToAllClients | eRMI_NoLocalCalls);
 		}
+		RearmAfterLoad();
 		// the world as the friends would get it joining now
 		for (size_t i = 0; i < s_keep.channels.size(); ++i)
 		{
@@ -1465,16 +1787,31 @@ namespace
 			const bool mp = gEnv->bMultiplayer;
 			gEnv->bMultiplayer = false;
 			NetLoadBegin();
+			ICVar* pLoadIds = gEnv->pConsole->GetCVar("coop_load_ids");
+			s_loadIds = pLoadIds && pLoadIds->GetIVal() != 0;
+			if (s_loadIds)
+				PrepareSavedIds(s_load.save);
 			const bool keep = s_loadKeepClients && KeepBegin();
 			FreeAbsentSeats("before the load");
 			s_perceptionDropped = 0;
 			// (-1: testing, the load as before the check: it crashes again)
 			checked = (!s_pLoadAIReset || s_pLoadAIReset->GetIVal() >= 0) && PatchPerception(true);
+			// (testing: the soldiers' guns before and right after CryAction's load)
+			ICVar* pRearmTrace = gEnv->pConsole->GetCVar("coop_test_rearm_trace");
+			if (pRearmTrace && pRearmTrace->GetIVal())
+				CryLogAlways("[CoopTest] before LoadGame: %d soldiers not armed", RearmSoldiers(true));
 			const DWORD t0 = GetTickCount();
 			ok = pFramework->LoadGame(s_load.save.c_str(), true, true);
 			CryLogAlways("[CoopSave] the saved game took %.1f s to load", (GetTickCount() - t0) / 1000.0f);
+			if (pRearmTrace && pRearmTrace->GetIVal())
+				CryLogAlways("[CoopTest] right after LoadGame: %d soldiers not armed", RearmSoldiers(true));
+			ICVar* pLoadExtra = gEnv->pConsole->GetCVar("coop_test_load_extra");
+			if (pLoadExtra && pLoadExtra->GetIVal())
+				LogEntitiesOutsideSave(s_load.save);
 			if (checked && !PatchPerception(false))
 				CryLogAlways("[CoopSave] the AI's perception reading could not be put back");
+			s_savedSlots.clear();
+			s_saveSlots.clear();
 			FreeAbsentSeats("after the load");
 			KeepEnd();
 			limitRestored = NetLoadEnd();
@@ -1565,6 +1902,9 @@ namespace
 		}
 		CoopAI::SetInventoryCarry(s_load.level.c_str(), carry);
 		CoopAI::OnGameLoaded(s_keep.on);
+		// (with the friends kept, after their games follow: KeepResync)
+		if (!s_keep.on)
+			RearmAfterLoad();
 		if (s_keep.on)
 		{
 			// the friends back at their places of the checkpoint, with what
@@ -1639,6 +1979,14 @@ namespace
 		CoopSave::LoadCheckpoint(pArgs->GetArgCount() > 1 && !stricmp(pArgs->GetArg(1), "prev"));
 	}
 
+	// testing: the soldiers' guns checked now, as after a load
+	void CmdTestRearm(IConsoleCmdArgs* pArgs)
+	{
+		// (coop_test_rearm check: only which and why)
+		const bool check = pArgs->GetArgCount() > 1 && !stricmp(pArgs->GetArg(1), "check");
+		CryLogAlways("[CoopTest] coop_test_rearm%s: %d soldiers %s", check ? " check" : "", RearmSoldiers(check), check ? "not armed as saved" : "given their equipment again");
+	}
+
 	// testing: coop_test_gamekey <key name>: a key press in the game as the
 	// keyboard would send it (f5, f9...)
 	void CmdTestGameKey(IConsoleCmdArgs* pArgs)
@@ -1680,6 +2028,13 @@ void CoopSave::Init()
 {
 	s_pLoadKeep = gEnv->pConsole->RegisterInt("coop_load_keep", 1, 0,
 		"Crysis Coop: 1 = friends stay connected through a checkpoint loaded into the running level; 0 = they are disconnected and join again");
+	// off by default: after such a load the AI companion could not join (its
+	// break replay timed out: "%p times out", 2026-10-15); the soldiers are
+	// armed again after every load instead (coop_load_rearm)
+	gEnv->pConsole->RegisterInt("coop_load_ids", 0, 0, "Crysis Coop: 1 = a load gets the save's entity ids right (slots of things the save does not have freed first; a joining AI companion may then wait for ever), 0 = CryAction alone (default)");
+	gEnv->pConsole->RegisterInt("coop_load_rearm", 1, 0, "Crysis Coop: 1 = after a load the soldiers whose guns are not theirs and ready get their equipment again, 0 = not (testing)");
+	gEnv->pConsole->RegisterInt("coop_test_rearm_trace", 0, 0, "Crysis Coop testing: 1 = log how many soldiers are not armed as saved before and right after a load's LoadGame");
+	gEnv->pConsole->RegisterInt("coop_test_load_extra", 0, 0, "Crysis Coop testing: 1 = log the entities right after a load's LoadGame that the save does not have");
 	s_pLoadInPlace = gEnv->pConsole->RegisterInt("coop_load_inplace", 1, 0,
 		"Crysis Coop: 1 = a checkpoint of the level that runs is loaded into it (no level load); 0 = the level is hosted again first");
 	s_pLoadAIReset = gEnv->pConsole->RegisterInt("coop_load_ai_reset", 1, 0,
@@ -1692,6 +2047,7 @@ void CoopSave::Init()
 	gEnv->pConsole->AddCommand("coop_continue", CmdContinue, 0,
 		CoopText::ForConsole("Crysis Coop: host a co-op campaign from its last checkpoint: coop_continue [number or name] [prev]  (default: the newest)"));
 	gEnv->pConsole->AddCommand("coop_test_gamekey", CmdTestGameKey, 0, "Crysis Coop testing: coop_test_gamekey <key>: the key pressed in the game");
+	gEnv->pConsole->AddCommand("coop_test_rearm", CmdTestRearm, 0, "Crysis Coop testing: the soldiers whose guns are not theirs and ready get their equipment again (as after a load)");
 	gEnv->pConsole->AddCommand("coop_load", CmdLoad, 0,
 		CoopText::ForConsole("Crysis Coop: the host goes back to the last checkpoint (coop_load prev: the one before); friends join again by themselves"));
 	gEnv->pConsole->AddCommand("coop_campaigns", CmdCampaigns, 0, CoopText::ForConsole("Crysis Coop: the co-op campaigns on this PC and in the cloud"));
@@ -1746,6 +2102,45 @@ void CoopSave::RequestCheckpoint(const char* name)
 	// the place the team goes back to when everybody is down; at a story
 	// checkpoint the downed come back (the rules decide, see CoopOnCheckpoint)
 	CoopRevive::OnCheckpoint(s_pendingName.c_str());
+}
+
+void CoopSave::FreeSavedIdSlot(SEntitySpawnParams& params)
+{
+	if (!EntitySystemKnown())
+		return;
+	IEntitySystem* pES = gEnv->pEntitySystem;
+	if (params.id)
+	{
+		// a thing of the save with its own id: what holds its slot goes
+		if (IEntity* pOther = SlotHolder(pES, params.id))
+		{
+			const EntityId other = pOther->GetId();
+			const string what = string().Format("%s (%s, id %u)", pOther->GetName(), pOther->GetClass()->GetName(), other);
+			CryLogAlways("[CoopSave] the load spawns %s (%s) with its saved id %u: %s held its slot%s", params.sName ? params.sName : "",
+				params.pClass->GetName(), params.id, what.c_str(), RemoveNow(pES, pOther) ? ", removed" : ", could not be removed");
+		}
+		return;
+	}
+	// a broken piece made again with the id it had, whose slot belongs to a
+	// thing of the save now: it gets a new id
+	const EntityId forced = *(const EntityId*)((const char*)pES + FORCED_ID_OFFSET);
+	if (!forced)
+		return;
+	std::map<unsigned, EntityId>::const_iterator kept = s_savedSlots.find(forced & 0xFFFF);
+	IEntity* pOther = SlotHolder(pES, forced);
+	if ((kept == s_savedSlots.end() || kept->second == forced) && !pOther)
+		return;
+	// (in a slot the save has no entity in: one the load frees and fills
+	// again later would be taken)
+	const EntityId newId = FreeIdOutsideSave(pES);
+	CryLogAlways("[CoopSave] the load makes %s (%s) again with the id %u it had: that slot is %s now, the piece gets the id %u",
+		params.sName ? params.sName : "", params.pClass->GetName(), forced, pOther ? pOther->GetName() : "kept for a thing of the save", newId);
+	pES->SetNextSpawnId(newId);
+}
+
+bool CoopSave::IsLoadingSave()
+{
+	return s_loadState == eLS_Loading && s_loadIds;
 }
 
 bool CoopSave::IsLoadPending()

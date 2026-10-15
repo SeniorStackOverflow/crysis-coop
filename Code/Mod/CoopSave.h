@@ -25,6 +25,12 @@ namespace CoopSave
 	// coop_continue: the level runs but the save is not loaded yet (friends
 	// must not join before: the load disconnects everybody but the host)
 	bool IsLoadPending();
+	// server: CryAction's LoadGame of a coop save runs right now
+	bool IsLoadingSave();
+	// server, during that load: an entity spawned with its saved id gets its
+	// slot (what holds it is removed first); a broken piece made again whose
+	// old slot a thing of the save holds now gets a new id
+	void FreeSavedIdSlot(struct SEntitySpawnParams& params);
 
 	// a coop checkpoint's savegame file: not offered by the single player
 	// menus (Load game, Resume), which would load it as a single player game

@@ -59,8 +59,11 @@ namespace CoopAgent
 	// how many times its game was started
 	int CompanionTries();
 	// seconds after which a companion still not in the game counts as
-	// failed (it joins in about 45 s; the menu and the HUD say so)
-	const int JOIN_TIMEOUT = 90;
+	// failed (it joins in about 45 s; the menu and the HUD say so). After a
+	// load whose aftermath breaks things where the players are (a house a
+	// palm tree lay on fell in) its game makes those breaks again first,
+	// about one a second: 100-110 s, and 90 s told the player too early
+	const int JOIN_TIMEOUT = 150;
 	// seconds since the companion's game was started (0: none)
 	float CompanionSeconds();
 }

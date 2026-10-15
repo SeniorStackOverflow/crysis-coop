@@ -89,6 +89,11 @@ namespace CoopAI
 	// server: the level's "a dialog is playing" game token (every campaign
 	// level has one its story dialogs wait for) says busy
 	bool DialogBusy();
+	// a level is loading (a joining client's lasts until it is in the game)
+	bool LevelLoading();
+	// seconds since something broke physically in this game (a part made,
+	// a joint broken; a large number: nothing yet)
+	float SecondsSinceBreak();
 	// server: the HUD:ProgressBar flow node did something (op 0 hide, 1 show,
 	// 2 progress): the clients do the same
 	void OnProgressBar(int op, int progress, int posX, int posY, const char* text, bool topText, bool locking);

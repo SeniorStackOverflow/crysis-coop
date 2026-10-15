@@ -7,4 +7,7 @@
 namespace CoopSound
 {
 	void Update(bool haveFocus);
+	// FMOD's own count of its channels: playing, heard, virtual (not heard:
+	// only 64 are mixed), and its cpu use
+	string FmodLine();
 }
