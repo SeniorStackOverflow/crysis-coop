@@ -13,6 +13,7 @@
 *************************************************************************/
 #include "StdAfx.h"
 #include "Game.h"
+#include "CoopAgent.h"
 
 #include <CryLibrary.h>
 #include <platform_impl.h>
@@ -62,7 +63,12 @@ namespace
 	LRESULT CALLBACK NoActivate(int code, WPARAM wParam, LPARAM lParam)
 	{
 		if (code == HCBT_ACTIVATE)
-			return 1;
+		{
+			// (but coop_test_deactivate's empty window: then the game's is not the active one)
+			char cls[32];
+			if (!GetClassNameA((HWND)wParam, cls, sizeof(cls)) || strcmp(cls, COOP_TEST_INACTIVE_CLASS))
+				return 1;
+		}
 		if (code == HCBT_CREATEWND)
 		{
 			CBT_CREATEWNDA* pCreate = reinterpret_cast<CBT_CREATEWNDA*>(lParam);

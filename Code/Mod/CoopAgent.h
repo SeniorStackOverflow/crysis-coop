@@ -21,6 +21,10 @@
 class CPlayer;
 struct IVehicle;
 
+// testing (coop_test_deactivate): the window class of the empty window a test
+// game's window hook lets become the active one (GameDll.cpp)
+#define COOP_TEST_INACTIVE_CLASS "CoopTestInactive"
+
 namespace CoopAgent
 {
 	void Init();

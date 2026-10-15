@@ -19,10 +19,20 @@ if not defined VSDIR (
 call "%VSDIR%\VC\Auxiliary\Build\vcvars32.bat" >nul 2>nul || exit /b 1
 set "PATH=%VSDIR%\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;%VSDIR%\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;%PATH%"
 
-if not exist build\Bin32\build.ninja (
-  cmake -S . -B build\Bin32 -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl || exit /b 1
-)
-cmake --build build\Bin32 || exit /b 1
+rem cl prints its (localized) /showIncludes notes in the console's code page,
+rem and CMake writes the prefix ninja looks for in the code page it generates
+rem under: when they differ ninja records no header dependencies (a header-only
+rem change rebuilds nothing) and prints every include. So always configure
+rem (regenerates the prefix) and build under UTF-8, then restore the code page.
+set "OLDCP="
+for /f "tokens=2 delims=:." %%c in ('chcp') do set "OLDCP=%%c"
+chcp 65001 >nul
+set "CMAKEARGS="
+if not exist build\Bin32\build.ninja set "CMAKEARGS=-G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl"
+set "BUILDERR=1"
+cmake -S . -B build\Bin32 %CMAKEARGS% >nul && cmake --build build\Bin32 && set "BUILDERR=0"
+if defined OLDCP chcp %OLDCP% >nul
+if %BUILDERR% neq 0 exit /b 1
 
 if not exist "..\Mods\Coop\Bin32" mkdir "..\Mods\Coop\Bin32"
 copy /Y build\Bin32\Coop.dll "..\Mods\Coop\Bin32\Coop.dll" >nul || exit /b 1

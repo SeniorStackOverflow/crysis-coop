@@ -52,6 +52,7 @@ namespace
 	ICVar* s_pFps = 0;           // the companion's frame limit
 	ICVar* s_pParent = 0;        // the host's process: the companion ends with it
 	ICVar* s_pName = 0;          // the companion's player name
+	ICVar* s_pFrameLog = 0;      // testing: this game's frames a second in the log
 
 	const char* const COMPANION_SETTINGS =
 		// a light game: small, silent, simple; it needs no more to play
@@ -3476,6 +3477,8 @@ namespace
 	// change only a cvar the host does not sync; that flag at the connect,
 	// while the host's cvars come, cut the connection: "Disconnect ...
 	// cause=25". So only once the level loads, both back after)
+	// (That one frame a second was CrySystem's background pause, left out
+	// while a client joins now: see below)
 	const int JOIN_BREAK_FRAMES = 3;
 	ICVar* s_pBreakTimeout = 0;
 	int s_hostBreakTimeout = 140;      // the host's value
@@ -3516,6 +3519,123 @@ namespace
 		{
 			s_hostBreakTimeout = s_pBreakTimeout->GetIVal();
 			s_pBreakTimeout->Set(JOIN_BREAK_FRAMES);
+		}
+	}
+
+	// ---- the background pause. CSystem::Update (CrySystem 6156) pauses a game
+	// whose window is not the active one while gEnv->bMultiplayer is false
+	// (single player's pause: up to 10 x Sleep(100) a frame, so one frame a
+	// second). A coop client loads its level with the flag false (CoopAI,
+	// coop_sp_world), until it is in: the AI companion (its window is never
+	// the active one) and a friend at another window made one frame a second
+	// while they joined, and a break of the host's they could not make again
+	// held them 140 frames = 140 s each; a friend was not in after 300 s
+	// (2026-10-15). A host plays with the flag false only with coop_sp_world 1
+	// (the default 2 sets it again once the level has loaded): its game made
+	// one frame a second as soon as its window was not the active one, and the
+	// friends' world stood still. A network game does not pause: while a
+	// client loads, or a server runs its level as single player, the call
+	// goes through NoPauseInCoop and is left out
+	const unsigned PAUSE_CALL_RVA = 0x4C56D;    // CrySystem 6156, CSystem::Update: "mov ecx,esi; call" (E8) the pause, thiscall, no arguments
+	const unsigned PAUSE_RVA = 0x4B890;
+	const unsigned char PAUSE_START[13] = { 0x83, 0xEC, 0x24, 0x56, 0x8B, 0xF1, 0x80, 0xBE, 0x3F, 0x05, 0x00, 0x00, 0x00 };  // sub esp,24h; push esi; mov esi,ecx; cmp byte ptr [esi+53Fh],0
+	DWORD s_pause = 0;              // CrySystem's own function
+	bool s_pauseLeftOut = false;    // logged since the window stopped being the active one
+	int s_framesInactive = 0;       // testing (coop_test_framelog): frames whose window was not the active one
+	int s_framesPaused = 0;         // ... and that went into CrySystem's pause
+
+	bool __cdecl SkipPause()
+	{
+		const bool inactive = gEnv->pRenderer && GetActiveWindow() != (HWND)gEnv->pRenderer->GetHWND();
+		if (inactive)
+			++s_framesInactive;
+		const bool joins = CoopAI::ClientLoadsAsSinglePlayer();
+		if (!joins && !CoopAI::ServerRunsAsSinglePlayer())
+		{
+			s_pauseLeftOut = false;
+			if (inactive && !gEnv->bMultiplayer)
+				++s_framesPaused;
+			return false;
+		}
+		if (!inactive)
+			s_pauseLeftOut = false;
+		else if (!s_pauseLeftOut)
+		{
+			s_pauseLeftOut = true;
+			CryLogAlways(joins ? "[CoopAgent] this game joins and its window is not the active one: no background pause"
+				: "[CoopAgent] this game hosts a coop game and its window is not the active one: no background pause");
+		}
+		return true;
+	}
+
+	__declspec(naked) void NoPauseInCoop()
+	{
+		__asm
+		{
+			push ecx
+			call SkipPause
+			pop ecx
+			test al, al
+			jnz skip
+			jmp dword ptr [s_pause]
+		skip:
+			ret
+		}
+	}
+
+	void PatchPause()
+	{
+		if (s_pause)
+			return;
+		HMODULE h = GetModuleHandleA("CrySystem.dll");
+		unsigned char* p = h ? (unsigned char*)h + PAUSE_CALL_RVA : 0;
+		const DWORD own = (DWORD)h + PAUSE_RVA;
+		if (!p || p[-2] != 0x8B || p[-1] != 0xCE || p[0] != 0xE8 || (DWORD)(p + 5) + *(int*)(p + 1) != own
+			|| memcmp((const void*)own, PAUSE_START, sizeof(PAUSE_START)))
+		{
+			CryLogAlways("[CoopAgent] the background pause is not left out in coop games (another CrySystem.dll)");
+			return;
+		}
+		DWORD old = 0;
+		if (!VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &old))
+			return;
+		s_pause = own;
+		*(int*)(p + 1) = (int)((DWORD)&NoPauseInCoop - (DWORD)(p + 5));
+		VirtualProtect(p, 5, old, &old);
+		FlushInstructionCache(GetCurrentProcess(), p, 5);
+		CryLogAlways("[CoopAgent] the background pause is left out while this game joins or hosts a coop game");
+	}
+
+	// testing (coop_test_framelog 1): this game's frames a second, also while
+	// it loads or joins (the freeze log leaves those out). Counted at the
+	// frame's end on the real clock: a joining game's timer is set to the
+	// server's
+	void LogFrames()
+	{
+		static CTimeValue s_since;
+		static int s_frames = 0;
+		if (!s_pFrameLog || !s_pFrameLog->GetIVal())
+		{
+			s_since.SetValue(0);
+			return;
+		}
+		const CTimeValue now = gEnv->pTimer->GetAsyncTime();
+		if (!s_since.GetValue())
+		{
+			s_since = now;
+			s_frames = 0;
+			s_framesInactive = s_framesPaused = 0;
+			return;
+		}
+		++s_frames;
+		const float sec = (now - s_since).GetSeconds();
+		if (sec >= 5.0f)
+		{
+			CryLogAlways("[CoopFrames] %.1f frames a second (%d in %.1f s)%s; window not the active one in %d, background pause in %d",
+				s_frames / sec, s_frames, sec, CoopAI::LevelLoading() ? ", its level loads" : "", s_framesInactive, s_framesPaused);
+			s_since = now;
+			s_frames = 0;
+			s_framesInactive = s_framesPaused = 0;
 		}
 	}
 
@@ -4386,6 +4506,34 @@ namespace
 			pItem->GetAccessory(name) ? "attached" : "not attached");
 	}
 
+	// coop_test_deactivate: this game's window stops being the active one of
+	// its thread, as when its player went to another window: a hidden, empty
+	// window of the thread becomes its active one (the test window's hook
+	// lets only that one be active; it stays until the game ends, a destroyed
+	// active window would hand activation on). A test game is never the
+	// foreground one, so nothing changes for the person at the PC
+	// (SetActiveWindow(0) and joining the input of a thread without windows
+	// left the game's window active)
+	void CmdTestDeactivate(IConsoleCmdArgs*)
+	{
+		static HWND s_hOther = 0;
+		const HWND hGame = gEnv->pRenderer ? (HWND)gEnv->pRenderer->GetHWND() : 0;
+		const HWND before = GetActiveWindow();
+		if (!s_hOther)
+		{
+			WNDCLASSA wc = {};
+			wc.lpfnWndProc = DefWindowProcA;
+			wc.hInstance = GetModuleHandleA(0);
+			wc.lpszClassName = COOP_TEST_INACTIVE_CLASS;
+			RegisterClassA(&wc);
+			s_hOther = CreateWindowExA(WS_EX_TOOLWINDOW, COOP_TEST_INACTIVE_CLASS, "", WS_POPUP, -32000, -32000, 1, 1, 0, 0, wc.hInstance, 0);
+		}
+		if (s_hOther)
+			SetActiveWindow(s_hOther);
+		CryLogAlways("[CoopTest] coop_test_deactivate: active window %p -> %p (the game's %p, the empty one %p)", before, GetActiveWindow(),
+			hGame, s_hOther);
+	}
+
 	// coop_test_onehand <player>: his weapon in the one-hand pose, as a pick-up
 	// cut short leaves it (this game only; the left hand's watch takes it back)
 	void CmdTestOneHand(IConsoleCmdArgs* pArgs)
@@ -4823,10 +4971,13 @@ void CoopAgent::Init()
 	s_pFps = gEnv->pConsole->RegisterInt("coop_agent_fps", 20, 0, "Crysis Coop: the AI companion's game runs at most this many frames a second");
 	s_pParent = gEnv->pConsole->RegisterInt("coop_agent_parent", 0, 0, "Crysis Coop: the host's process; the AI companion's game ends with it");
 	s_pName = gEnv->pConsole->RegisterString("coop_agent_name", "Companion", 0, "Crysis Coop: the AI companion's player name");
+	PatchPause();
 	// this game's own settings: a server sends its console variables to every
 	// client that connects, and the companion stopped being one when it
 	// joined (the host's coop_agent is 0)
-	ICVar* own[] = { s_pCompanion, s_pAgent, s_pPort, s_pJoin, s_pFps, s_pParent, s_pName };
+	s_pFrameLog = gEnv->pConsole->RegisterInt("coop_test_framelog", 0, 0,
+		"Crysis Coop testing: 1 = this game's frames a second in the log every 5 s, also while it loads or joins a game");
+	ICVar* own[] = { s_pCompanion, s_pAgent, s_pPort, s_pJoin, s_pFps, s_pParent, s_pName, s_pFrameLog };
 	for (int i = 0; i < (int)(sizeof(own) / sizeof(own[0])); ++i)
 		own[i]->SetFlags(own[i]->GetFlags() | VF_NOT_NET_SYNCED);
 	// the companion's game never takes the mouse (the host's value is 0)
@@ -4836,6 +4987,7 @@ void CoopAgent::Init()
 		"Crysis Coop testing: coop_test_ammo <player> <ammo class> <count> sets what he carries of it (server)");
 	gEnv->pConsole->AddCommand("coop_test_vehicles", CmdTestVehicles, 0, "Crysis Coop testing: coop_test_vehicles [all] logs the vehicles near the host's player (all: everywhere), their seats and engines");
 	gEnv->pConsole->AddCommand("coop_test_silencer", CmdTestSilencer, 0, "Crysis Coop testing: coop_test_silencer <player> [0]: a silencer on (off) his weapon (server)");
+	gEnv->pConsole->AddCommand("coop_test_deactivate", CmdTestDeactivate, 0, "Crysis Coop testing: coop_test_deactivate: this game's window stops being the active one, as when its player goes to another window");
 	gEnv->pConsole->AddCommand("coop_test_onehand", CmdTestOneHand, 0, "Crysis Coop testing: coop_test_onehand <player> [grab]: his weapon in the one-hand pose, or (grab) his left hand held up (this game)");
 	gEnv->pConsole->AddCommand("coop_test_anim", CmdTestAnim, 0, "Crysis Coop testing: coop_test_anim <player>: logs his animation graph inputs as this game plays them");
 	gEnv->pConsole->AddCommand("coop_test_key", CmdTestKey, 0, "Crysis Coop testing: coop_test_key <action> <1|0>: this game's player presses (lets go of) a key's action");
@@ -4873,6 +5025,7 @@ void CoopAgent::Update(float frameTime)
 
 void CoopAgent::EndFrame()
 {
+	LogFrames();
 	if (!IsCompanion() || s_pFps->GetIVal() <= 0)
 		return;
 	// the frames it does not need are slept away (a light background game)

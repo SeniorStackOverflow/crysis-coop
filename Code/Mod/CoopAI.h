@@ -91,6 +91,12 @@ namespace CoopAI
 	bool DialogBusy();
 	// a level is loading (a joining client's lasts until it is in the game)
 	bool LevelLoading();
+	// a coop client loads its level as in single player (gEnv->bMultiplayer
+	// false, coop_sp_world) until it is in the game
+	bool ClientLoadsAsSinglePlayer();
+	// a coop server runs its level as in single player (gEnv->bMultiplayer
+	// false, coop_sp_world 1) until the level ends
+	bool ServerRunsAsSinglePlayer();
 	// seconds since something broke physically in this game (a part made,
 	// a joint broken; a large number: nothing yet)
 	float SecondsSinceBreak();

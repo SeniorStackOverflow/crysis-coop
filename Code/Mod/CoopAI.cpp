@@ -2145,6 +2145,16 @@ bool CoopAI::LevelLoading()
 	return s_inLoading;
 }
 
+bool CoopAI::ClientLoadsAsSinglePlayer()
+{
+	return s_clientSPLoad;
+}
+
+bool CoopAI::ServerRunsAsSinglePlayer()
+{
+	return s_spWorldActive;
+}
+
 float CoopAI::SecondsSinceBreak()
 {
 	return gEnv->pTimer->GetAsyncCurTime() - s_lastBreakAt;
