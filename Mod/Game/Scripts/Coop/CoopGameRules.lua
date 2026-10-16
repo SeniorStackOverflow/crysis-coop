@@ -706,6 +706,14 @@ function TeamInstantAction:ProcessActorDamage(hit)
 	-- every enemy may hit him, mercy at low health), the suit's armor as in
 	-- single player (g_suitArmorHealthValue)
 	if (target and target.actor and target.actor:IsPlayer() and (hit.damage or 0) > 0) then
+		-- the first seconds after a checkpoint load: a thing falling on him
+		-- (a hut the load brings down again) does not hurt him (Coop.dll sets
+		-- coop_load_shield)
+		if (hit.type == "collision" and tonumber(System.GetCVar("coop_load_shield")) == 1) then
+			CoopLog(string.format("DAMAGE player %s by %s type=collision hit=%.1f: none, the load has just ended",
+				tostring(target:GetName()), tostring(hit.shooter and hit.shooter:GetName()), hit.damage or 0));
+			return false;
+		end
 		local damage = hit.damage;
 		local shooter = hit.shooter;
 		if (shooter and shooter.actor and (not shooter.actor:IsPlayer()) and AI and AI.ProcessBalancedDamage) then

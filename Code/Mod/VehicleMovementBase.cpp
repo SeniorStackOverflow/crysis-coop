@@ -2151,7 +2151,11 @@ void CVehicleMovementBase::PostSerialize()
 {
   m_movementAction.Clear();
 
-  if (m_isEnginePowered || m_isEngineStarting)
+  // Crysis Coop: not for a vehicle the level keeps hidden (Rescue's parked
+  // helicopters: crewed, engine warmed up, then hidden till later): its rotor
+  // hummed after every load with no helicopter to be seen (2026-10-15). Once
+  // shown, its update starts the run sound (powered and none playing)
+  if ((m_isEnginePowered || m_isEngineStarting) && !m_pVehicle->GetEntity()->IsHidden())
   {
     PlaySound(eSID_Run, 0.f, m_enginePos);
 

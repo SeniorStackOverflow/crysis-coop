@@ -19,6 +19,7 @@
 #include "ScriptHelpers.h"
 
 #include <set>
+#include <unordered_set>
 #include "IFlowSystem.h"
 #include "IGameTokens.h"
 #include "IRenderer.h"
@@ -33,6 +34,7 @@
 #include <map>
 
 #include "CoopAI.h"
+#include "CoopHeap.h"
 #include "CoopRelay.h"
 #include "CoopSave.h"
 #include "CoopMenu.h"
@@ -82,6 +84,7 @@ namespace
 	void KeepLevelTOD();
 	void OpenSoundLimits();
 	void UpdateSoundLimits(float frameTime);
+	void UpdatePlayerExits();
 	void UpdateDialogLock(float frameTime);
 	void UpdateStealth(float frameTime);
 	void UpdateMusicSync(float frameTime, int channelId = 0);
@@ -875,6 +878,106 @@ namespace
 
 	std::set<EntityId> s_levelEntityIds;
 
+	// ---- the physics events of deleted entities (the seconds after a load).
+	// A physical thing can outlive its entity in a load into the running
+	// level: its foreign data, and every event logged for it, still name the
+	// deleted CEntity. CryAction's and the entity system's handlers of those
+	// events call into the freed memory; once it held a box geometry the host
+	// crashed (CryPhysics.dll+0x10EB29 / +0x10EFA8, 1 load in about 12 in the
+	// autotester's load-stress, 2026-10-16). While the guard is on (after a
+	// load) it runs before every other handler: an event of a deleted entity
+	// goes no further, and the thing lets go of the entity
+	std::unordered_set<const void*> s_liveEntities;
+	float s_guardUntil = -1.0f;
+	int s_guardDropped = 0;
+	std::set<IPhysicalEntity*> s_deadPhys;    // the physical things of deleted entities the guard met (this load)
+	int s_deadPhysTypes[3] = { 0, 0, 0 };     // of them: static, rigid, other
+
+	// a physical thing of a deleted entity, met for the first time this load
+	void TellDeadPhysics(IPhysicalEntity* pPhys, int eventId)
+	{
+		if (!pPhys || !s_deadPhys.insert(pPhys).second)
+			return;
+		const int type = pPhys->GetType();
+		++s_deadPhysTypes[type == PE_STATIC ? 0 : type == PE_RIGID ? 1 : 2];
+		if (s_deadPhys.size() <= 15)
+		{
+			char what[256];
+			CoopAI::DescribePhysical(pPhys, what, sizeof(what));
+			CryLogAlways("[CoopAI] after the load: physics of a deleted entity (event %d): %s", eventId, what);
+		}
+	}
+
+	bool GuardOn()
+	{
+		return s_guardUntil >= 0.0f && gEnv->pTimer->GetAsyncCurTime() < s_guardUntil;
+	}
+
+	bool DeadEntity(const void* pForeign, int iForeign)
+	{
+		return iForeign == PHYS_FOREIGN_ID_ENTITY && pForeign && !s_liveEntities.count(pForeign);
+	}
+
+	void LetGo(IPhysicalEntity* pPhys)
+	{
+		if (!pPhys)
+			return;
+		// (only while the thing itself still names a deleted entity: the event
+		// was logged before, it may belong to a living one by now; the review,
+		// 2026-10-16)
+		pe_params_foreign_data now;
+		if (!pPhys->GetParams(&now) || !DeadEntity(now.pForeignData, now.iForeignData))
+			return;
+		pe_params_foreign_data fd;
+		fd.pForeignData = 0;
+		fd.iForeignData = -1;
+		pPhys->SetParams(&fd, 1);    // (at once: a queued change would come after the next event)
+	}
+
+	int OnPhysEventGuard(const EventPhys* pEvent)
+	{
+		if (!GuardOn())
+			return 1;
+		switch (pEvent->idval)
+		{
+		case EventPhysStateChange::id:
+		case EventPhysEnvChange::id:
+		case EventPhysPostStep::id:
+		case EventPhysUpdateMesh::id:
+		case EventPhysCreateEntityPart::id:
+		case EventPhysRemoveEntityParts::id:
+		{
+			const EventPhysMono* e = static_cast<const EventPhysMono*>(pEvent);
+			if (!DeadEntity(e->pForeignData, e->iForeignData))
+				return 1;
+			TellDeadPhysics(e->pEntity, pEvent->idval);
+			LetGo(e->pEntity);
+			if (++s_guardDropped <= 10)
+				CryLogAlways("[CoopAI] after the load: a physics event (%d) of a deleted entity dropped", pEvent->idval);
+			return 0;
+		}
+		case EventPhysBBoxOverlap::id:
+		case EventPhysCollision::id:
+		case EventPhysJointBroken::id:
+		{
+			// (two things: the live one keeps its event, the dead side is none)
+			EventPhysStereo* e = const_cast<EventPhysStereo*>(static_cast<const EventPhysStereo*>(pEvent));
+			for (int i = 0; i < 2; ++i)
+				if (DeadEntity(e->pForeignData[i], e->iForeignData[i]))
+				{
+					TellDeadPhysics(e->pEntity[i], pEvent->idval);
+					LetGo(e->pEntity[i]);
+					e->pForeignData[i] = 0;
+					e->iForeignData[i] = -1;
+					if (++s_guardDropped <= 10)
+						CryLogAlways("[CoopAI] after the load: a physics event (%d) named a deleted entity: none", pEvent->idval);
+				}
+			return 1;
+		}
+		}
+		return 1;
+	}
+
 	struct SSpawnLog : public IEntitySystemSink
 	{
 		FILE* f = nullptr;
@@ -933,6 +1036,12 @@ namespace
 		}
 		virtual void OnSpawn(IEntity* pEntity, SEntitySpawnParams& params)
 		{
+			// (the autotester's heap watch: every 100th entity of a load)
+			static int s_heapSpawns = 0;
+			if (s_inLoading && ++s_heapSpawns % 100 == 0)
+				CoopHeap::Check("an entity of the level spawned");
+			if (s_guardUntil >= 0.0f)
+				s_liveEntities.insert(pEntity);
 			if (!s_inLoading && CoopAI::TraceOn() && !TraceNoisyClass(pEntity))
 			{
 				Vec3 p = pEntity->GetWorldPos();
@@ -951,6 +1060,8 @@ namespace
 		}
 		virtual bool OnRemove(IEntity* pEntity)
 		{
+			if (s_guardUntil >= 0.0f)
+				s_liveEntities.erase(pEntity);
 			if (!s_inLoading && CoopAI::TraceOn() && !TraceNoisyClass(pEntity))
 				CoopAI::Trace("REMOVE %s %s id=%u", pEntity->GetClass()->GetName(), pEntity->GetName(), pEntity->GetId());
 			return true;
@@ -1978,10 +2089,13 @@ namespace
 
 void CoopAI::OnLoadingStart(const char* levelName)
 {
+	CoopHeap::Check("level start: before the mod");
 	s_levelEntityIds.clear();
 	OpenOriginalLevelPak(levelName);
+	CoopHeap::Check("level start: the original level.pak opened");
 	CoopNetSerClearTrace();
 	CoopSave::OnLoadingStart(levelName);
+	CoopHeap::Check("level start: CoopSave");
 	ResetFlowMirror();
 	ResetSync();
 	ResetLoadoutCatchup();
@@ -2005,6 +2119,7 @@ void CoopAI::OnLoadingStart(const char* levelName)
 	ClearProtectedVehicles();
 	ClearInventorySnapshots(levelName);
 	WatchGlobalTokens(levelName);
+	CoopHeap::Check("level start: the mod reset");
 
 	if (s_spWorldActive)
 	{
@@ -2050,6 +2165,7 @@ void CoopAI::OnLoadingStart(const char* levelName)
 	// before the level's entities are spawned, so they get AI objects
 	CryLogAlways("[CoopAI] level loading: enabling AI system on the server");
 	gEnv->pAISystem->Enable(true);
+	CoopHeap::Check("level start: AI system on");
 
 	// before the HUD, objectives, PDA map and entities are created, so the
 	// whole level is set up exactly as in the single-player campaign
@@ -2061,6 +2177,7 @@ void CoopAI::OnLoadingStart(const char* levelName)
 		BlockSaveLoad(true);
 		CryLogAlways("[CoopAI] coop_sp_world=1: server loads this level in single-player mode");
 	}
+	CoopHeap::Check("level start: the mod done");
 }
 
 namespace
@@ -2160,13 +2277,83 @@ float CoopAI::SecondsSinceBreak()
 	return gEnv->pTimer->GetAsyncCurTime() - s_lastBreakAt;
 }
 
+void CoopAI::GuardPhysicsEvents(float seconds)
+{
+	if (!gEnv->pPhysicalWorld || !gEnv->pEntitySystem)
+		return;
+	static bool s_registered = false;
+	if (!s_registered)
+	{
+		s_registered = true;
+		// (logged events, before every other handler: CryAction's and the
+		// entity system's run at 1 and 1000)
+		const int types[] = { EventPhysBBoxOverlap::id, EventPhysCollision::id, EventPhysStateChange::id, EventPhysEnvChange::id,
+			EventPhysPostStep::id, EventPhysUpdateMesh::id, EventPhysCreateEntityPart::id, EventPhysRemoveEntityParts::id, EventPhysJointBroken::id };
+		for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); ++i)
+			gEnv->pPhysicalWorld->AddEventClient(types[i], OnPhysEventGuard, 1, 1e6f);
+	}
+	// the entities alive now (one marked for deletion is not: its removal was
+	// asked for, the sink will not see it again)
+	s_liveEntities.clear();
+	IEntityItPtr pIt = gEnv->pEntitySystem->GetEntityIterator();
+	pIt->MoveFirst();
+	while (IEntity* pEntity = pIt->Next())
+		if (!pEntity->IsGarbage())
+			s_liveEntities.insert(pEntity);
+	s_guardUntil = gEnv->pTimer->GetAsyncCurTime() + seconds;
+	s_guardDropped = 0;
+	s_deadPhys.clear();
+	s_deadPhysTypes[0] = s_deadPhysTypes[1] = s_deadPhysTypes[2] = 0;
+}
+
+void CoopAI::DescribePhysical(IPhysicalEntity* pPhys, char* out, size_t size)
+{
+	if (!pPhys)
+	{
+		_snprintf(out, size, "none");
+		out[size - 1] = 0;
+		return;
+	}
+	pe_status_pos pos;
+	pe_status_dynamics dyn;
+	pe_status_nparts parts;
+	const bool havePos = pPhys->GetStatus(&pos) != 0;
+	const float mass = pPhys->GetStatus(&dyn) ? dyn.mass : 0.0f;
+	const int nParts = pPhys->GetStatus(&parts);
+	const int type = pPhys->GetType();
+	const char* typeName = type == PE_STATIC ? "static" : type == PE_RIGID ? "rigid" : type == PE_LIVING ? "living"
+		: type == PE_ARTICULATED ? "articulated" : type == PE_WHEELEDVEHICLE ? "vehicle" : "other";
+	if (havePos)
+		_snprintf(out, size, "%s (type %d), %d parts, %.0f kg, at %.1f %.1f %.1f, size %.1f x %.1f x %.1f, speed %.1f",
+			typeName, type, nParts, mass, pos.pos.x, pos.pos.y, pos.pos.z,
+			pos.BBox[1].x - pos.BBox[0].x, pos.BBox[1].y - pos.BBox[0].y, pos.BBox[1].z - pos.BBox[0].z, dyn.v.GetLength());
+	else
+		_snprintf(out, size, "%s (type %d), %d parts, %.0f kg", typeName, type, nParts, mass);
+	out[size - 1] = 0;
+}
+
 void CoopAI::AfterFrameworkUpdate()
 {
+	if (s_guardUntil >= 0.0f && !GuardOn())
+	{
+		if (s_guardDropped > 0)
+			CryLogAlways("[CoopAI] the guard after the load is off: %d physics events of deleted entities stopped; %d physical things of deleted entities (%d static, %d rigid, %d other)",
+				s_guardDropped, (int)s_deadPhys.size(), s_deadPhysTypes[0], s_deadPhysTypes[1], s_deadPhysTypes[2]);
+		// (a last look at everything that moves, living things and ropes too:
+		// one whose entity died in the window's last second, or that sent no
+		// event, would name it from now on unguarded; the review, 2026-10-16)
+		CoopSave::ClearDanglingPhysics(true);
+		s_deadPhys.clear();
+		s_guardUntil = -1.0f;
+		s_liveEntities.clear();
+	}
 	KeepLevelTOD();
+	CoopSave::AfterFrameworkUpdate();
 }
 
 void CoopAI::OnLoadingComplete()
 {
+	CoopHeap::Check("the level loaded");
 	ResetHitchTimer();
 	TakeLevelTOD("level loaded");
 	OpenSoundLimits();
@@ -3220,6 +3407,7 @@ void CoopAI::ResetHitchTimer()
 
 void CoopAI::Update(float frameTime)
 {
+	CoopHeap::CheckFrame(s_levelReady);
 	WatchLevelTOD();
 	CoopMenu::LoadSettingsOnce();
 	LogHitch();
@@ -3241,6 +3429,8 @@ void CoopAI::Update(float frameTime)
 		SnapshotInventories(frameTime);
 	}
 	LogPlayerPositions(frameTime);
+	if (gEnv->bServer)
+		UpdatePlayerExits();
 	UpdateVehTest(frameTime);
 	UpdatePendingPickups(frameTime);
 	UpdateLoadoutCatchup(frameTime);
@@ -6995,6 +7185,105 @@ void CoopAI::OnAIExitedVehicle(EntityId id)
 {
 	if (gEnv->bServer && IsCoopSession())
 		s_vehicleExits[id] = gEnv->pTimer->GetCurrTime();
+}
+
+namespace
+{
+	// A player who gets out of a vehicle sometimes comes out where he once got
+	// into it, far behind: the vehicle seat's exit in his own game (its client
+	// moves him) used a place from his first time in it, and a later seat he
+	// was put into from the host never changed it (the AI companion, 2026-10-15:
+	// out of the car next to the downed host, it stood 200 m back where it got
+	// in an hour before). For 3 s after the exit a jump no body makes (more
+	// than 30 m at more than 100 m/s, by the clock: a long frame is no jump;
+	// a friend far off sees a fast car a little elsewhere) that leaves him
+	// more than 40 m from where he got out puts him back there. Measured from
+	// the place he got out, not from the vehicle: one who jumps out of a car
+	// going fast stays behind it, and rolls, but never jumps like that
+	struct SPlayerExit
+	{
+		EntityId player, vehicle;
+		float until, lastAt;
+		Vec3 last, outAt, putAt;
+	};
+	std::vector<SPlayerExit> s_playerExits;
+
+	void UpdatePlayerExits()
+	{
+		if (s_playerExits.empty())
+			return;
+		const float now = gEnv->pTimer->GetAsyncCurTime();
+		CGameRules* pRules = g_pGame ? g_pGame->GetGameRules() : 0;
+		for (size_t i = 0; i < s_playerExits.size();)
+		{
+			SPlayerExit& e = s_playerExits[i];
+			IActor* pActor = g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(e.player);
+			if (!pRules || !pActor || now > e.until || pActor->GetLinkedVehicle() || pActor->GetHealth() <= 0)
+			{
+				s_playerExits.erase(s_playerExits.begin() + i);
+				continue;
+			}
+			const Vec3 pos = pActor->GetEntity()->GetWorldPos();
+			const float jump = pos.GetDistance(e.last);
+			const float speed = jump / max(now - e.lastAt, 0.001f);
+			const float off = Vec3(pos.x - e.outAt.x, pos.y - e.outAt.y, 0).GetLength();
+			e.last = pos;
+			e.lastAt = now;
+			if (jump > 30.0f && speed > 100.0f && off > 40.0f)
+			{
+				IEntity* pVehicle = gEnv->pEntitySystem->GetEntity(e.vehicle);
+				pRules->MovePlayer(static_cast<CActor*>(pActor), e.putAt, pActor->GetEntity()->GetWorldAngles());
+				CryLogAlways("[CoopVeh] %s came out of %s %.0f m from where he got out (at %.0f %.0f %.0f): put back there (%.0f %.0f %.0f)",
+					pActor->GetEntity()->GetName(), pVehicle ? pVehicle->GetName() : "a vehicle", off, pos.x, pos.y, pos.z, e.putAt.x, e.putAt.y, e.putAt.z);
+				s_playerExits.erase(s_playerExits.begin() + i);
+				continue;
+			}
+			++i;
+		}
+	}
+}
+
+// the server moved him itself (into another vehicle, next to the one he
+// follows, to a checkpoint): no jump to undo (the companion asked to be put
+// next to the host's vehicle was put back at the one it left, the review,
+// 2026-10-15). Marked over, it goes at the next update
+void CoopAI::ForgetPlayerExit(EntityId playerId)
+{
+	for (size_t i = 0; i < s_playerExits.size(); ++i)
+		if (s_playerExits[i].player == playerId)
+			s_playerExits[i].until = -1.0f;
+}
+
+void CoopAI::OnPlayerExitedVehicle(EntityId playerId, EntityId vehicleId)
+{
+	if (!gEnv->bServer || !IsCoopSession())
+		return;
+	IEntity* pPlayer = gEnv->pEntitySystem->GetEntity(playerId);
+	IEntity* pVehicle = gEnv->pEntitySystem->GetEntity(vehicleId);
+	if (!pPlayer || !pVehicle)
+		return;
+	SPlayerExit e;
+	e.player = playerId;
+	e.vehicle = vehicleId;
+	e.lastAt = gEnv->pTimer->GetAsyncCurTime();
+	e.until = e.lastAt + 3.0f;
+	// in the vehicle the player is at its seat: where he gets out, and where
+	// a jump is seen from
+	e.outAt = pVehicle->GetWorldPos();
+	e.last = e.outAt;
+	// if he is put back: beside the vehicle as it was then (on the ground
+	// when it stood on it; in the air when he jumped from one flying)
+	AABB box;
+	pVehicle->GetLocalBounds(box);
+	const Matrix34& tm = pVehicle->GetWorldTM();
+	e.putAt = e.outAt + tm.GetColumn0().GetNormalizedSafe(Vec3(1, 0, 0)) * (max(box.max.x, -box.min.x) + 1.5f) + Vec3(0, 0, 0.5f);
+	if (gEnv->p3DEngine)
+	{
+		const float ground = gEnv->p3DEngine->GetTerrainElevation(e.putAt.x, e.putAt.y);
+		if (e.putAt.z < ground + 0.3f || e.putAt.z - ground < 3.0f)
+			e.putAt.z = max(e.putAt.z, ground + 0.3f);
+	}
+	s_playerExits.push_back(e);
 }
 
 bool CoopAI::IsVehicleCrewHostile(IVehicle* pVehicle)

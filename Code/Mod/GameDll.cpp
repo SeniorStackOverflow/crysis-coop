@@ -131,6 +131,15 @@ HHOOK CoopHookWindowsOf(DWORD threadId)
 	return SetWindowsHookExA(WH_CBT, NoActivate, (HINSTANCE)g_hInst, threadId);
 }
 
+// the same for the autotester (tests/autotest): it starts a test host game
+// suspended and hooks its main thread from a 32-bit helper that loads this
+// DLL, so not even the engine's first window takes the foreground (it did,
+// for a second, from a game started by the autotester, 2026-10-15)
+extern "C" __declspec(dllexport) HHOOK CoopTestHookThread(DWORD threadId)
+{
+	return CoopHookWindowsOf(threadId);
+}
+
 // DllMain (the window may not exist yet) and CreateGame (it does)
 void CoopKeepTestWindowBehind(bool windowExists)
 {

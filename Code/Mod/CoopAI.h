@@ -79,6 +79,10 @@ namespace CoopAI
 	bool IsVehicleCrewHostile(IVehicle* pVehicle);
 	// server: a soldier got out of a vehicle (see UpdateVehicleExits)
 	void OnAIExitedVehicle(EntityId id);
+	// server: a player got out of that vehicle (see UpdatePlayerExits)
+	void OnPlayerExitedVehicle(EntityId playerId, EntityId vehicleId);
+	// the server moved the player itself: his last vehicle exit is not watched any more
+	void ForgetPlayerExit(EntityId playerId);
 	// server: NanoSuit:ModeControl ran (it applies to every player); the
 	// joined players' own machines get it too (their HUD, their mode choice)
 	void OnSuitModeControl(int mode, bool add, bool remove, bool defect, bool repair);
@@ -144,6 +148,10 @@ namespace CoopAI
 	void SetInventoryCarry(const char* level, const std::map<string, SInventory>& inventories);
 	// server: a saved game was loaded into the running level
 	void OnGameLoaded(bool clientsKept = false);
+	// for that long after a load: physics events of deleted entities go no further
+	void GuardPhysicsEvents(float seconds);
+	// "rigid (type 2), 3 parts, 200 kg, at x y z, size ..., speed ..." for the log
+	void DescribePhysical(IPhysicalEntity* pPhys, char* out, size_t size);
 	// server: an entity of the level file (a fixed id, bound as part of the
 	// level on every machine), not one created during play
 	bool IsLevelEntity(EntityId id);

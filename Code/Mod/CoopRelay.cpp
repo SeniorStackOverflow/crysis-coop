@@ -501,7 +501,7 @@ namespace
 
 		void Start(const string& url, const unsigned char* key, int gamePort, bool useDirect)
 		{
-			m_url = url;
+			m_url = url.c_str();    // (its own copy: the agent's thread reads it)
 			memcpy(m_key, key, sizeof(m_key));
 			m_gamePort = gamePort;
 			m_useDirect = useDirect;
@@ -546,7 +546,11 @@ namespace
 				if (it->second.port == port)
 				{
 					std::map<unsigned short, string>::iterator id = m_ids.find(it->first);
-					return id != m_ids.end() ? id->second : string();
+					// (a copy of its own: CryString counts its users without a
+					// lock, the relay's threads replace and erase m_ids' strings
+					// while the main thread copies this one; the review,
+					// 2026-10-16)
+					return id != m_ids.end() ? string(id->second.c_str()) : string();
 				}
 			return string();
 		}
@@ -833,7 +837,7 @@ namespace
 
 		void Start(const string& url, const unsigned char* key, int code, bool useDirect)
 		{
-			m_url = url;
+			m_url = url.c_str();    // (its own copy: the agent's thread reads it)
 			memcpy(m_key, key, sizeof(m_key));
 			m_code = (unsigned int)code;
 			s_joinHostState = HS_NONE;

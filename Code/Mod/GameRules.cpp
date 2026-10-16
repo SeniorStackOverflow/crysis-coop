@@ -1139,6 +1139,7 @@ void CGameRules::MovePlayer(CActor *pActor, const Vec3 &pos, const Ang3 &angles)
 	CActor::MoveParams params(pos, Quat(angles));
 	pActor->GetGameObject()->InvokeRMI(CActor::ClMoveTo(), params, eRMI_ToClientChannel|eRMI_NoLocalCalls, pActor->GetChannelId());
 	pActor->GetEntity()->SetWorldTM(Matrix34::Create(Vec3(1,1,1), params.rot, params.pos));
+	CoopAI::ForgetPlayerExit(pActor->GetEntityId());
 }
 
 //------------------------------------------------------------------------

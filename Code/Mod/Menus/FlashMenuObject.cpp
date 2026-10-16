@@ -46,6 +46,7 @@ History:
 #include "LaptopUtil.h"
 #include "GameNetworkProfile.h"
 #include "SPAnalyst.h"
+#include "CoopHeap.h"
 
 //both are defined again in FlashMenuObjectOptions
 static const char* scuiControlCodePrefix = "@cc_"; // "@cc_"; // AlexL 03/04/2007: enable this when keys/controls are fully localized
@@ -965,6 +966,7 @@ void CFlashMenuObject::OnLoadingStart(ILevelInfo *pLevel)
 	m_bInLoading = true;
 
 	SAFE_HUD_FUNC(OnLoadingStart(pLevel));
+	CoopHeap::Check("level start: the HUD");
 
 	StopVideo();	//stop background video
 	StopTutorialVideo();
@@ -1180,6 +1182,7 @@ void CFlashMenuObject::OnLoadingError(ILevelInfo *pLevel, const char *error)
 
 void CFlashMenuObject::OnLoadingProgress(ILevelInfo *pLevel, int progressAmount)
 {
+	CoopHeap::Check("level loading progress");
 	if(m_bIsEndingGameContext || !m_bInLoading)
 		return;
 

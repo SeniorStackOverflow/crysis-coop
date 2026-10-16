@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.15)
 ################################################################################
 
 project(Coop
-	VERSION 0.11.35.0
+	VERSION 0.11.36.0
 	DESCRIPTION "Crysis co-op campaign"
 	HOMEPAGE_URL "https://github.com/SeniorStackOverflow/crysis-coop"
 	LANGUAGES CXX RC
@@ -56,6 +56,7 @@ add_library(${CMAKE_PROJECT_NAME} MODULE
 	Code/Mod/ClientSynchedStorage.cpp
 	Code/Mod/CoopAI.cpp
 	Code/Mod/CoopCloud.cpp
+	Code/Mod/CoopHeap.cpp
 	Code/Mod/CoopMenu.cpp
 	Code/Mod/CoopRelay.cpp
 	Code/Mod/CoopRevive.cpp
@@ -284,3 +285,10 @@ target_compile_definitions(CrysisCoop PRIVATE UNICODE _UNICODE)
 # the Russian messages are UTF-8
 target_compile_options(CrysisCoop PRIVATE /utf-8)
 target_link_libraries(CrysisCoop PRIVATE version winhttp bcrypt ws2_32)
+
+################################################################################
+
+# Crysis Coop: CoopTestHook.dll, the autotester's window hook for the test
+# games it starts (tests/autotest; never shipped)
+add_library(CoopTestHook SHARED tests/autotest/hook/CoopTestHook.cpp)
+target_compile_definitions(CoopTestHook PRIVATE UNICODE _UNICODE)

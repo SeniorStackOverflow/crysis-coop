@@ -1038,6 +1038,7 @@ IEntity *CActor::LinkToVehicle(EntityId vehicleId)
 {
 	// did this link actually change, or are we just re-linking?
 	bool changed=((m_linkStats.linkID!=vehicleId)||gEnv->pSystem->IsSerializingFile())?true:false;
+	const EntityId leftVehicleId = m_linkStats.linkID;
 
 	m_linkStats = SLinkStats(vehicleId,LINKED_VEHICLE);
 
@@ -1056,6 +1057,8 @@ IEntity *CActor::LinkToVehicle(EntityId vehicleId)
 	}
 	if (changed && !pLinked && gEnv->bServer && !IsPlayer())
 		CoopAI::OnAIExitedVehicle(GetEntityId());
+	if (changed && !pLinked && gEnv->bServer && IsPlayer() && leftVehicleId)
+		CoopAI::OnPlayerExitedVehicle(GetEntityId(), leftVehicleId);
 	if (changed && CoopAI::TraceOn())
 	{
 		IVehicleSeat *pSeat = pVehicle ? pVehicle->GetSeatForPassenger(GetEntityId()) : NULL;

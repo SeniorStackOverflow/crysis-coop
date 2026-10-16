@@ -31,6 +31,7 @@
 #include "ICryPak.h"
 #include "StringUtils.h"
 
+#include <algorithm>
 #include <map>
 #include <set>
 #include <vector>
@@ -65,6 +66,14 @@ namespace
 	// connected through keeps every entity and removes afterwards the ones
 	// the save does not have
 	std::map<string, std::set<EntityId> > s_savedIds;
+
+	// the 10 s after a load the world settles in (see Settle)
+	float s_settleUntil = -1.0f, s_settleAt = 0.0f;
+	float s_shieldUntil = -1.0f;    // coop_load_shield is on till then (the first seconds after a load)
+	int s_sweepFrames = 0;          // ClearDanglingPhysics after a load: frames done
+	float s_sweepAt = 0.0f;         // and when next
+	std::set<EntityId> s_settleTold;
+	int s_settleSlowed = 0;
 
 	// the remote players and what they carry (never in a save)
 	void RemotePlayerIds(std::set<EntityId>& out)
@@ -946,7 +955,10 @@ namespace
 			if (pActor->IsPlayer() && pActor != pLocal && static_cast<CActor*>(pActor)->GetChannelId())
 				players.push_back(pActor);
 		if (players.empty())
+		{
+			CryLogAlways("[CoopSave] no friend in the game to keep through the load");
 			return false;
+		}
 		if (!s_savedIds.count(s_load.save))
 		{
 			CryLogAlways("[CoopSave] %s was not saved or loaded in this game: the load disconnects the friends (they join again)", s_load.save.c_str());
@@ -1039,6 +1051,8 @@ namespace
 	const unsigned FORCED_ID_OFFSET = 0x404D4;
 	std::map<unsigned, EntityId> s_savedSlots;  // slot -> the saved id kept there for the load
 	std::set<unsigned> s_saveSlots;              // every slot the save has an entity in
+	std::map<unsigned, EntityId> s_saveIdBySlot;   // every saved id by its slot (also those there before the load)
+	std::set<EntityId> s_protected;               // players and what they carry: never removed by the load
 	unsigned s_freeSlotCursor = 0;              // where a slot the save does not use is looked for
 	bool s_loadIds = false;                     // coop_load_ids
 
@@ -1123,6 +1137,48 @@ namespace
 		return false;
 	}
 
+	// what a load must never remove to free a saved id's slot: the friends
+	// and the AI companion and what they carry (the save has none of them),
+	// the host's own player and the game rules. (The host's things may go:
+	// the load gives him those of the save)
+	void ProtectedIds(std::set<EntityId>& out)
+	{
+		RemotePlayerIds(out);
+		if (IActor* pLocal = g_pGame->GetIGameFramework()->GetClientActor())
+			out.insert(pLocal->GetEntityId());
+		if (CGameRules* pRules = g_pGame->GetGameRules())
+			out.insert(pRules->GetEntityId());
+	}
+
+	// A saved id whose slot a player or what one carries holds now: the load
+	// that gets the save's ids right would remove it. It removed the AI
+	// companion's player (its slot was a silencer's of the save), the friends
+	// to keep were none then, and the load threw the companion out of the
+	// game (2026-10-15). True: such a slot, the holders in names
+	bool ProtectedSlotTaken(const string& save, string& names)
+	{
+		std::vector<EntityId> ids;
+		if (!EntitySystemKnown() || !ReadSavedIds(save, ids))
+			return false;
+		std::set<EntityId> protect;
+		ProtectedIds(protect);
+		IEntitySystem* pES = gEnv->pEntitySystem;
+		bool taken = false;
+		for (size_t i = 0; i < ids.size(); ++i)
+		{
+			if (pES->GetEntity(ids[i]))
+				continue;
+			IEntity* pOther = SlotHolder(pES, ids[i]);
+			if (pOther && protect.count(pOther->GetId()))
+			{
+				taken = true;
+				if (names.length() < 300)
+					names += string().Format(" %s (%u, the save's %u)", pOther->GetName(), pOther->GetId(), ids[i]);
+			}
+		}
+		return taken;
+	}
+
 	void PrepareSavedIds(const string& save)
 	{
 		s_savedSlots.clear();
@@ -1139,14 +1195,23 @@ namespace
 		IEntitySystem* pES = gEnv->pEntitySystem;
 		int freed = 0, kept = 0;
 		string names;
+		s_saveIdBySlot.clear();
+		s_protected.clear();
+		ProtectedIds(s_protected);
 		for (size_t i = 0; i < ids.size(); ++i)
+		{
 			s_saveSlots.insert(ids[i] & 0xFFFF);
+			s_saveIdBySlot[ids[i] & 0xFFFF] = ids[i];
+		}
 		for (size_t i = 0; i < ids.size(); ++i)
 		{
 			const EntityId id = ids[i];
 			if (pES->GetEntity(id))
 				continue;
-			if (IEntity* pOther = SlotHolder(pES, id))
+			IEntity* pOther = SlotHolder(pES, id);
+			if (pOther && s_protected.count(pOther->GetId()))
+				pOther = 0;    // (ProtectedSlotTaken let the load go the other way)
+			if (pOther)
 			{
 				if (names.length() < 600)
 					names += string().Format(" %s (%s, %u for %u)", pOther->GetName(), pOther->GetClass()->GetName(), pOther->GetId(), id);
@@ -1236,6 +1301,14 @@ namespace
 	// matched things with the wrong data: see the entity ids above.) After
 	// every load a soldier whose primary weapon is not his and ready gets his
 	// equipment pack again
+	// what a load into the running level removes now (made after the save):
+	// a thing bound to the network goes only once the network let it go, a
+	// moment later, and until then it looks like any other (it is not even
+	// "garbage"); the soldiers' check counts it as gone. Soldiers in vehicles
+	// kept a gun given after the last load, it went, they were unarmed (14 in
+	// the autotester's all-down game, 2026-10-16)
+	std::set<EntityId> s_removing;
+
 	bool ArmedAsSaved(IActor* pActor, const char* primary, string& why)
 	{
 		IItemSystem* pItems = g_pGame->GetIGameFramework()->GetIItemSystem();
@@ -1246,7 +1319,11 @@ namespace
 		{
 			const EntityId id = pInv->GetItem(i);
 			IItem* pItem = pItems->GetItem(id);
-			if (!pItem)
+			// (marked for removal is gone: the load into the running level
+			// removes the things made after the save in this frame, a gun given
+			// after the last load among them; soldiers in vehicles kept those
+			// and were left unarmed, 2026-10-16)
+			if (!pItem || pItem->GetEntity()->IsGarbage() || s_removing.count(id))
 			{
 				why.Format("thing %u of his inventory is gone", id);
 				return false;
@@ -1283,6 +1360,7 @@ namespace
 			return 0;
 		int rearmed = 0;
 		string names;
+		std::vector<EntityId> before;    // what the rearmed soldiers had
 		IActorIteratorPtr pActors = pFramework->GetIActorSystem()->CreateActorIterator();
 		while (IActor* pActor = pActors->Next())
 		{
@@ -1309,6 +1387,8 @@ namespace
 				++rearmed;
 				continue;
 			}
+			for (int k = 0; k < pActor->GetInventory()->GetCount(); ++k)
+				before.push_back(pActor->GetInventory()->GetItem(k));
 			// as the level's start equips him (holstered unless his gun is ready);
 			// in combat with it in his hands
 			Script::CallMethod(pRulesScript, "EquipActor", SmartScriptTable(pScript));
@@ -1324,19 +1404,114 @@ namespace
 					alerted ? ", alerted" : "");
 			++rearmed;
 		}
+		// EquipActor empties a soldier's inventory without removing what was in
+		// it: ~1200 hidden things owned by nobody stayed after every load of the
+		// user's campaign, kept by the next load into the running level and
+		// more each time (the autotester's count, 2026-10-15). What they had
+		// and nobody holds now goes (a thing another soldier holds stays)
+		int removed = 0;
+		// (coop_test_rearm_keep_old 1: the old things stay, as before, for comparing)
+		ICVar* pKeepOld = gEnv->pConsole->GetCVar("coop_test_rearm_keep_old");
+		if (!before.empty() && !(pKeepOld && pKeepOld->GetIVal()))
+		{
+			std::set<EntityId> held;
+			IActorIteratorPtr pAll = pFramework->GetIActorSystem()->CreateActorIterator();
+			while (IActor* pActor = pAll->Next())
+				if (IInventory* pInv = pActor->GetInventory())
+					for (int k = 0; k < pInv->GetCount(); ++k)
+						held.insert(pInv->GetItem(k));
+			std::sort(before.begin(), before.end());
+			before.erase(std::unique(before.begin(), before.end()), before.end());
+			for (size_t i = 0; i < before.size(); ++i)
+			{
+				IEntity* pEntity = gEnv->pEntitySystem->GetEntity(before[i]);
+				IItem* pItem = pEntity ? pFramework->GetIItemSystem()->GetItem(before[i]) : 0;
+				if (!pItem || held.count(before[i]) || pEntity->GetParent())
+					continue;
+				if (const EntityId owner = pItem->GetOwnerId())
+					if (IActor* pOwner = pFramework->GetIActorSystem()->GetActor(owner))
+						if (pOwner->GetInventory() && pOwner->GetInventory()->FindItem(before[i]) >= 0)
+							continue;
+				pEntity->SetFlags(pEntity->GetFlags() & ~ENTITY_FLAG_UNREMOVABLE);
+				gEnv->pEntitySystem->RemoveEntity(before[i]);
+				s_removing.insert(before[i]);
+				++removed;
+			}
+		}
 		if (rearmed && checkOnly)
 			CryLogAlways("[CoopSave] %d soldiers do not have their guns as saved:%s", rearmed, names.c_str());
 		else if (rearmed)
-			CryLogAlways("[CoopSave] after the load %d soldiers did not have their guns as saved, their equipment again:%s", rearmed, names.c_str());
+			CryLogAlways("[CoopSave] after the load %d soldiers did not have their guns as saved, their equipment again (%d things they had removed):%s", rearmed, removed, names.c_str());
 		return rearmed;
+	}
+
+	// The things in the world by who has them (coop_test_items): in someone's
+	// inventory; naming a soldier or player as owner who does not have it
+	// ("orphans": a load into the running level that kept the world matched the
+	// soldiers' inventories with the save's things and left the ones they had,
+	// ~1100 more after every load of the user's campaign, 2026-10-15); owned
+	// by nobody, hidden or lying about; or held by something that is not an
+	// actor (a vehicle's gun)
+	struct SItemCensus
+	{
+		int held, orphans, orphansVisible, nobodyHidden, nobodyVisible, other;
+		SItemCensus() : held(0), orphans(0), orphansVisible(0), nobodyHidden(0), nobodyVisible(0), other(0) {}
+	};
+
+	SItemCensus CountItems(std::vector<EntityId>* pOrphans = 0)
+	{
+		SItemCensus c;
+		IGameFramework* pFramework = g_pGame->GetIGameFramework();
+		IItemSystem* pItems = pFramework->GetIItemSystem();
+		IActorSystem* pActorSystem = pFramework->GetIActorSystem();
+		std::set<EntityId> held;
+		IActorIteratorPtr pActors = pActorSystem->CreateActorIterator();
+		while (IActor* pActor = pActors->Next())
+			if (IInventory* pInv = pActor->GetInventory())
+				for (int k = 0; k < pInv->GetCount(); ++k)
+					held.insert(pInv->GetItem(k));
+		IEntityItPtr pIt = gEnv->pEntitySystem->GetEntityIterator();
+		pIt->MoveFirst();
+		while (IEntity* pEntity = pIt->Next())
+		{
+			IItem* pItem = pItems->GetItem(pEntity->GetId());
+			if (!pItem || pEntity->IsGarbage() || s_removing.count(pEntity->GetId()))
+				continue;
+			const EntityId owner = pItem->GetOwnerId();
+			if (held.count(pEntity->GetId()))
+				++c.held;
+			else if (owner && pActorSystem->GetActor(owner))
+			{
+				++c.orphans;
+				if (!pEntity->IsHidden())
+					++c.orphansVisible;
+				else if (pOrphans && !pEntity->GetParent())
+					pOrphans->push_back(pEntity->GetId());
+			}
+			else if (!owner || !gEnv->pEntitySystem->GetEntity(owner))
+				++(pEntity->IsHidden() ? c.nobodyHidden : c.nobodyVisible);
+			else
+				++c.other;
+		}
+		return c;
+	}
+
+	string DescribeItems(const SItemCensus& c)
+	{
+		return string().Format("%d held, %d orphans (%d of them visible), %d owned by nobody (%d hidden), %d held by things",
+			c.held, c.orphans, c.orphansVisible, c.nobodyHidden + c.nobodyVisible, c.nobodyHidden, c.other);
 	}
 
 	// after a load (coop_load_rearm 0: not, for testing)
 	void RearmAfterLoad()
 	{
+		const SItemCensus loaded = CountItems();
 		ICVar* pRearm = gEnv->pConsole->GetCVar("coop_load_rearm");
 		if (!pRearm || pRearm->GetIVal())
 			RearmSoldiers();
+		CryLogAlways("[CoopSave] things after the load: %s; after the soldiers' equipment: %s (serializing %d)", DescribeItems(loaded).c_str(), DescribeItems(CountItems()).c_str(),
+			gEnv->pSystem->IsSerializingFile());
+		s_removing.clear();
 	}
 
 	// with the network game on again: what the clients do not know
@@ -1344,6 +1519,7 @@ namespace
 	{
 		if (!s_keep.on)
 			return;
+		s_removing.clear();
 		IGameFramework* pFramework = g_pGame->GetIGameFramework();
 		CGameRules* pRules = g_pGame->GetGameRules();
 		int revived = 0, killed = 0, pickups = 0, removed = 0, bound = 0;
@@ -1353,17 +1529,28 @@ namespace
 		std::set<EntityId> remote;
 		RemotePlayerIds(remote);
 		IActor* pLocal = pFramework->GetClientActor();
+		// (the things kept through the load: how many are the save's)
+		int keptItems = 0, keptItemsSaved = 0, keptItemsUnowned = 0;
 		for (size_t i = 0; i < s_keep.flagged.size(); ++i)
 		{
 			const EntityId id = s_keep.flagged[i];
 			IEntity* pEntity = gEnv->pEntitySystem->GetEntity(id);
+			if (IItem* pItem = pEntity ? pFramework->GetIItemSystem()->GetItem(id) : 0)
+			{
+				++keptItems;
+				keptItemsSaved += saved.count(id) ? 1 : 0;
+				keptItemsUnowned += gEnv->pEntitySystem->GetEntity(pItem->GetOwnerId()) ? 0 : 1;
+			}
 			if (pEntity && !saved.count(id) && !remote.count(id) && (!pLocal || id != pLocal->GetEntityId())
 				&& !pFramework->GetIGameRulesSystem()->HaveGameRules(pEntity->GetClass()->GetName()))
 			{
 				gEnv->pEntitySystem->RemoveEntity(id);
+				s_removing.insert(id);
 				++removed;
 			}
 		}
+		CryLogAlways("[CoopSave] kept through the load: %d entities, %d of them things (%d the save's, %d owned by nobody)",
+			(int)s_keep.flagged.size(), keptItems, keptItemsSaved, keptItemsUnowned);
 		// what the load made (the save had it, the world no more): to the clients
 		INetContext* pNet = pFramework->GetNetContext();
 		IEntityItPtr pIt = gEnv->pEntitySystem->GetEntityIterator();
@@ -1413,6 +1600,24 @@ namespace
 						++pickups;
 					}
 				}
+		}
+		// the players' AI objects (the soldiers' targets) on: a checkpoint
+		// saved with a friend in the game has his switched off (the game is
+		// saved with the friends' AI objects off a moment, QuietRemotePlayers),
+		// and the load put it back off. The soldiers then never saw him again:
+		// the autotester's companion stood among a convoy's soldiers who did not
+		// shoot, it fought them and did not revive the host (2026-10-15)
+		int aiOn = 0;
+		pActors = pFramework->GetIActorSystem()->CreateActorIterator();
+		while (IActor* pActor = pActors->Next())
+		{
+			IAIObject* pAI = pActor->IsPlayer() ? pActor->GetEntity()->GetAI() : 0;
+			if (pAI && !pAI->IsEnabled() && pActor->GetHealth() > 0 && !static_cast<CActor*>(pActor)->GetSpectatorMode())
+			{
+				pAI->Event(AIEVENT_ENABLE, 0);
+				++aiOn;
+				CryLogAlways("[CoopSave] %s was no target for the soldiers after the load (his AI object as saved): a target again", pActor->GetEntity()->GetName());
+			}
 		}
 		// the host is where the load put him, alive: on the clients too (they
 		// had him lying where he went down)
@@ -1683,9 +1888,15 @@ namespace
 			if (status == CoopCloud::eS_Busy && !timedOut)
 				return;
 			s_contState = eCS_None;
-			std::vector<SProgress> local;
-			ListLocal(local);
-			Merge(local, cloud, s_contList);
+			{
+				// (gone before the level loads, which ContinueLocal does in this
+				// call: once one of them was found damaged after that load and the
+				// host crashed freeing it, 2026-10-15)
+				std::vector<SProgress> local;
+				ListLocal(local);
+				Merge(local, cloud, s_contList);
+			}
+			std::vector<CoopCloud::SCampaign>().swap(cloud);
 			if (s_contListOnly && s_contForMenu)
 			{
 				s_menuListReady = true;
@@ -1789,8 +2000,20 @@ namespace
 			NetLoadBegin();
 			ICVar* pLoadIds = gEnv->pConsole->GetCVar("coop_load_ids");
 			s_loadIds = pLoadIds && pLoadIds->GetIVal() != 0;
+			string protectedNames;
+			if (s_loadIds && ProtectedSlotTaken(s_load.save, protectedNames))
+			{
+				s_loadIds = false;
+				CryLogAlways("[CoopSave] a player or what one carries holds the slot of a saved id:%s: this load keeps them and does not get the save's ids right (the soldiers are armed again after it)",
+					protectedNames.c_str());
+			}
 			if (s_loadIds)
 				PrepareSavedIds(s_load.save);
+			// (the physics guard on from here: an event pumped during or right
+			// after CryAction's load can name an entity the load deleted; at
+			// the load's end its list of the living is made anew; the review,
+			// 2026-10-16)
+			CoopAI::GuardPhysicsEvents(30.0f);
 			const bool keep = s_loadKeepClients && KeepBegin();
 			FreeAbsentSeats("before the load");
 			s_perceptionDropped = 0;
@@ -1812,6 +2035,8 @@ namespace
 				CryLogAlways("[CoopSave] the AI's perception reading could not be put back");
 			s_savedSlots.clear();
 			s_saveSlots.clear();
+			s_saveIdBySlot.clear();
+			s_protected.clear();
 			FreeAbsentSeats("after the load");
 			KeepEnd();
 			limitRestored = NetLoadEnd();
@@ -1915,8 +2140,40 @@ namespace
 			KeepResync();
 			s_keep = SKeep();
 		}
-		CaptureSaveableIds(s_load.save);
+		// what the save has, from its own list: the world has more now (the
+		// soldiers' equipment just given again), and a later load into the
+		// running level kept those as the save's things, ~1100 more each time
+		// (the autotester's count and the review, 2026-10-15)
+		{
+			std::vector<EntityId> ids;
+			// (coop_test_load_world_ids 1: the world's ids as before, for comparing)
+			ICVar* pWorldIds = gEnv->pConsole->GetCVar("coop_test_load_world_ids");
+			if (!(pWorldIds && pWorldIds->GetIVal()) && ReadSavedIds(s_load.save, ids))
+			{
+				std::set<EntityId>& saved = s_savedIds[s_load.save];
+				saved.clear();
+				saved.insert(ids.begin(), ids.end());
+			}
+			else
+				CaptureSaveableIds(s_load.save);
+		}
 		CoopText::Say("[CoopSave] progress loaded: %s, checkpoint %s (saved %s)", s_load.level.c_str(), s_load.checkpoint.c_str(), s_load.time.c_str());
+		// (the world settles: see Settle)
+		s_settleUntil = gEnv->pTimer->GetAsyncCurTime() + 10.0f;
+		// while the world settles no player is hurt by things falling on him
+		// (the gamerules' ProcessActorDamage reads coop_load_shield): the
+		// user's manual save lies by a hut the load brings down again, a piece
+		// of it killed the host (collision 4070, the autotester's load-stress,
+		// 2026-10-16); 5 s were too few, a piece flying at 75 m/s killed the
+		// companion later (the same day)
+		if (ICVar* pShield = gEnv->pConsole->GetCVar("coop_load_shield"))
+			pShield->Set(1);
+		s_shieldUntil = s_settleUntil;
+		CoopAI::GuardPhysicsEvents(10.0f);
+		s_sweepFrames = 0;
+		s_sweepAt = 0.0f;
+		s_settleTold.clear();
+		s_settleSlowed = 0;
 		// where the team goes back to when everybody is down
 		CoopRevive::OnCheckpoint("loaded");
 	}
@@ -1985,6 +2242,15 @@ namespace
 		// (coop_test_rearm check: only which and why)
 		const bool check = pArgs->GetArgCount() > 1 && !stricmp(pArgs->GetArg(1), "check");
 		CryLogAlways("[CoopTest] coop_test_rearm%s: %d soldiers %s", check ? " check" : "", RearmSoldiers(check), check ? "not armed as saved" : "given their equipment again");
+		// (what it removed is gone by the next frame: a later load must not
+		// take things of the save with those ids as gone)
+		s_removing.clear();
+	}
+
+	// testing: coop_test_items: the things in the world by who has them
+	void CmdTestItems(IConsoleCmdArgs* pArgs)
+	{
+		CryLogAlways("[CoopTest] items: %s", DescribeItems(CountItems()).c_str());
 	}
 
 	// testing: coop_test_gamekey <key name>: a key press in the game as the
@@ -2031,8 +2297,18 @@ void CoopSave::Init()
 	// off by default: after such a load the AI companion could not join (its
 	// break replay timed out: "%p times out", 2026-10-15); the soldiers are
 	// armed again after every load instead (coop_load_rearm)
-	gEnv->pConsole->RegisterInt("coop_load_ids", 1, 0, "Crysis Coop: 1 = a load gets the save's entity ids right (slots of things the save does not have freed first) (default), 0 = CryAction alone (from a slot held by something else on, every entity gets the next one's data)");
+	// Off again by default (2026-10-15): the faithful load of the user's
+	// campaign rebuilt three copies of a broken hut lying inside each other
+	// (left by earlier loads: debris bound to the network survives a load
+	// into the running level), they flew apart at 100 m/s, the companion's
+	// join stalled for minutes on the breaking, and the loads into the running
+	// level threw out a companion still joining. The soldiers are armed again
+	// after every load either way (coop_load_rearm)
+	gEnv->pConsole->RegisterInt("coop_load_ids", 0, 0, "Crysis Coop: 1 = a load gets the save's entity ids right (slots of things the save does not have freed first), 0 = CryAction alone (default; from a slot held by something else on, every entity gets the next one's data)");
 	gEnv->pConsole->RegisterInt("coop_load_rearm", 1, 0, "Crysis Coop: 1 = after a load the soldiers whose guns are not theirs and ready get their equipment again, 0 = not (testing)");
+	gEnv->pConsole->RegisterInt("coop_load_shield", 0, 0, "Crysis Coop: 1 for the first 10 s after a checkpoint load: things falling on a player do not hurt him (set by the mod)");
+	gEnv->pConsole->RegisterInt("coop_test_load_world_ids", 0, 0, "Crysis Coop testing: 1 = after a load the world's entity ids count as the save's (as before 2026-10-16), not the save file's");
+	gEnv->pConsole->RegisterInt("coop_test_rearm_keep_old", 0, 0, "Crysis Coop testing: 1 = soldiers given their equipment again after a load keep their old things in the world (as before 2026-10-16)");
 	gEnv->pConsole->RegisterInt("coop_test_rearm_trace", 0, 0, "Crysis Coop testing: 1 = log how many soldiers are not armed as saved before and right after a load's LoadGame");
 	gEnv->pConsole->RegisterInt("coop_test_load_extra", 0, 0, "Crysis Coop testing: 1 = log the entities right after a load's LoadGame that the save does not have");
 	s_pLoadInPlace = gEnv->pConsole->RegisterInt("coop_load_inplace", 1, 0,
@@ -2047,6 +2323,7 @@ void CoopSave::Init()
 	gEnv->pConsole->AddCommand("coop_continue", CmdContinue, 0,
 		CoopText::ForConsole("Crysis Coop: host a co-op campaign from its last checkpoint: coop_continue [number or name] [prev]  (default: the newest)"));
 	gEnv->pConsole->AddCommand("coop_test_gamekey", CmdTestGameKey, 0, "Crysis Coop testing: coop_test_gamekey <key>: the key pressed in the game");
+	gEnv->pConsole->AddCommand("coop_test_items", CmdTestItems, 0, "Crysis Coop testing: coop_test_items logs the things in the world by who has them (held, orphans, nobody's)");
 	gEnv->pConsole->AddCommand("coop_test_rearm", CmdTestRearm, 0, "Crysis Coop testing: the soldiers whose guns are not theirs and ready get their equipment again (as after a load)");
 	gEnv->pConsole->AddCommand("coop_load", CmdLoad, 0,
 		CoopText::ForConsole("Crysis Coop: the host goes back to the last checkpoint (coop_load prev: the one before); friends join again by themselves"));
@@ -2114,6 +2391,12 @@ void CoopSave::FreeSavedIdSlot(SEntitySpawnParams& params)
 		// a thing of the save with its own id: what holds its slot goes
 		if (IEntity* pOther = SlotHolder(pES, params.id))
 		{
+			if (s_protected.count(pOther->GetId()))
+			{
+				CryLogAlways("[CoopSave] the load spawns %s (%s) with its saved id %u: %s, a player or what one carries, holds its slot and stays",
+					params.sName ? params.sName : "", params.pClass->GetName(), params.id, pOther->GetName());
+				return;
+			}
 			const EntityId other = pOther->GetId();
 			const string what = string().Format("%s (%s, id %u)", pOther->GetName(), pOther->GetClass()->GetName(), other);
 			CryLogAlways("[CoopSave] the load spawns %s (%s) with its saved id %u: %s held its slot%s", params.sName ? params.sName : "",
@@ -2126,10 +2409,25 @@ void CoopSave::FreeSavedIdSlot(SEntitySpawnParams& params)
 	const EntityId forced = *(const EntityId*)((const char*)pES + FORCED_ID_OFFSET);
 	if (!forced)
 		return;
-	std::map<unsigned, EntityId>::const_iterator kept = s_savedSlots.find(forced & 0xFFFF);
+	std::map<unsigned, EntityId>::const_iterator kept = s_saveIdBySlot.find(forced & 0xFFFF);
 	IEntity* pOther = SlotHolder(pES, forced);
-	if ((kept == s_savedSlots.end() || kept->second == forced) && !pOther)
+	if ((kept == s_saveIdBySlot.end() || kept->second == forced) && !pOther)
 		return;
+	// the save's own piece made again with its own id, its slot held by
+	// something the save does not have (a piece the last fight broke off): that
+	// goes and the piece keeps its id. Given a new id it was made a second
+	// time by the load right after: two palm trunks over the user's hut, one
+	// where it breaks off (2026-10-15)
+	if (kept != s_saveIdBySlot.end() && kept->second == forced && pOther && !s_protected.count(pOther->GetId()))
+	{
+		const string what = string().Format("%s (%s, id %u)", pOther->GetName(), pOther->GetClass()->GetName(), pOther->GetId());
+		if (RemoveNow(pES, pOther))
+		{
+			CryLogAlways("[CoopSave] the load makes %s (%s) again with its saved id %u: %s held its slot, removed", params.sName ? params.sName : "",
+				params.pClass->GetName(), forced, what.c_str());
+			return;
+		}
+	}
 	// (in a slot the save has no entity in: one the load frees and fills
 	// again later would be taken)
 	const EntityId newId = FreeIdOutsideSave(pES);
@@ -2153,11 +2451,189 @@ bool CoopSave::IsCoopSaveName(const char* name)
 	return name && CryStringUtils::stristr(name, "coop_checkpoint_") != 0;
 }
 
+namespace
+{
+	// After a load the world is rebuilt at once: debris of a broken house the
+	// save had several times over, lying inside each other, was pushed apart
+	// in the first frames, the furniture and the walls flew, a foundation slab
+	// went up into the sky and the player in the hut was killed (the user's
+	// campaign, 2026-10-15). For 10 s after a load no heavy loose thing near
+	// a player (a rigid body of 10 kg or more: debris, props; no vehicles, no
+	// people, no grenades) goes faster than 20 m/s; each one that tried is
+	// told in the log once ([CoopBug])
+
+	// After a load into the running level a physical thing can outlive the
+	// entity it belongs to: its foreign data still points at the deleted
+	// CEntity (pieces of the damaged hut, made with the wrong ids). The next
+	// physics event of it that CryAction handles (OnPostStepLogged /
+	// OnStateChangeLogged: GetEntityFromPhysics, then GetProxy) calls into the
+	// freed memory; once that memory held a box geometry the host crashed in
+	// CryPhysics.dll+0x10EB29 (CBoxGeom::PreparePolygon, read 0x2F), 1 load in
+	// about 12 in the autotester's load-stress of 2026-10-16, with or without
+	// the mod's own removals. Every frame while the world settles: a physical
+	// thing whose entity is gone loses that pointer (CryAction then finds no
+	// entity for its events and skips them)
+	int s_danglingCleared = 0;
+	void ClearDanglingPhysicsImpl(bool everything)
+	{
+		IEntitySystem* pES = gEnv->pEntitySystem;
+		IPhysicalWorld* pWorld = gEnv->pPhysicalWorld;
+		if (!pES || !pWorld)
+			return;
+		std::set<const void*> live;
+		IEntityItPtr pIt = pES->GetEntityIterator();
+		pIt->MoveFirst();
+		while (IEntity* pEntity = pIt->Next())
+			live.insert(pEntity);
+		// (into a list of its own: the world's list is shared, and while the
+		// 12000 things of the level were looked at it was filled anew, the
+		// host crashed on a pointer from it, 2026-10-16; only things that move,
+		// the deleted entities' left-overs were always rigid bodies)
+		static std::vector<IPhysicalEntity*> s_list(8192);
+		IPhysicalEntity** ppList = &s_list[0];
+		const Vec3 big(1e5f, 1e5f, 1e5f);
+		// (everything: living things and ropes too, never the static ones: a
+		// query of them makes the level's on-demand placeholders physical)
+		const int types = ent_sleeping_rigid | ent_rigid | (everything ? ent_living | ent_independent : 0);
+		int n = pWorld->GetEntitiesInBox(-big, big, ppList, types, (int)s_list.size());
+		if (n > (int)s_list.size())
+		{
+			s_list.resize(n + 1024);
+			ppList = &s_list[0];
+			n = pWorld->GetEntitiesInBox(-big, big, ppList, types, (int)s_list.size());
+		}
+		if (ppList != &s_list[0])
+			return;    // (not filled into ours: not safe to walk)
+		n = min(n, (int)s_list.size());
+		for (int i = 0; i < n; ++i)
+		{
+			IPhysicalEntity* pPhys = ppList[i];
+			if (!pPhys)
+				continue;
+			pe_params_foreign_data fd;
+			if (!pPhys->GetParams(&fd) || fd.iForeignData != PHYS_FOREIGN_ID_ENTITY || !fd.pForeignData || live.count(fd.pForeignData))
+				continue;
+			pe_params_foreign_data clear;
+			clear.pForeignData = 0;
+			clear.iForeignData = -1;
+			pPhys->SetParams(&clear, 1);    // (at once: a queued change would come after the next event)
+			if (++s_danglingCleared <= 20)
+			{
+				char what[256];
+				CoopAI::DescribePhysical(pPhys, what, sizeof(what));
+				CryLogAlways("[CoopSave] after the load a physical thing (type %d) still belonged to a deleted entity: let go of it (%s)", pPhys->GetType(), what);
+			}
+		}
+	}
+
+	void Settle()
+	{
+		if (s_settleUntil < 0.0f)
+			return;
+		if (s_shieldUntil >= 0.0f && gEnv->pTimer->GetAsyncCurTime() > s_shieldUntil)
+		{
+			s_shieldUntil = -1.0f;
+			if (ICVar* pShield = gEnv->pConsole->GetCVar("coop_load_shield"))
+				pShield->Set(0);
+		}
+		const float now = gEnv->pTimer->GetAsyncCurTime();
+		if (now > s_settleUntil)
+		{
+			if (s_settleSlowed > 0)
+				CryLogAlways("[CoopSave] the 10 s after the load are over: %d things were slowed down", s_settleSlowed);
+			if (s_danglingCleared > 0)
+				CryLogAlways("[CoopSave] the 10 s after the load are over: %d physical things of deleted entities let go of", s_danglingCleared);
+			s_danglingCleared = 0;
+			s_settleUntil = -1.0f;
+			s_settleTold.clear();
+			s_settleSlowed = 0;
+			return;
+		}
+		if (now < s_settleAt)
+			return;
+		s_settleAt = now + 0.05f;
+		const float MAX_SPEED = 20.0f, MIN_MASS = 10.0f, RADIUS = 80.0f;
+		IActorIteratorPtr pActors = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+		std::set<IPhysicalEntity*> seen;
+		while (IActor* pPlayer = pActors->Next())
+		{
+			if (!pPlayer->IsPlayer())
+				continue;
+			const Vec3 at = pPlayer->GetEntity()->GetWorldPos();
+			// (into a list of its own, as ClearDanglingPhysics)
+			static std::vector<IPhysicalEntity*> s_box(4096);
+			IPhysicalEntity** ppList = &s_box[0];
+			int n = gEnv->pPhysicalWorld->GetEntitiesInBox(at - Vec3(RADIUS), at + Vec3(RADIUS), ppList, ent_rigid | ent_sleeping_rigid, (int)s_box.size());
+			if (ppList != &s_box[0])
+				continue;
+			n = min(n, (int)s_box.size());
+			for (int i = 0; i < n; ++i)
+			{
+				IPhysicalEntity* pPhys = ppList[i];
+				if (!pPhys || pPhys->GetType() != PE_RIGID || !seen.insert(pPhys).second)
+					continue;
+				pe_status_dynamics dyn;
+				if (!pPhys->GetStatus(&dyn) || dyn.mass < MIN_MASS)
+					continue;
+				const float speed = dyn.v.GetLength();
+				if (speed <= MAX_SPEED)
+					continue;
+				// no vehicles: a helicopter, a VTOL, a boat or a hovercraft is a
+				// rigid body too (only wheeled ones are not), and flies or sails
+				// faster than this (the review, 2026-10-15)
+				IEntity* pEntity = gEnv->pEntitySystem->GetEntityFromPhysics(pPhys);
+				if (pEntity && g_pGame->GetIGameFramework()->GetIVehicleSystem()->GetVehicle(pEntity->GetId()))
+					continue;
+				pe_action_set_velocity v;
+				v.v = dyn.v * (MAX_SPEED / speed);
+				v.w = dyn.w.GetLength() > 6.0f ? dyn.w * (6.0f / dyn.w.GetLength()) : dyn.w;
+				pPhys->Action(&v);
+				++s_settleSlowed;
+				const EntityId id = pEntity ? pEntity->GetId() : 0;
+				if (s_settleTold.insert(id).second && s_settleTold.size() <= 20)
+				{
+					const Vec3 p = pEntity ? pEntity->GetWorldPos() : dyn.centerOfMass;
+					CryLogAlways("[CoopBug] after the load %s (%s, %u, %.0f kg) flew at %.0f m/s at %.0f %.0f %.0f: slowed to %.0f (%.1f s after the load)",
+						pEntity ? pEntity->GetName() : "a physical thing", pEntity ? pEntity->GetClass()->GetName() : "-", id, dyn.mass, speed,
+						p.x, p.y, p.z, MAX_SPEED, now - (s_settleUntil - 10.0f));
+				}
+			}
+		}
+	}
+}
+
+void CoopSave::ClearDanglingPhysics(bool everything)
+{
+	if (gEnv->bServer)
+		ClearDanglingPhysicsImpl(everything);
+}
+
+void CoopSave::AfterFrameworkUpdate()
+{
+	// (entities are deleted in the framework's update, and the physics
+	// events of the next frame come before this module's update: checked
+	// here too)
+	// (the first 3 frames after the load, then once a second: a sweep of the
+	// level's moving things costs a few ms)
+	if (gEnv->bServer && s_settleUntil >= 0.0f)
+	{
+		const float now = gEnv->pTimer->GetAsyncCurTime();
+		if (s_sweepFrames < 3 || now >= s_sweepAt)
+		{
+			++s_sweepFrames;
+			s_sweepAt = now + 1.0f;
+			ClearDanglingPhysicsImpl(false);
+		}
+	}
+}
+
 void CoopSave::Update(float frameTime)
 {
 	if (!g_pGame)
 		return;
 	UpdateContinue();
+	if (gEnv->bServer && gEnv->pPhysicalWorld)
+		Settle();
 	if (!gEnv->bServer || s_readyLevel.empty())
 		return;
 	IGameFramework* pFramework = g_pGame->GetIGameFramework();

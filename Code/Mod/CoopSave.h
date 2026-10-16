@@ -15,6 +15,11 @@ namespace CoopSave
 {
 	void Init();                                  // console variables and commands
 	void Update(float frameTime);                 // server: pending checkpoint / pending load
+	// after the framework's update (entities deleted): physics of deleted entities let go of, while the world settles after a load
+	void AfterFrameworkUpdate();
+	// a physical thing whose entity is gone loses that pointer (after loads);
+	// everything: living things and ropes too, not only the things that move
+	void ClearDanglingPhysics(bool everything = false);
 	void OnLoadingStart(const char* levelName);   // any level starts loading
 	void OnLevelReady(const char* levelName);     // coop server: the level is loaded
 

@@ -8,6 +8,7 @@
 #include "StdAfx.h"
 #include <StringUtils.h>
 #include "CoopAgent.h"
+#include "project.h"
 #include "CoopAI.h"
 #include "Game.h"
 #include "GameActions.h"
@@ -488,6 +489,14 @@ namespace
 	}
 
 	// the enemy to fight: the ordered one, or the nearest one in sight
+	// enemies the gun cannot reach for now (seen, but its line of fire runs
+	// into a wall, a rock): left alone a while, another one is taken
+	std::map<EntityId, float> s_noLineUntil;       // from a vehicle's gun
+	std::map<EntityId, float> s_footNoLineUntil;   // on foot (a wall between them for the gun is none on foot)
+	EntityId s_footBlockedEnemy = 0;     // on foot: its shots at him blocked, since
+	float s_footBlockedSince = -1.0f;
+	float s_footBlockedLastAt = -100.0f;
+
 	EntityId PickEnemy(CPlayer* pMe, const Vec3& eye, float range)
 	{
 		if (s_bot.order == eO_Attack && !s_bot.target.empty())
@@ -498,7 +507,10 @@ namespace
 		// the one it fights stays its target while it is alive and was seen
 		// a moment ago (a branch passing between them is no reason to turn
 		// to another one and back)
-		if (IActor* pCurrent = s_bot.enemy ? ActorOf(s_bot.enemy) : 0)
+		std::map<EntityId, float>& noLines = pMe->GetLinkedVehicle() ? s_noLineUntil : s_footNoLineUntil;
+		std::map<EntityId, float>::iterator noLine = noLines.find(s_bot.enemy);
+		const bool currentNoLine = noLine != noLines.end() && Now() < noLine->second;
+		if (IActor* pCurrent = s_bot.enemy && !currentNoLine ? ActorOf(s_bot.enemy) : 0)
 		{
 			const Vec3 aim = AimPoint(pCurrent->GetEntity());
 			if (Hostile(pCurrent) && aim.GetDistance(eye) < range)
@@ -515,6 +527,9 @@ namespace
 		while (IActor* pActor = it->Next())
 		{
 			if (!Hostile(pActor))
+				continue;
+			std::map<EntityId, float>::const_iterator skipIt = noLines.find(pActor->GetEntityId());
+			if (skipIt != noLines.end() && Now() < skipIt->second)
 				continue;
 			const Vec3 aim = AimPoint(pActor->GetEntity());
 			const float d = aim.GetDistance(eye);
@@ -1655,7 +1670,24 @@ namespace
 			if (hit.pCollider == pVehicle->GetEntity()->GetPhysics())
 				return true;
 		// the hit is right at him (his weapon, a part of him)
-		return hit.pt.GetDistance(aim) < 0.8f;
+		if (hit.pt.GetDistance(aim) < 0.8f)
+			return true;
+		// another enemy in the way: the shot hits an enemy all the same (in a
+		// crowd of soldiers it held its fire for minutes, 2026-10-15)
+		IEntity* pHit = hit.pCollider ? gEnv->pEntitySystem->GetEntityFromPhysics(hit.pCollider) : 0;
+		IActor* pHitActor = pHit ? g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(pHit->GetId()) : 0;
+		if (pHitActor && Hostile(pHitActor))
+			return true;
+		// testing (coop_test_shottrace 1): what is in the line of fire
+		static float s_footBlockLogAt = 0.0f;
+		static ICVar* pShotTrace = gEnv->pConsole->GetCVar("coop_test_shottrace");
+		if (pShotTrace && pShotTrace->GetIVal() && Now() >= s_footBlockLogAt)
+		{
+			s_footBlockLogAt = Now() + 1.0f;
+			CryLogAlways("[CoopAgent] on foot at %s, the line of fire blocked %.1f m off (of %.0f) by %s", pEnemy->GetEntity()->GetName(), hit.dist,
+				aim.GetDistance(eye), pHit ? pHit->GetName() : hit.pCollider && hit.pCollider->GetType() == PE_STATIC ? "something static" : "terrain or nothing known");
+		}
+		return false;
 	}
 
 	// fighting from cover: to it, then up shooting a while, down a while
@@ -1704,15 +1736,50 @@ namespace
 	// at a vehicle's gun: the turret follows the view, turned as with the
 	// mouse (the vehicle's rotate actions; how much a unit turns it and which
 	// way are found out as it goes), firing in bursts when on an enemy with
-	// nothing else in the way
+	// nothing else in the way. Which way a rotate action turns it is learnt
+	// from how the view moved in the vehicle's own frame after the last one:
+	// from the error alone a vehicle the host steered turned the view too, the
+	// way was taken for wrong again and again and it never came onto anyone
+	// (2026-10-15: "0 bursts fired, 102 turning to him", the error growing)
 	void VehicleGunner(CPlayer* pMe, IVehicle* pVehicle)
 	{
 		static float s_signYaw = -1.0f, s_signPitch = -1.0f;
-		static float s_lastYawErr = 0.0f, s_lastPitchErr = 0.0f;
-		static int s_worseYaw = 0, s_worsePitch = 0;
+		static int s_voteYaw = 0, s_votePitch = 0;
+		static float s_lastLocalYaw = 0.0f, s_lastLocalPitch = 0.0f, s_lastCmdYaw = 0.0f, s_lastCmdPitch = 0.0f;
+		static EntityId s_gunVehicle = 0;
 		const CCamera& cam = gEnv->pSystem->GetViewCamera();
 		const Vec3 eye = cam.GetPosition();
 		const Vec3 look = cam.GetViewdir().GetNormalizedSafe(Vec3(0, 1, 0));
+		// the view in the vehicle's frame: what the rotate actions move
+		const Vec3 local = Matrix33(pVehicle->GetEntity()->GetWorldTM()).GetInverted() * look;
+		const float localYaw = Yaw(local), localPitch = Pitch(local);
+		if (pVehicle->GetEntityId() != s_gunVehicle)
+		{
+			s_gunVehicle = pVehicle->GetEntityId();
+			s_voteYaw = s_votePitch = 0;
+			s_lastCmdYaw = s_lastCmdPitch = 0.0f;
+		}
+		else
+		{
+			// the last rotate action moved the view this way: that is the way
+			// it turns (a few in a row decide, so a bump of the vehicle does not)
+			const float dYaw = Wrap(localYaw - s_lastLocalYaw), dPitch = localPitch - s_lastLocalPitch;
+			if (fabsf(s_lastCmdYaw) > 1.0f && fabsf(dYaw) > 0.001f)
+			{
+				s_voteYaw = clamp_tpl(s_voteYaw + (dYaw * s_lastCmdYaw > 0.0f ? 1 : -1), -4, 4);
+				if (s_voteYaw >= 3 || s_voteYaw <= -3)
+					s_signYaw = s_voteYaw > 0 ? 1.0f : -1.0f;
+			}
+			if (fabsf(s_lastCmdPitch) > 1.0f && fabsf(dPitch) > 0.001f)
+			{
+				s_votePitch = clamp_tpl(s_votePitch + (dPitch * s_lastCmdPitch > 0.0f ? 1 : -1), -4, 4);
+				if (s_votePitch >= 3 || s_votePitch <= -3)
+					s_signPitch = s_votePitch > 0 ? 1.0f : -1.0f;
+			}
+		}
+		s_lastLocalYaw = localYaw;
+		s_lastLocalPitch = localPitch;
+		s_lastCmdYaw = s_lastCmdPitch = 0.0f;
 		EntityId enemy = PickEnemy(pMe, eye, 150.0f);
 		IActor* pEnemy = ActorOf(enemy);
 		if (enemy != s_bot.enemy)
@@ -1733,42 +1800,51 @@ namespace
 		const Vec3 want = (aim - eye).GetNormalizedSafe(look);
 		const float yawErr = Wrap(Yaw(want) - Yaw(look));
 		const float pitchErr = Pitch(want) - Pitch(look);
-		// a turn the wrong way (the error grows while turning): the other way
-		if (fabsf(yawErr) > fabsf(s_lastYawErr) + 0.002f && fabsf(s_lastYawErr) > 0.02f)
-		{
-			if (++s_worseYaw > 6)
-			{
-				s_signYaw = -s_signYaw;
-				s_worseYaw = 0;
-			}
-		}
-		else
-			s_worseYaw = 0;
-		if (fabsf(pitchErr) > fabsf(s_lastPitchErr) + 0.002f && fabsf(s_lastPitchErr) > 0.02f)
-		{
-			if (++s_worsePitch > 6)
-			{
-				s_signPitch = -s_signPitch;
-				s_worsePitch = 0;
-			}
-		}
-		else
-			s_worsePitch = 0;
-		s_lastYawErr = yawErr;
-		s_lastPitchErr = pitchErr;
 		static float s_traceAt = 0.0f;
 		if (Now() >= s_traceAt)
 		{
 			s_traceAt = Now() + 1.0f;
-			CryLogAlways("[CoopAgent] gun aim at %s: yaw off %.3f pitch off %.3f (signs %.0f %.0f), view (%.2f %.2f %.2f)",
-				pEnemy->GetEntity()->GetName(), yawErr, pitchErr, s_signYaw, s_signPitch, look.x, look.y, look.z);
+			CryLogAlways("[CoopAgent] gun aim at %s: yaw off %.3f pitch off %.3f (signs %.0f %.0f, votes %d %d), view (%.2f %.2f %.2f)",
+				pEnemy->GetEntity()->GetName(), yawErr, pitchErr, s_signYaw, s_signPitch, s_voteYaw, s_votePitch, look.x, look.y, look.z);
 		}
-		const float gain = 120.0f;
-		if (fabsf(yawErr) > 0.005f)
-			pVehicle->OnAction(eVAI_RotateYaw, eAAM_OnPress, s_signYaw * clamp_tpl(yawErr * gain, -25.0f, 25.0f), pMe->GetEntityId());
-		if (fabsf(pitchErr) > 0.005f)
-			pVehicle->OnAction(eVAI_RotatePitch, eAAM_OnPress, s_signPitch * clamp_tpl(pitchErr * gain, -25.0f, 25.0f), pMe->GetEntityId());
-		// on target, seen, nothing else in the way (its own vehicle aside)
+		// proportional, and what it kept being off added up: while the host
+		// steers (the vehicle turning all the time) the turret has to turn
+		// all the time too, and the error alone left it a steady 0.09 off at
+		// 20 degrees a second, more than it fires at. A new enemy starts it
+		// afresh; it shrinks when the error changes side (no overshooting)
+		static float s_sumYaw = 0.0f, s_sumPitch = 0.0f;
+		static EntityId s_sumEnemy = 0;
+		if (s_sumEnemy != enemy)
+		{
+			s_sumEnemy = enemy;
+			s_sumYaw = s_sumPitch = 0.0f;
+		}
+		const float dt = clamp_tpl(gEnv->pTimer->GetFrameTime(), 0.0f, 0.2f);
+		const float gain = 120.0f, sumGain = 150.0f, maxCmd = 25.0f;
+		if (s_sumYaw * yawErr < 0.0f)
+			s_sumYaw *= 0.5f;
+		if (s_sumPitch * pitchErr < 0.0f)
+			s_sumPitch *= 0.5f;
+		s_sumYaw = clamp_tpl(s_sumYaw + yawErr * dt, -maxCmd / sumGain, maxCmd / sumGain);
+		s_sumPitch = clamp_tpl(s_sumPitch + pitchErr * dt, -maxCmd / sumGain, maxCmd / sumGain);
+		if (fabsf(yawErr) > 0.005f || fabsf(s_sumYaw) > 0.01f)
+		{
+			s_lastCmdYaw = s_signYaw * clamp_tpl(yawErr * gain + s_sumYaw * sumGain, -maxCmd, maxCmd);
+			pVehicle->OnAction(eVAI_RotateYaw, eAAM_OnPress, s_lastCmdYaw, pMe->GetEntityId());
+		}
+		if (fabsf(pitchErr) > 0.005f || fabsf(s_sumPitch) > 0.01f)
+		{
+			s_lastCmdPitch = s_signPitch * clamp_tpl(pitchErr * gain + s_sumPitch * sumGain, -maxCmd, maxCmd);
+			pVehicle->OnAction(eVAI_RotatePitch, eAAM_OnPress, s_lastCmdPitch, pMe->GetEntityId());
+		}
+		// on target, seen, nothing else in the way (its own vehicle aside). The
+		// line of fire straight at him: on target the gun points there, and the
+		// view a little off (it always is, a few hundredths) ran into the corner
+		// of a house half way at 140 m: the shot was always held, the enemy kept
+		// (2026-10-15). Still blocked for 2 s: another enemy for a while
+		static float s_blockedSince = -1.0f;
+		static float s_blockedLastAt = -100.0f;   // the last blocked look at him
+		static EntityId s_blockedEnemy = 0;
 		const bool onTarget = fabsf(yawErr) + fabsf(pitchErr) < 0.05f;
 		bool clear = false;
 		if (onTarget)
@@ -1780,14 +1856,44 @@ namespace
 			if (IPhysicalEntity* p = pVehicle->GetEntity()->GetPhysics())
 				skip[n++] = p;
 			ray_hit hit;
-			if (FirstBlock(eye, look * (aim.GetDistance(eye) + 2.0f), ent_all, skip, n, hit))
+			clear = true;
+			if (FirstBlock(eye, (aim - eye).GetNormalizedSafe(look) * (aim.GetDistance(eye) + 2.0f), ent_all, skip, n, hit))
 			{
 				clear = hit.pCollider == pEnemy->GetEntity()->GetPhysics() || hit.pt.GetDistance(aim) < 1.0f;
 				if (IVehicle* pTheirs = pEnemy->GetLinkedVehicle())
 					clear = clear || hit.pCollider == pTheirs->GetEntity()->GetPhysics();
+				// testing (coop_test_shottrace 1): what is in the line of fire
+				static float s_blockAt = 0.0f;
+				static ICVar* pShotTrace = gEnv->pConsole->GetCVar("coop_test_shottrace");
+				if (!clear && pShotTrace && pShotTrace->GetIVal() && Now() >= s_blockAt)
+				{
+					s_blockAt = Now() + 1.0f;
+					IEntity* pHit = hit.pCollider ? gEnv->pEntitySystem->GetEntityFromPhysics(hit.pCollider) : 0;
+					CryLogAlways("[CoopAgent] gun on %s, the line of fire blocked %.1f m off (of %.0f) by %s", pEnemy->GetEntity()->GetName(), hit.dist,
+						aim.GetDistance(eye), pHit ? pHit->GetName() : hit.pCollider && hit.pCollider->GetType() == PE_STATIC ? "something static" : "terrain or nothing known");
+				}
 			}
 			if (!clear)
+			{
 				++s_bot.heldFire;
+				// (blocked for 2 s while on and about him: the aim leaves him and
+				// comes back all the time, a moment off him is no clear shot; a
+				// second without a blocked look starts it again)
+				if (s_blockedEnemy != enemy || s_blockedSince < 0.0f || Now() - s_blockedLastAt > 1.0f)
+				{
+					s_blockedEnemy = enemy;
+					s_blockedSince = Now();
+				}
+				else if (Now() - s_blockedSince > 2.0f)
+				{
+					s_noLineUntil[enemy] = Now() + 8.0f;
+					s_blockedSince = -1.0f;
+					Event("no line of fire from %s's gun at %s: another enemy", pVehicle->GetEntity()->GetName(), pEnemy->GetEntity()->GetName());
+				}
+				s_blockedLastAt = Now();
+			}
+			else
+				s_blockedSince = -1.0f;
 		}
 		else
 			++s_bot.turning;
@@ -1851,12 +1957,30 @@ namespace
 		}
 		else if (seen && off < 0.06f && clip != 0 && !LineOfFire(pMe, eye, pEnemy))
 		{
-			// something else in the way (a wall, a crate, a fence): no shot
+			// something else in the way (a wall, a crate, a fence): no shot;
+			// for 2 s: another enemy (or none: then it does what it would
+			// without one, a revive say), this one a while later again
 			Fire(pMe, false);
 			++s_bot.heldFire;
+			// (blocked looks at him without a second's gap: two blocked frames
+			// 2 s apart with him out of sight between are no blocked line)
+			const EntityId id = pEnemy->GetEntityId();
+			if (s_footBlockedEnemy != id || s_footBlockedSince < 0.0f || Now() - s_footBlockedLastAt > 1.0f)
+			{
+				s_footBlockedEnemy = id;
+				s_footBlockedSince = Now();
+			}
+			else if (Now() - s_footBlockedSince > 2.0f)
+			{
+				s_footNoLineUntil[id] = Now() + 8.0f;
+				s_footBlockedSince = -1.0f;
+				Event("no line of fire at %s: another enemy", pEnemy->GetEntity()->GetName());
+			}
+			s_footBlockedLastAt = Now();
 		}
 		else if (seen && off < 0.06f && clip != 0)
 		{
+			s_footBlockedSince = -1.0f;
 			// bursts: held a while, then let go (single shot weapons fire again)
 			const float now = Now();
 			if (now >= s_bot.pauseUntil && now < s_bot.burstUntil)
@@ -2451,8 +2575,10 @@ namespace
 		if (!pLeader)
 			pLeader = HostPlayer();
 
-		// ---- reviving comes first (unless ordered to stay)
-		IActor* pDowned = (s_bot.order == eO_Hold || s_bot.order == eO_Goto) ? 0 : DownedTeammate(pMe, pos, 80.0f);
+		// ---- reviving comes first (unless ordered to stay), however far: the
+		// host down 200 m off (it had been put back where it got into a car)
+		// and only 80 m looked at, it stood there (2026-10-15)
+		IActor* pDowned = (s_bot.order == eO_Hold || s_bot.order == eO_Goto) ? 0 : DownedTeammate(pMe, pos, 2000.0f);
 		if (pDowned && !pMyVehicle)
 		{
 			// it makes its way there (around walls and rocks, by the host's
@@ -2479,7 +2605,11 @@ namespace
 				s_bot.downedSince = Now();
 			}
 			ChooseWeapon(pMe, false);
-			EntityId enemy = s_bot.fireAtWill ? PickEnemy(pMe, eye, d > 3.0f ? 60.0f : 18.0f) : 0;
+			// (hit a moment ago: whoever it can see within 80 m, so it shoots
+			// back at a rifleman 25 m off instead of keeping down at the body
+			// while he hits it, the review, 2026-10-16)
+			const bool hitLately = Now() - s_bot.hitAt < 3.0f;
+			EntityId enemy = s_bot.fireAtWill ? PickEnemy(pMe, eye, hitLately ? 80.0f : d > 3.0f ? 60.0f : 18.0f) : 0;
 			IActor* pEnemy = ActorOf(enemy);
 			if (enemy != s_bot.enemy)
 			{
@@ -2508,6 +2638,8 @@ namespace
 				s_bot.reachFailSince = -1;
 			const bool reviving = s_bot.useHeld && s_bot.useFor == pDowned->GetEntityId() && CoopRevive::IsBeingRevived(pDowned->GetEntityId());
 			const bool enemyClose = pEnemy && Dist2D(pEnemy->GetEntity()->GetWorldPos(), pos) < 10.0f;
+			// under fire: hit a moment ago (it cannot tell a miss)
+			const bool underFire = Now() - s_bot.hitAt < 3.0f;
 			const bool atBody = reach || (d <= 1.6f && s_bot.reachFailSince >= 0 && Now() - s_bot.reachFailSince > 8.0f) || (reviving && d <= 2.6f);
 			if (pEnemy && !(reviving && atBody && !enemyClose))
 				HoldUse(pMe, false, 0);
@@ -2526,6 +2658,16 @@ namespace
 				if (!FightFromCover(pMe, pos, pEnemy))
 					Dodge(pos, pEnemy);
 				s_bot.doing.Format("clearing the way to %s (%.0f m): fighting %s", pDowned->GetEntity()->GetName(), d, pEnemy->GetEntity()->GetName());
+			}
+			else if (!atBody && !pEnemy && underFire)
+			{
+				// shot at by someone it cannot shoot back at: running to the body
+				// now would get it killed too; down, until the shots stop
+				s_bot.reviveSince = -1;
+				s_ctl.moveDir.zero();
+				s_ctl.crouch = true;
+				Fire(pMe, false);
+				s_bot.doing.Format("under fire on the way to %s (%.0f m): down until it stops", pDowned->GetEntity()->GetName(), d);
 			}
 			else if (!atBody)
 			{
@@ -2550,6 +2692,20 @@ namespace
 				s_ctl.crouch = true;
 				FightStep(pMe, eye, pEnemy);
 				s_bot.doing.Format("at %s, fighting %s first", pDowned->GetEntity()->GetName(), pEnemy->GetEntity()->GetName());
+			}
+			else if (underFire)
+			{
+				// shot at and nobody it can shoot back at (or they are out of its
+				// line of fire): no revive under fire (a revive under way stops
+				// too), down by the body until the shots stop. Not shot at: it
+				// revives, enemies about or not (those it cannot hit and who do
+				// not shoot at it are no reason to wait)
+				HoldUse(pMe, false, 0);
+				s_ctl.moveDir.zero();
+				s_ctl.crouch = true;
+				Fire(pMe, false);
+				s_bot.reviveSince = -1;
+				s_bot.doing.Format("at %s, under fire: down until it stops", pDowned->GetEntity()->GetName());
 			}
 			else
 			{
@@ -2638,6 +2794,33 @@ namespace
 			if (s_bot.doing.empty() || s_bot.doing.find("vehicle") == string::npos)
 				s_bot.doing.Format("riding in %s", pMyVehicle->GetEntity()->GetName());
 			return;
+		}
+
+		// ---- the one it follows far off for a while (he drove or ran away
+		// while it fought or picked something up here): put next to him; the
+		// fight here is not his. It stayed on the beach while the host was
+		// 350 m off in the autotester's game of 2026-10-16 (it catches up only
+		// when it walks after him)
+		{
+			static float s_leaderFarSince = -1.0f;
+			const bool farOff = follows && pLeader && pLeader->GetHealth() > 0 && !pLeader->GetLinkedVehicle()
+				&& Dist2D(pLeader->GetEntity()->GetWorldPos(), pos) > 120.0f;
+			if (!farOff)
+				s_leaderFarSince = -1.0f;
+			else if (s_leaderFarSince < 0.0f)
+				s_leaderFarSince = Now();
+			else if (Now() - s_leaderFarSince > 10.0f)
+			{
+				Event("%s %.0f m off for 10 s: put next to him", pLeader->GetEntity()->GetName(), Dist2D(pLeader->GetEntity()->GetWorldPos(), pos));
+				Ask(1, pLeader->GetEntity()->GetName());
+				s_leaderFarSince = -1.0f;
+				// what it did there is over (or it ran back for the gun it
+				// was picking up, to the cover it fell back to, the review)
+				s_bot.loot = 0;
+				s_bot.retreating = false;
+				s_bot.haveCover = false;
+				s_bot.path.clear();
+			}
 		}
 
 		// ---- fighting
@@ -3175,18 +3358,26 @@ namespace
 		return (float)((b - a) / 10000000.0);
 	}
 
+	// %LOCALAPPDATA%\CrysisCoop: the companion's profile and files; the
+	// autotester's games have their own (COOP_AUTOTEST_DIR), so a test never
+	// touches the player's companion nor ends it as a leftover
+	std::wstring CompanionBase()
+	{
+		wchar_t dir[MAX_PATH] = L"";
+		if (GetEnvironmentVariableW(L"COOP_AUTOTEST_DIR", dir, MAX_PATH) && dir[0])
+			return dir;
+		GetEnvironmentVariableW(L"LOCALAPPDATA", dir, MAX_PATH);
+		return std::wstring(dir) + L"\\CrysisCoop";
+	}
+
 	std::wstring ReadyFile()
 	{
-		wchar_t local[MAX_PATH] = L"";
-		GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
-		return std::wstring(local) + L"\\CrysisCoop\\companion\\host_ready";
+		return CompanionBase() + L"\\companion\\host_ready";
 	}
 
 	std::wstring PortFile()
 	{
-		wchar_t local[MAX_PATH] = L"";
-		GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
-		return std::wstring(local) + L"\\CrysisCoop\\companion\\agent.port";
+		return CompanionBase() + L"\\companion\\agent.port";
 	}
 
 	void UpdateBridge()
@@ -3417,9 +3608,7 @@ namespace
 	// companion left over from before (see StopLeftover)
 	std::wstring PidFile()
 	{
-		wchar_t local[MAX_PATH] = L"";
-		GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
-		return std::wstring(local) + L"\\CrysisCoop\\companion\\companion.pid";
+		return CompanionBase() + L"\\companion\\companion.pid";
 	}
 
 	void WritePidFile()
@@ -3957,10 +4146,12 @@ namespace
 			if (slash != std::wstring::npos)
 				root.resize(slash);
 		}
-		wchar_t local[MAX_PATH] = L"";
-		GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
-		std::wstring profile = std::wstring(local[0] ? local : root.c_str()) + L"\\CrysisCoop\\companion";
-		CreateDirectoryW((std::wstring(local[0] ? local : root.c_str()) + L"\\CrysisCoop").c_str(), 0);
+		// (no LOCALAPPDATA: in the game's folder)
+		std::wstring base = CompanionBase();
+		if (base == L"\\CrysisCoop")
+			base = root + L"\\CrysisCoop";
+		const std::wstring profile = base + L"\\companion";
+		CreateDirectoryW(base.c_str(), 0);
 		CreateDirectoryW(profile.c_str(), 0);
 		PrepareCompanionConfig(profile);
 		ICVar* pPort = gEnv->pConsole->GetCVar("sv_port");
@@ -3972,12 +4163,18 @@ namespace
 		MultiByteToWideChar(CP_UTF8, 0, tail, -1, wtail, 512);
 		// the host's own mode (a server refuses a client whose -devmode differs)
 		const bool devmode = wcsstr(GetCommandLineW(), L"-devmode") != 0;
-		std::wstring line = L"\"" + std::wstring(exe) + L"\" -mod " + mod + (devmode ? L" -devmode" : L"") + L" -userpath \"" + profile + L"\" -logfile companion.log" + wtail;
+		// the autotester (tests\autotest) sets COOP_AUTOTEST for its games:
+		// their companion's log and command file are its own, the player's
+		// companion.log stays as his last game left it
+		wchar_t autotest[8] = L"";
+		const bool isAutotest = GetEnvironmentVariableW(L"COOP_AUTOTEST", autotest, 8) > 0 && autotest[0] != L'0';
+		std::wstring line = L"\"" + std::wstring(exe) + L"\" -mod " + mod + (devmode ? L" -devmode" : L"") + L" -userpath \"" + profile + L"\" -logfile "
+			+ (isAutotest ? L"at_companion.log" : L"companion.log") + wtail;
 		// testing: the host runs the lines of a file as console commands, the
 		// companion those of its own
 		ICVar* pCmdFile = gEnv->pConsole->GetCVar("coop_test_cmdfile");
 		if (pCmdFile && pCmdFile->GetString()[0])
-			line += L" +coop_test_cmdfile companion_cmd.txt";
+			line += isAutotest ? L" +coop_test_cmdfile at_companion_cmd.txt" : L" +coop_test_cmdfile companion_cmd.txt";
 		std::vector<wchar_t> buf(line.begin(), line.end());
 		buf.push_back(0);
 		STARTUPINFOW si = {};
@@ -4862,11 +5059,20 @@ namespace
 	void CmdTestEnter(IConsoleCmdArgs* pArgs)
 	{
 		IActor* pHost = g_pGame->GetIGameFramework()->GetClientActor();
-		// coop_test_enter out: the host gets out
+		// coop_test_enter out [m/s]: the host gets out (jumps out of it going
+		// that fast forward)
 		if (pHost && pArgs->GetArgCount() > 1 && !stricmp(pArgs->GetArg(1), "out"))
 		{
 			IVehicle* pIn = pHost->GetLinkedVehicle();
 			IVehicleSeat* pMine = pIn ? pIn->GetSeatForPassenger(pHost->GetEntityId()) : 0;
+			IPhysicalEntity* pPhys = pIn ? pIn->GetEntity()->GetPhysics() : 0;
+			if (pPhys && pArgs->GetArgCount() > 2)
+			{
+				pe_action_set_velocity v;
+				v.v = pIn->GetEntity()->GetWorldTM().GetColumn1().GetNormalizedSafe(Vec3(0, 1, 0)) * (float)atof(pArgs->GetArg(2));
+				pPhys->Action(&v);
+				CryLogAlways("[CoopTest] %s set going %.1f m/s", pIn->GetEntity()->GetName(), v.v.GetLength());
+			}
 			const bool ok = pMine && pMine->Exit(false, true);
 			CryLogAlways("[CoopTest] the host gets out: %s", ok ? "ok" : "not in a vehicle");
 			return;
@@ -4963,6 +5169,13 @@ string CoopAgent::EngineState(IVehicle* pVehicle)
 
 void CoopAgent::Init()
 {
+	// which build runs, for whoever reads the log (the autotester checks it
+	// is the one it put there)
+	{
+		char dll[MAX_PATH] = "";
+		GetModuleFileNameA((HMODULE)g_hInst, dll, MAX_PATH);
+		CryLogAlways("[CoopBuild] version=%s built=%s_%s dll=%s", PROJECT_VERSION, __DATE__, __TIME__, dll);
+	}
 	s_pCompanion = gEnv->pConsole->RegisterInt("coop_companion", 0, VF_DUMPTODISK,
 		"Crysis Coop: 1 = the host's game starts an AI companion, a second player played by the game (or by an AI agent through MCP)");
 	s_pAgent = gEnv->pConsole->RegisterInt("coop_agent", 0, 0, "Crysis Coop: 1 = this game is the AI companion");
@@ -4998,6 +5211,7 @@ void CoopAgent::Init()
 	gEnv->pConsole->AddCommand("coop_test_physvars", CmdTestPhysVars, 0, "Crysis Coop testing: coop_test_physvars [multiplayer|breakscale|playerscanbreak value]: the physics settings that decide breaking");
 	gEnv->pConsole->AddCommand("coop_test_vehdamage", CmdTestVehDamage, 0, "Crysis Coop testing: coop_test_vehdamage [vehicle]: a vehicle's damage, whole and by component");
 	gEnv->pConsole->AddCommand("coop_test_levelmodels", CmdTestLevelModels, 0, "Crysis Coop testing: coop_test_levelmodels: the level's own brush models found / default balls");
+	gEnv->pConsole->RegisterInt("coop_test_shottrace", 0, 0, "Crysis Coop testing: log the players' shots from vehicle guns (where from, at what, what the line meets)");
 	gEnv->pConsole->AddCommand("coop_test_enter", CmdTestEnter, 0, "Crysis Coop testing: coop_test_enter <vehicle> <seat id>: the host's player gets in (server)");
 	gEnv->pConsole->AddCommand("coop_test_path", CmdTestPath, 0,
 		"Crysis Coop testing: coop_test_path <entity name> logs the AI navigation's way from the host's player to it (server)");

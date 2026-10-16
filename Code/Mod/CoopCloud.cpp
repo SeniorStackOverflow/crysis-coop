@@ -318,7 +318,10 @@ namespace
 				}
 				break;
 			case eJ_List:
-				s_list = list;
+				// (the worker keeps no string of s_list once the lock is gone:
+				// CryString counts its users without a lock, see ListStatus)
+				s_list.swap(list);
+				list.clear();
 				s_listStatus = error ? CoopCloud::eS_Failed : CoopCloud::eS_Done;
 				if (error)
 					s_log.push_back(string("[CoopCloud] the list of saved campaigns is not available: ") + ErrorText(error));
@@ -342,7 +345,10 @@ namespace
 		CoopRelay::GetPlayerKey(s_key);
 		std::lock_guard<std::mutex> lock(s_lock);
 		s_url = CoopRelay::RelayUrl();
-		SJob job = { type, campaign, which, 0, GetTickCount() };
+		// (a copy of its own: the caller's string, e.g. the campaign of the
+		// checkpoint just saved, stays the main thread's; CryString counts its
+		// users without a lock, the review, 2026-10-16)
+		SJob job = { type, string(campaign.c_str()), which, 0, GetTickCount() };
 		s_jobs.push_back(job);
 		if (!s_thread.joinable())
 		{
@@ -414,7 +420,7 @@ void CoopCloud::Upload(const string& campaign, const std::vector<char>& blob)
 			return;
 		}
 		SUpload up = { blob, 1 };
-		s_uploads[campaign] = up;
+		s_uploads[string(campaign.c_str())] = up;    // (its own copy, as in Queue)
 	}
 	Queue(eJ_Upload, campaign, 0);
 }
@@ -433,7 +439,24 @@ CoopCloud::EStatus CoopCloud::ListStatus(std::vector<SCampaign>* pOut)
 {
 	std::lock_guard<std::mutex> lock(s_lock);
 	if (pOut && s_listStatus == eS_Done)
-		*pOut = s_list;
+	{
+		// (copies of their own: the worker's strings stay the worker's)
+		pOut->clear();
+		for (size_t i = 0; i < s_list.size(); ++i)
+		{
+			const SCampaign& from = s_list[i];
+			SCampaign c;
+			c.own = from.own;
+			c.stamp = from.stamp;
+			c.hasPrevious = from.hasPrevious;
+			c.id = from.id.c_str();
+			c.level = from.level.c_str();
+			c.checkpoint = from.checkpoint.c_str();
+			c.name = from.name.c_str();
+			c.host = from.host.c_str();
+			pOut->push_back(c);
+		}
+	}
 	return s_listStatus;
 }
 

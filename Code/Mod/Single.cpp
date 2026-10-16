@@ -22,6 +22,29 @@ History:
 #include "HUD/HUD.h"
 #include "HUD/HUDRadar.h"
 #include "WeaponSystem.h"
+#include "IViewSystem.h"
+
+// Crysis Coop: the game's own view now (the view system's: in the AI
+// companion's game, which draws nothing, the system camera stays at the
+// origin looking along y while weapons fire). False: none
+static bool CoopLiveView(Vec3& pos, Vec3& dir)
+{
+	IViewSystem* pViews = g_pGame ? g_pGame->GetIGameFramework()->GetIViewSystem() : 0;
+	IView* pView = pViews ? pViews->GetActiveView() : 0;
+	const SViewParams* pParams = pView ? pView->GetCurrentParams() : 0;
+	if (pParams && !pParams->position.IsZero(0.01f))
+	{
+		pos = pParams->position;
+		dir = pParams->rotation.GetColumn1().GetNormalizedSafe(Vec3(0, 1, 0));
+		return true;
+	}
+	const CCamera& cam = gEnv->pSystem->GetViewCamera();
+	if (cam.GetPosition().IsZero(0.01f))
+		return false;
+	pos = cam.GetPosition();
+	dir = cam.GetViewdir().GetNormalizedSafe(Vec3(0, 1, 0));
+	return true;
+}
 #include <IEntitySystem.h>
 #include "ISound.h"
 #include <IVehicleSystem.h>
@@ -1418,6 +1441,34 @@ bool CSingle::Shoot(bool resetAnimation, bool autoreload, bool noSound)
 	Vec3 dir = ApplySpread(GetFiringDir(hit, pos), GetSpread());
 	Vec3 vel = GetFiringVelocity(dir);
 
+	// Crysis Coop testing (coop_test_shottrace 1): a player's shot from a
+	// vehicle's gun, where from, at what, and what its line meets (the AI
+	// companion at a car's gun fired and never hit, 2026-10-15)
+	static ICVar* pShotTrace = gEnv->pConsole->GetCVar("coop_test_shottrace");
+	if (pShotTrace && pShotTrace->GetIVal() && m_pWeapon->GetHostId() && pActor && pActor->IsPlayer())
+	{
+		static float s_traceAt = 0.0f;
+		const float now = gEnv->pTimer->GetAsyncCurTime();
+		if (now >= s_traceAt)
+		{
+			s_traceAt = now + 0.5f;
+			IPhysicalEntity* pSkip[10];
+			const int nSkip = GetSkipEntities(m_pWeapon, pSkip, 10);
+			ray_hit line;
+			const int n = gEnv->pPhysicalWorld->RayWorldIntersection(pos, dir.GetNormalizedSafe() * 200.0f, ent_all, rwi_stop_at_pierceable | rwi_colltype_any, &line, 1, pSkip, nSkip);
+			IEntity* pMet = n > 0 && line.pCollider ? gEnv->pEntitySystem->GetEntityFromPhysics(line.pCollider) : 0;
+			IEntity* pProbable = bHit && rayhit.pCollider ? gEnv->pEntitySystem->GetEntityFromPhysics(rayhit.pCollider) : 0;
+			Vec3 viewPos(ZERO), viewDir(0, 1, 0);
+			const bool live = CoopLiveView(viewPos, viewDir);
+			CryLogAlways("[CoopShot] the game's view %s (%.1f %.1f %.1f) looking (%.2f %.2f %.2f)", live ? "at" : "unknown,", viewPos.x, viewPos.y, viewPos.z,
+				viewDir.x, viewDir.y, viewDir.z);
+			CryLogAlways("[CoopShot] %s, %s: from (%.1f %.1f %.1f) at the probable hit (%.1f %.1f %.1f, %s), dir (%.2f %.2f %.2f): its line meets %s at %.1f m",
+				pActor->GetEntity()->GetName(), m_pWeapon->GetEntity()->GetClass()->GetName(), pos.x, pos.y, pos.z, hit.x, hit.y, hit.z,
+				pProbable ? pProbable->GetName() : bHit ? "something" : "nothing", dir.x, dir.y, dir.z,
+				pMet ? pMet->GetName() : n > 0 ? "something without an entity" : "nothing within 200 m", n > 0 ? line.dist : 0.0f);
+		}
+	}
+
 	// Advanced aiming (VTOL Ascension)
 	if(m_fireparams.advanced_AAim)
 		m_pWeapon->AdvancedAssistAiming(m_fireparams.advanced_AAim_Range,pos,dir);
@@ -1732,16 +1783,33 @@ Vec3 CSingle::GetProbableHit(float range, bool *pbHit, ray_hit *pHit) const
   static IPhysicalEntity* pSkipEntities[10];
   int nSkip = GetSkipEntities(m_pWeapon, pSkipEntities, 10);
   
+  // Crysis Coop: the vehicle's gun aims at what its own player's view is on
+  // (the AI companion's own game: the vehicle gave (0, 2000, 0) and every
+  // bullet went into the ground 12 m off, wherever the gun pointed,
+  // 2026-10-15). A hit the vehicle gives more than 30 degrees off the view,
+  // or none at all, the view's then (it turns with the gun)
+  Vec3 viewPos(ZERO), viewDir(0, 1, 0);
+  const bool ownGunner = pActor && pActor->IsPlayer() && pActor->IsClient() && pActor->GetLinkedVehicle() && CoopLiveView(viewPos, viewDir);
+  bool fromView = false;
   IWeaponFiringLocator *pLocator = m_pWeapon->GetFiringLocator();      
   if (pLocator)
   {
     Vec3 hit;
     if (pLocator->GetProbableHit(m_pWeapon->GetEntityId(), this, hit))
-      return hit;
+    {
+      if (!ownGunner || (hit - viewPos).GetNormalizedSafe().Dot(viewDir) > 0.87f)
+        return hit;
+    }
+    fromView = ownGunner;
   }
   
   IMovementController * pMC = pActor ? pActor->GetMovementController() : 0;
-  if (pMC)
+  if (fromView)
+  {
+    pos = viewPos;
+    dir = range * viewDir;
+  }
+  else if (pMC)
   { 
     SMovementState info;
     pMC->GetMovementState(info);

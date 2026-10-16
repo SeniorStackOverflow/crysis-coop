@@ -3,3 +3,4 @@
 /.vs/
 /CMakeUserPresets.json
 /dist/
+__pycache__/
