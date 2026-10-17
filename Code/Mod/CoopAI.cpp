@@ -54,6 +54,11 @@
 
 namespace
 {
+	void CmdTestVehMirror(IConsoleCmdArgs* pArgs);
+}
+
+namespace
+{
 	ICVar* s_pDebugFlags = nullptr;
 	ICVar* s_pFlowMirror = nullptr;
 	void RegisterFlowInspector();
@@ -777,6 +782,7 @@ namespace
 		gEnv->pConsole->RegisterInt("coop_sound_voices", 64, 0,
 			"Crysis Coop: while more voices than this play, the less important new sounds (priority over 45, as in single player) do not start: FMOD mixes 64 at most, the others are not heard (0 = every sound starts)");
 		gEnv->pConsole->AddCommand("coop_sound_census", CmdSoundCensus, 0, "Crysis Coop: log the sounds the entities play now (playing, virtual, waiting for their data) and the most frequent ones");
+		gEnv->pConsole->AddCommand("coop_test_vehmirror", CmdTestVehMirror, 0, "Crysis Coop testing: coop_test_vehmirror <vehicle name>: this client moves its copy of that vehicle by the server's states from now on (as when the copy got stuck)");
 		gEnv->pConsole->AddCommand("coop_test_stealth", CmdTestStealth, 0, "Crysis Coop testing: coop_test_stealth logs the AI system's detection levels of every player (server)");
 		gEnv->pConsole->AddCommand("coop_test_save", CmdTestSave, 0, "Crysis Coop testing: coop_test_save [name] saves as the single player menu does");
 		gEnv->pConsole->AddCommand("coop_test_ai_clear", CmdTestAIClear, 0, "Crysis Coop testing: coop_test_ai_clear <name> [proxy]: AIEVENT_CLEAR to that AI (proxy: its proxy reset too)");
@@ -4930,12 +4936,27 @@ namespace
 	// second, reliably: unreliable ones were lost while soldiers fired, and
 	// the copy stopped half way; and at a join); a client moves its copy
 	// only when the engine does not (it is far off and does not follow)
-	struct SVehSent { Vec3 pos; bool moving; SVehSent(): pos(ZERO), moving(false) {} };
+	struct SVehSent { Vec3 pos; bool moving; float at; SVehSent(): pos(ZERO), moving(false), at(-100.0f) {} };
 	uint16 s_vehSeq = 0;
 	std::map<EntityId, SVehSent> s_vehSent;          // server
 	float s_vehMirrorTimer = 0.0f;
 	struct SVehMirror { Vec3 server, local; int stuck; bool active, have; uint16 seq; SVehMirror(): server(ZERO), local(ZERO), stuck(0), active(false), have(false), seq(0) {} };
 	std::map<EntityId, SVehMirror> s_vehMirror;      // client
+
+	// testing: coop_test_vehmirror <vehicle>: as if this client's copy of it
+	// had got stuck (the copy moved by the server's states from now on)
+	void CmdTestVehMirror(IConsoleCmdArgs* pArgs)
+	{
+		IEntity* pEntity = pArgs->GetArgCount() > 1 ? gEnv->pEntitySystem->FindEntityByName(pArgs->GetArg(1)) : 0;
+		if (!pEntity || gEnv->bServer)
+		{
+			CryLogAlways("[CoopTest] coop_test_vehmirror: no such vehicle here, or this is the server");
+			return;
+		}
+		SVehMirror& m = s_vehMirror[pEntity->GetId()];
+		m.active = true;
+		CryLogAlways("[CoopAI] vehicle %s is moved by the server's state (coop_test_vehmirror)", pEntity->GetName());
+	}
 
 	// debugging: coop_debug_physdump <name> also traces that vehicle's states
 	bool VehicleTraced(IEntity* pEntity)
@@ -4972,9 +4993,14 @@ namespace
 	{
 		if (!gEnv->bServer || !gEnv->bMultiplayer || !g_pGame || !CoopAI::IsCoopSession())
 			return;
-		if ((s_vehMirrorTimer += frameTime) < 0.2f)
+		// (every frame a look: a car a friend or the companion rides in goes
+		// out 20 times a second, the others 5; the companion's gun turns
+		// against its copy of the car, a copy turned 0.2 s late sent its
+		// bullets metres off, the autotester's companion-gunner-behind)
+		if ((s_vehMirrorTimer += frameTime) < 0.05f)
 			return;
 		s_vehMirrorTimer = 0.0f;
+		const float now = gEnv->pTimer->GetCurrTime();
 		CGameRules* pRules = g_pGame->GetGameRules();
 		IActor* pHost = g_pGame->GetIGameFramework()->GetClientActor();
 		bool friends = false;
@@ -4988,11 +5014,18 @@ namespace
 		{
 			if (pVehicle->GetEntity()->IsHidden() || DrivenByFriend(pVehicle))
 				continue;
+			SVehSent& sent = s_vehSent[pVehicle->GetEntityId()];
+			bool friendIn = false;
+			for (int i = 0, n = pVehicle->GetSeatCount(); i < n && !friendIn; ++i)
+				if (IVehicleSeat* pSeat = pVehicle->GetSeatById((TVehicleSeatId)(i + 1)))
+					if (IActor* pIn = g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(pSeat->GetPassenger()))
+						friendIn = pIn->IsPlayer() && pIn != pHost;
+			if (now - sent.at < (friendIn ? 0.045f : 0.195f))
+				continue;
 			CGameRules::CoopVehicleParams params;
 			bool moving = false;
 			if (!FillVehicleState(pVehicle, params, moving))
 				continue;
-			SVehSent& sent = s_vehSent[params.id];
 			moving = moving || params.pos.GetDistance(sent.pos) > 0.05f;
 			// at rest, and the last state sent said so too
 			if (!moving && !sent.moving)
@@ -5000,6 +5033,7 @@ namespace
 			pRules->CoopSendVehicle(params, 0);
 			sent.pos = params.pos;
 			sent.moving = moving;
+			sent.at = now;
 			if (params.seq % 500 == 0)
 				CryLogAlways("[CoopAI] vehicle states sent: %u", (unsigned)params.seq);
 			if (VehicleTraced(pVehicle->GetEntity()))
@@ -7450,6 +7484,17 @@ void CoopAI::OnVehicleState(uint32 id, uint16 seq, const Vec3& pos, const Quat& 
 	if (pLocal && pVehicle->GetDriver() == pLocal)
 		return;
 	SVehMirror& m = s_vehMirror[id];
+	// the AI companion rides in it (at its gun, or along): its copy is where
+	// the host's car is from the first state on. Its game's copy of a car the
+	// host drove stayed back or crept after it, and the companion aimed the
+	// gun from where the car was not, or the gun hung while the copy slept
+	// ("gun aim ... view (-0.66 -0.66 -0.36)" for 8 s, the user's game of
+	// 2026-10-16; the autotester's companion-gunner-uphill)
+	if (!m.active && pLocal && pLocal->GetLinkedVehicle() == pVehicle && CoopAgent::IsCompanion())
+	{
+		m.active = true;
+		CryLogAlways("[CoopAI] vehicle %s is moved by the server's state (the companion rides in it)", pEntity->GetName());
+	}
 	if (VehicleTraced(pEntity))
 		CryLogAlways("[CoopVeh<] %s seq=%u (last %u) pos=(%.1f,%.1f,%.1f) here=(%.1f,%.1f,%.1f) active=%d stuck=%d", pEntity->GetName(), (unsigned)seq,
 			(unsigned)m.seq, pos.x, pos.y, pos.z, pEntity->GetWorldPos().x, pEntity->GetWorldPos().y, pEntity->GetWorldPos().z, (int)m.active, m.stuck);

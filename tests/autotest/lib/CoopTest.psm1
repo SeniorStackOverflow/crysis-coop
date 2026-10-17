@@ -404,6 +404,8 @@ function Start-Boot([hashtable]$Session, [string]$RunDir, [string]$Name) {
     # the companion's profile and files in the boot's folder (the person's
     # LOCALAPPDATA stays as it is: the graphics driver keeps its caches there)
     $envs = @("COOP_AUTOTEST_DIR=$(Join-Path $dir 'lad')", "COOP_AUTOTEST=1", "__COMPAT_LAYER=RunAsInvoker")
+    # a scenario's own (the companion's game gets the host's environment)
+    if ($Session.Env) { foreach ($k in $Session.Env.Keys) { $envs += "$k=$($Session.Env[$k])" } }
     [CoopTestNative]::StartOffScreen()
     [CoopTestNative]::StartWatch()
     # G5 right before the start: a game the person started since the last check

@@ -78,6 +78,7 @@ KEEP_OLD_WAY = "the load disconnects the friends"
 C_LOADS = "[CoopAgent] its level loads:"
 C_LOADED = "[CoopAgent] its level loaded:"
 C_OUT = "[CoopAgent] out of the host's game"
+C_STALL = "[CoopAgent] connected "    # ... s and its level never began to load: out, a new relay, in again
 C_CONNECT = "connection requested to:"
 C_JOINING = "[CoopAgent] joining the host:"
 C_RELAY = "[CoopAgent] relay here:"
@@ -625,6 +626,10 @@ def d04_companion_lost(ctx):
             cause = int(RE_DISC.search(d.text).group(2)) if d else None
             if cause == 13:
                 continue            # the host's server went down: a level load or its quit
+            # it left by itself: its join had stalled, it joins again on a
+            # new relay (CoopAgent.cpp; D20 notes the stall)
+            if any(x.text.startswith(C_STALL) and "never began to load" in x.text for x in cl[max(0, o.no - 60):o.no - 1]):
+                continue
             t = net_time(d) if d else None
             if t is not None and any(abs(((ht - t + 43200) % 86400) - 43200) <= 5 and hc not in (13, 19)
                                      for ht, hc, _ in host_disc):

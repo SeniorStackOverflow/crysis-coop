@@ -1780,6 +1780,12 @@ namespace
 		s_lastLocalYaw = localYaw;
 		s_lastLocalPitch = localPitch;
 		s_lastCmdYaw = s_lastCmdPitch = 0.0f;
+		// the vehicle updates every frame while it is at the gun: a copy of
+		// the car that slept left its turret where it was, whatever the
+		// rotate actions said (coop_test_gun_awake 0: not, for testing)
+		static ICVar* pGunAwake = gEnv->pConsole->GetCVar("coop_test_gun_awake");
+		if (!pGunAwake || pGunAwake->GetIVal())
+			pVehicle->NeedsUpdate();
 		EntityId enemy = PickEnemy(pMe, eye, 150.0f);
 		IActor* pEnemy = ActorOf(enemy);
 		if (enemy != s_bot.enemy)
@@ -1794,6 +1800,56 @@ namespace
 		{
 			VehicleFire(pMe, pVehicle, false);
 			s_bot.doing.Format("at the gun of %s", pVehicle->GetEntity()->GetName());
+			// (why none: the nearest enemy and what is between, once a second)
+			static float s_noneAt = 0.0f;
+			static bool s_noneFar = false;
+			if (Now() >= s_noneAt)
+			{
+				s_noneAt = Now() + 5.0f;
+				IActor* pNear = 0;
+				float nearD = 150.0f;
+				int hostile = 0;
+				float nearestAny = 1e9f;
+				IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+				while (IActor* pActor = it->Next())
+					if (Hostile(pActor))
+					{
+						++hostile;
+						nearestAny = min(nearestAny, AimPoint(pActor->GetEntity()).GetDistance(eye));
+						const float d = AimPoint(pActor->GetEntity()).GetDistance(eye);
+						if (d < nearD)
+						{
+							nearD = d;
+							pNear = pActor;
+						}
+					}
+				if (pNear)
+					s_noneFar = false;
+				else if (!s_noneFar && (s_noneFar = true))
+					CryLogAlways("[CoopAgent] at the gun of %s, no enemy: %d hostile, the nearest %.0f m off; eye (%.1f %.1f %.1f), car (%.1f %.1f %.1f)",
+						pVehicle->GetEntity()->GetName(), hostile, nearestAny, eye.x, eye.y, eye.z,
+						pVehicle->GetEntity()->GetWorldPos().x, pVehicle->GetEntity()->GetWorldPos().y, pVehicle->GetEntity()->GetWorldPos().z);
+				if (pNear)
+				{
+					const Vec3 to = AimPoint(pNear->GetEntity());
+					IPhysicalEntity* skip[2];
+					int n = 0;
+					if (IPhysicalEntity* p = pMe->GetEntity()->GetPhysics())
+						skip[n++] = p;
+					if (IPhysicalEntity* p = pVehicle->GetEntity()->GetPhysics())
+						skip[n++] = p;
+					ray_hit hit;
+					const bool blocked = FirstBlock(eye, to - eye, ent_all, skip, n, hit);
+					IEntity* pHit = blocked && hit.pCollider ? gEnv->pEntitySystem->GetEntityFromPhysics(hit.pCollider) : 0;
+					std::map<EntityId, float>::const_iterator noLine = s_noLineUntil.find(pNear->GetEntityId());
+					CryLogAlways("[CoopAgent] at the gun of %s, no enemy: the nearest, %s, %.0f m off%s; the view to him %s %.1f m off by %s; eye (%.1f %.1f %.1f), car (%.1f %.1f %.1f)",
+						pVehicle->GetEntity()->GetName(), pNear->GetEntity()->GetName(), nearD,
+						noLine != s_noLineUntil.end() && Now() < noLine->second ? " (skipped a while: no line of fire)" : "",
+						blocked ? "blocked" : "clear,", blocked ? hit.dist : 0.0f,
+						pHit ? pHit->GetName() : blocked ? (hit.pCollider && hit.pCollider->GetType() == PE_STATIC ? "something static" : "terrain or nothing known") : "-",
+						eye.x, eye.y, eye.z, pVehicle->GetEntity()->GetWorldPos().x, pVehicle->GetEntity()->GetWorldPos().y, pVehicle->GetEntity()->GetWorldPos().z);
+				}
+			}
 			return;
 		}
 		const Vec3 aim = AimPoint(pEnemy->GetEntity());
@@ -1801,11 +1857,22 @@ namespace
 		const float yawErr = Wrap(Yaw(want) - Yaw(look));
 		const float pitchErr = Pitch(want) - Pitch(look);
 		static float s_traceAt = 0.0f;
+		static int s_traceFrames = 0;
+		++s_traceFrames;
 		if (Now() >= s_traceAt)
 		{
 			s_traceAt = Now() + 1.0f;
-			CryLogAlways("[CoopAgent] gun aim at %s: yaw off %.3f pitch off %.3f (signs %.0f %.0f, votes %d %d), view (%.2f %.2f %.2f)",
-				pEnemy->GetEntity()->GetName(), yawErr, pitchErr, s_signYaw, s_signPitch, s_voteYaw, s_votePitch, look.x, look.y, look.z);
+			// (the gun itself, besides the view: the view comes from the camera)
+			Vec3 gun(ZERO);
+			if (IEntity* pGun = gEnv->pEntitySystem->GetEntity(pVehicle->GetCurrentWeaponId(pMe->GetEntityId())))
+				gun = pGun->GetWorldTM().GetColumn1().GetNormalizedSafe(Vec3(ZERO));
+			const Vec3 at = pVehicle->GetEntity()->GetWorldPos();
+			IVehicleSeat* pSeat = pVehicle->GetSeatForPassenger(pMe->GetEntityId());
+			CryLogAlways("[CoopAgent] gun aim at %s: yaw off %.3f pitch off %.3f (signs %.0f %.0f, votes %d %d), view (%.2f %.2f %.2f), gun (%.2f %.2f %.2f), eye (%.1f %.1f %.1f), car (%.1f %.1f %.1f), %d frames%s, seat state %d",
+				pEnemy->GetEntity()->GetName(), yawErr, pitchErr, s_signYaw, s_signPitch, s_voteYaw, s_votePitch, look.x, look.y, look.z,
+				gun.x, gun.y, gun.z, eye.x, eye.y, eye.z, at.x, at.y, at.z, s_traceFrames, pVehicle->IsDestroyed() ? ", DESTROYED" : "",
+				pSeat ? pSeat->GetCurrentTransition() : -1);
+			s_traceFrames = 0;
 		}
 		// proportional, and what it kept being off added up: while the host
 		// steers (the vehicle turning all the time) the turret has to turn
@@ -1819,8 +1886,14 @@ namespace
 			s_sumEnemy = enemy;
 			s_sumYaw = s_sumPitch = 0.0f;
 		}
+		// (what a rotate action means, from CryAction.dll: its value is the
+		// turn of this one frame, 1 = 0.002 rad, up to the part's yaw/pitch
+		// speed (75/70 on an LTV); 25 turned the gun 0.05 rad a frame, 46
+		// degrees a second at the companion's 16 frames: behind a car the host
+		// drove past the enemy, 0.2-0.3 off all the time, the user's game of
+		// 2026-10-16. Now half the error a frame, up to the turret's speed)
 		const float dt = clamp_tpl(gEnv->pTimer->GetFrameTime(), 0.0f, 0.2f);
-		const float gain = 120.0f, sumGain = 150.0f, maxCmd = 25.0f;
+		const float gain = 0.5f / 0.002f, sumGain = 150.0f, maxCmd = 70.0f;
 		if (s_sumYaw * yawErr < 0.0f)
 			s_sumYaw *= 0.5f;
 		if (s_sumPitch * pitchErr < 0.0f)
@@ -1897,6 +1970,36 @@ namespace
 		}
 		else
 			++s_bot.turning;
+		// a gun that does not come round to him: another enemy for a while
+		// (beyond what the turret reaches, -18 degrees down on an LTV; or a
+		// turret that does not turn): it hung on one for good before
+		static Vec3 s_stallLook(ZERO);
+		static float s_stallSince = -1.0f, s_stallCheckAt = 0.0f;
+		static EntityId s_stallEnemy = 0;
+		if (onTarget || fabsf(yawErr) + fabsf(pitchErr) < 0.3f || s_stallEnemy != enemy)
+		{
+			s_stallEnemy = enemy;
+			s_stallSince = -1.0f;
+			s_stallLook = look;
+			s_stallCheckAt = Now() + 1.0f;
+		}
+		else if (Now() >= s_stallCheckAt)
+		{
+			const bool turned = s_stallLook.Dot(look) < cosf(0.035f);
+			s_stallLook = look;
+			s_stallCheckAt = Now() + 1.0f;
+			if (turned)
+				s_stallSince = -1.0f;
+			else if (s_stallSince < 0.0f)
+				s_stallSince = Now() - 1.0f;
+			else if (Now() - s_stallSince >= 3.0f)
+			{
+				s_noLineUntil[enemy] = Now() + 6.0f;
+				s_stallSince = -1.0f;
+				Event("the gun of %s does not come round to %s (%.2f off): another enemy", pVehicle->GetEntity()->GetName(),
+					pEnemy->GetEntity()->GetName(), fabsf(yawErr) + fabsf(pitchErr));
+			}
+		}
 		// bursts
 		const float now = Now();
 		if (clear && now >= s_bot.pauseUntil && now < s_bot.burstUntil)
@@ -2749,9 +2852,31 @@ namespace
 
 		// ---- vehicles: along with the one it follows
 		const bool follows = s_bot.order == eO_Free || s_bot.order == eO_Follow;
+		// (what it makes of its vehicle, once a second while it is in one)
+		static float s_vehTraceAt = 0.0f;
+		static string s_vehTraceLast;
+		IVehicleSeat* pTraceSeat = pMyVehicle ? pMyVehicle->GetSeatForPassenger(pMe->GetEntityId()) : 0;
+		IVehicle* pTraceLeaderVehicle = pMyVehicle && pLeader ? pLeader->GetLinkedVehicle() : 0;
+		string vehTrace;
+		if (pMyVehicle)
+			vehTrace.Format("%s|%s|%d|%d|%s", pMyVehicle->GetEntity()->GetName(), pTraceSeat ? pTraceSeat->GetSeatName() : "-", (int)s_bot.fireAtWill,
+				(int)s_bot.order, pTraceLeaderVehicle ? pTraceLeaderVehicle->GetEntity()->GetName() : "-");
+		if (pMyVehicle && (Now() >= s_vehTraceAt || vehTrace != s_vehTraceLast))
+		{
+			s_vehTraceAt = Now() + 30.0f;
+			s_vehTraceLast = vehTrace;
+			IVehicleSeat* pSeat = pTraceSeat;
+			IVehicle* pLeaderVehicle = pTraceLeaderVehicle;
+			CryLogAlways("[CoopAgent] in %s: seat %s (gunner %d, driver %d), fire at will %d, order %d, the leader %s in %s",
+				pMyVehicle->GetEntity()->GetName(), pSeat ? pSeat->GetSeatName() : "-", pSeat ? (int)pSeat->IsGunner() : -1,
+				pSeat ? (int)pSeat->IsDriver() : -1, (int)s_bot.fireAtWill, (int)s_bot.order, pLeader ? pLeader->GetEntity()->GetName() : "-",
+				pLeaderVehicle ? pLeaderVehicle->GetEntity()->GetName() : "nothing");
+		}
 		if (follows && pLeader)
 		{
 			IVehicle* pLeaderVehicle = pLeader->GetLinkedVehicle();
+			if (pLeaderVehicle && pLeaderVehicle->IsDestroyed())
+				pLeaderVehicle = 0;    // (a wreck: nothing to get into)
 			if (pLeaderVehicle && pMyVehicle != pLeaderVehicle)
 			{
 				if (pMyVehicle)
@@ -2780,6 +2905,18 @@ namespace
 				Ask(2, "");
 				s_bot.doing = "getting out of the vehicle";
 			}
+		}
+		if (pMyVehicle && pMyVehicle->IsDestroyed())
+		{
+			// a wreck: no seat action works any more (CryAction drops them),
+			// its gun neither turns nor fires; it sat in one for good,
+			// "turning" to its enemy (the autotester's game, 2026-10-16)
+			VehicleFire(pMe, pMyVehicle, false);
+			Ask(2, "");
+			if (s_bot.doing.find("wreck") == string::npos)
+				Event("%s is destroyed: gets out", pMyVehicle->GetEntity()->GetName());
+			s_bot.doing = "getting out of the wreck";
+			return;
 		}
 		if (pMyVehicle)
 		{
@@ -3508,7 +3645,8 @@ namespace
 		HANDLE thread;
 		int port;
 		volatile LONG toHost, toGame, loggedHost, loggedGame;
-		SLocalProxy(): game(INVALID_SOCKET), host(INVALID_SOCKET), haveGame(false), stop(false), thread(0), port(0), toHost(0), toGame(0), loggedHost(0), loggedGame(0) {}
+		volatile LONG dropBig;    // testing: the host's packets over 100 bytes are dropped (a join that stalls)
+		SLocalProxy(): game(INVALID_SOCKET), host(INVALID_SOCKET), haveGame(false), stop(false), thread(0), port(0), toHost(0), toGame(0), loggedHost(0), loggedGame(0), dropBig(0) {}
 	} s_proxy;
 
 	DWORD WINAPI ProxyThread(void*)
@@ -3539,6 +3677,8 @@ namespace
 			if (FD_ISSET(s_proxy.host, &r))
 			{
 				const int n = recvfrom(s_proxy.host, buf, sizeof(buf), 0, 0, 0);
+				if (n > 100 && s_proxy.dropBig)
+					continue;
 				if (n > 0 && s_proxy.haveGame)
 				{
 					sendto(s_proxy.game, buf, n, 0, (const sockaddr*)&s_proxy.gameAddr, sizeof(s_proxy.gameAddr));
@@ -3567,6 +3707,28 @@ namespace
 		DWORD got = 0;
 		WSAIoctl(s, _WSAIOW(IOC_VENDOR, 12), &off, sizeof(off), 0, 0, &got, 0, 0);    // SIO_UDP_CONNRESET
 		return s;
+	}
+
+	// the relay ended: the next ProxyPort makes a new one (new ports on both
+	// sides: the host may hold on to a stuck channel of the old address)
+	void RenewProxy()
+	{
+		if (s_proxy.thread)
+		{
+			s_proxy.stop = true;
+			WaitForSingleObject(s_proxy.thread, 2000);
+			CloseHandle(s_proxy.thread);
+		}
+		if (s_proxy.game != INVALID_SOCKET)
+			closesocket(s_proxy.game);
+		if (s_proxy.host != INVALID_SOCKET)
+			closesocket(s_proxy.host);
+		s_proxy.game = s_proxy.host = INVALID_SOCKET;
+		s_proxy.thread = 0;
+		s_proxy.stop = false;
+		s_proxy.haveGame = false;
+		s_proxy.port = 0;
+		s_proxy.toHost = s_proxy.toGame = s_proxy.loggedHost = s_proxy.loggedGame = 0;
 	}
 
 	// the port the game connects to (0: none)
@@ -3910,6 +4072,53 @@ namespace
 		}
 		if (s_joinPhase == 1 && CoopAI::LevelLoading())
 			s_joinPhase = 2;
+		// connected, and its level never begins to load: a join that stalled
+		// in the network's setup (the channel up, both sides sending 44
+		// packets a second, nothing more for minutes; no timeout of the
+		// engine's ends it). Normal joins load within 9 s (110 of the
+		// autotester's): after 45 s out, a new relay, in again; the third
+		// time its game quits and the host starts it anew (the autotester,
+		// 2026-10-16: "the AI companion cannot join your game")
+		static int s_stalls = 0;
+		static float s_renewAt = -1.0f;
+		static ICVar* pNetLog = gEnv->pConsole->GetCVar("net_log");
+		if (s_joinPhase == 1 && !CoopAI::LevelLoading() && !pFramework->GetClientActor() && Now() - s_connectedAt > 45.0f)
+		{
+			++s_stalls;
+			CryLogAlways("[CoopAgent] connected %.0f s and its level never began to load (relay %d to the host, %d back): out, a new relay, in again (%d)",
+				Now() - s_connectedAt, (int)s_proxy.toHost, (int)s_proxy.toGame, s_stalls);
+			if (pNetLog)
+				pNetLog->Set(0);
+			if (s_stalls >= 3)
+			{
+				CryLogAlways("[CoopAgent] the join stalled 3 times: quitting, the host starts it again");
+				TerminateProcess(GetCurrentProcess(), 3);
+			}
+			s_joinPhase = 0;
+			gEnv->pConsole->ExecuteString("disconnect");
+			s_renewAt = Now() + 1.0f;      // (the disconnect goes out first)
+			s_nextConnect = Now() + 3.0f;
+			return;
+		}
+		if (s_renewAt >= 0.0f && Now() >= s_renewAt && !in)
+		{
+			s_renewAt = -1.0f;
+			RenewProxy();
+		}
+		if (s_joinPhase == 2 || pFramework->GetClientActor())
+			s_stalls = 0;
+		// (testing: COOP_TEST_JOIN_STALL=1 in its environment: the first try
+		// stalls, the relay lets none of the host's big packets through once
+		// the channel is up)
+		static const bool s_testStall = getenv("COOP_TEST_JOIN_STALL") && atoi(getenv("COOP_TEST_JOIN_STALL")) != 0;
+		s_proxy.dropBig = s_testStall && s_stalls == 0 && s_joinPhase == 1 ? 1 : 0;
+		// the network's own log while it connects (a stall says where)
+		if (pNetLog)
+		{
+			const int want = s_joinPhase == 1 ? 2 : 0;
+			if (pNetLog->GetIVal() != want && (want || pNetLog->GetIVal() == 2))
+				pNetLog->Set(want);
+		}
 		if ((s_joinPhase == 2 && !CoopAI::LevelLoading()) || (s_joinPhase == 1 && Now() - s_connectedAt > 60.0f))
 			s_joinPhase = 0;
 		s_wasJoined = in && s_joinPhase == 0;
@@ -4804,6 +5013,41 @@ namespace
 		CryLogAlways("[CoopTest] %s %s %s", pPlayer->GetEntity()->GetName(), press ? "presses" : "lets go of", pArgs->GetArg(1));
 	}
 
+	// coop_test_sounds [radius]: every sound that plays on an entity near
+	// this game's player (its name, the entity, looping or not): a fire loop
+	// that never ends (the user's game of 2026-10-17)
+	void CmdTestSounds(IConsoleCmdArgs* pArgs)
+	{
+		IActor* pMe = g_pGame->GetIGameFramework()->GetClientActor();
+		const float radius = pArgs->GetArgCount() > 1 ? (float)atof(pArgs->GetArg(1)) : 150.0f;
+		const Vec3 at = pMe ? pMe->GetEntity()->GetWorldPos() : Vec3(ZERO);
+		int n = 0, loops = 0;
+		IEntityItPtr it = gEnv->pEntitySystem->GetEntityIterator();
+		it->MoveFirst();
+		while (IEntity* pEntity = it->Next())
+		{
+			if (pEntity->IsGarbage() || (pMe && pEntity->GetWorldPos().GetDistance(at) > radius))
+				continue;
+			IEntitySoundProxy* pProxy = (IEntitySoundProxy*)pEntity->GetProxy(ENTITY_PROXY_SOUND);
+			if (!pProxy)
+				continue;
+			for (uint32 i = 0; i < 64; ++i)
+			{
+				ISound* pSound = pProxy->GetSoundByIndex(i);
+				if (!pSound)
+					break;
+				if (!pSound->IsPlaying() && !pSound->IsPlayingVirtual())
+					continue;
+				const bool loop = (pSound->GetFlags() & FLAG_SOUND_LOOP) != 0;
+				++n;
+				loops += loop;
+				CryLogAlways("[CoopTest] sound %s on %s (%s) %s%s, %.0f m off", pSound->GetName(), pEntity->GetName(), pEntity->GetClass()->GetName(),
+					loop ? "LOOP" : "once", pSound->IsPlaying() ? "" : " (virtual)", pEntity->GetWorldPos().GetDistance(at));
+			}
+		}
+		CryLogAlways("[CoopTest] sounds playing within %.0f m: %d (%d looping)", radius, n, loops);
+	}
+
 	// coop_test_cam: this game's camera (where, which way), the view it
 	// comes from, the player's vehicle seat and its view
 	void CmdTestCam(IConsoleCmdArgs*)
@@ -5198,11 +5442,13 @@ void CoopAgent::Init()
 		pFree->SetFlags(pFree->GetFlags() | VF_NOT_NET_SYNCED);
 	gEnv->pConsole->AddCommand("coop_test_ammo", CmdTestAmmo, 0,
 		"Crysis Coop testing: coop_test_ammo <player> <ammo class> <count> sets what he carries of it (server)");
+	gEnv->pConsole->AddCommand("coop_test_sounds", CmdTestSounds, 0, "Crysis Coop testing: coop_test_sounds [radius]: the sounds playing on entities near this game's player (looping ones marked)");
 	gEnv->pConsole->AddCommand("coop_test_vehicles", CmdTestVehicles, 0, "Crysis Coop testing: coop_test_vehicles [all] logs the vehicles near the host's player (all: everywhere), their seats and engines");
 	gEnv->pConsole->AddCommand("coop_test_silencer", CmdTestSilencer, 0, "Crysis Coop testing: coop_test_silencer <player> [0]: a silencer on (off) his weapon (server)");
 	gEnv->pConsole->AddCommand("coop_test_deactivate", CmdTestDeactivate, 0, "Crysis Coop testing: coop_test_deactivate: this game's window stops being the active one, as when its player goes to another window");
 	gEnv->pConsole->AddCommand("coop_test_onehand", CmdTestOneHand, 0, "Crysis Coop testing: coop_test_onehand <player> [grab]: his weapon in the one-hand pose, or (grab) his left hand held up (this game)");
 	gEnv->pConsole->AddCommand("coop_test_anim", CmdTestAnim, 0, "Crysis Coop testing: coop_test_anim <player>: logs his animation graph inputs as this game plays them");
+	gEnv->pConsole->RegisterInt("coop_test_gun_awake", 1, VF_NOT_NET_SYNCED, "Crysis Coop testing: 0 = the companion at a vehicle's gun does not tell the vehicle to update every frame (default 1)");
 	gEnv->pConsole->AddCommand("coop_test_key", CmdTestKey, 0, "Crysis Coop testing: coop_test_key <action> <1|0>: this game's player presses (lets go of) a key's action");
 	gEnv->pConsole->AddCommand("coop_test_cam", CmdTestCam, 0, "Crysis Coop testing: coop_test_cam logs this game's camera, its view and the vehicle seat's view");
 	gEnv->pConsole->AddCommand("coop_test_vehview", CmdTestVehView, 0, "Crysis Coop testing: coop_test_vehview: the vehicle seat's next view for this game's player");
