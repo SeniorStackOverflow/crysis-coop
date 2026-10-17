@@ -18,6 +18,8 @@ struct SCoopFmodWatch
 	char lostNames[256];	// the first loud ones (testing)
 	float latest;
 	char names[256];
+	int gunStopped, gunNew;	// gunfire loops that played on too long: stopped (gunNew: since the caller looked)
+	char gunNames[192];
 };
 void CoopFmodWatch(void* pSystem, int maxChannels, bool stop, float now, SCoopFmodWatch* pOut);	// CoopSoundMeter.cpp
 
@@ -133,6 +135,11 @@ namespace CoopSound
 		}
 		const bool stop = !pVar || pVar->GetIVal() != 0;
 		CoopFmodWatch(pSystem, maxChannels, stop, now, &s_watch);
+		if (s_watch.gunNew > 0)
+		{
+			s_watch.gunNew = 0;
+			CryLogAlways("[CoopSound] a gunfire loop played on with nobody firing that long: stopped (%d so far:%s)", s_watch.gunStopped, s_watch.gunNames);
+		}
 		if (now - s_watchLogAt < 60.0f)
 			return;
 		if (s_watch.stuck > 0 || s_watch.late > 0 || s_watch.takenAway > 0)
@@ -196,6 +203,35 @@ namespace CoopSound
 				void* pSystem = FmodSystem(&maxChannels);
 				const int n = pSystem ? CoopFmodChannelList(pSystem, maxChannels, pArgs->GetArgCount() > 2 ? pArgs->GetArg(2) : "", 60, &Log::Line) : 0;
 				CryLogAlways("[CoopTest] coop_test_sound channels %s: %d; %s", pArgs->GetArgCount() > 2 ? pArgs->GetArg(2) : "", n, FmodLine().c_str());
+				return;
+			}
+			if (!stricmp(what, "playloop"))
+			{
+				// playloop <sound event> | stop: a weapon's shot played 5 m
+				// from this game's player and never told to stop (a fire loop
+				// left playing: the watch has to end it)
+				static _smart_ptr<ISound> s_loop;
+				const char* name = pArgs->GetArgCount() > 2 ? pArgs->GetArg(2) : "";
+				if (s_loop)
+				{
+					s_loop->Stop(ESoundStopMode_AtOnce);
+					s_loop = 0;
+				}
+				IActor* pActor = g_pGame && g_pGame->GetIGameFramework() ? g_pGame->GetIGameFramework()->GetClientActor() : 0;
+				if (!pActor || !*name || !stricmp(name, "stop"))
+					return;
+				s_loop = gEnv->pSoundSystem->CreateSound(name, FLAG_SOUND_DEFAULT_3D);
+				if (!s_loop)
+				{
+					CryLogAlways("[CoopTest] playloop %s: no such sound", name);
+					return;
+				}
+				s_loop->SetSemantic(eSoundSemantic_Living_Entity);
+				s_loop->SetPosition(pActor->GetEntity()->GetWorldPos() + Vec3(5.0f, 0.0f, 1.5f));
+				// (as an automatic weapon's fire: the shot repeats until stopped)
+				s_loop->SetLoopMode(true);
+				s_loop->Play();
+				CryLogAlways("[CoopTest] playloop %s: playing, never stopped", name);
 				return;
 			}
 			if (!stricmp(what, "probe"))

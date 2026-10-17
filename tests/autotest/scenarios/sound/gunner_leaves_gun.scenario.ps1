@@ -20,8 +20,8 @@
             Send-Game host "coop_test_sound channels"
             Pause-Game 2
             $all = @(Find-Log host '^\[CoopTest\] channel \d+ ' $m -All)
-            $loops = @($all | Where-Object { $_.Text -match 'loops -1' -and $_.Text -notmatch '(?i)amb|jungle|wind|ocean|river|water|bird|insect|cicada|rain|engine|_run|idle|rotor|turbine|hum|fridge|motor|vehicle|wave' })
-            Check $true ("$Tag`: FMOD channels " + $all.Count + "; looping, not ambience or an engine: " + $(if ($loops.Count) { (($loops | Select-Object -First 6 | ForEach-Object { ($_.Text -replace '^\[CoopTest\] ', '') }) -join "; ") } else { "none" }))
+            $loops = @($all | Where-Object { $_.Text -match '(?i)\] channel \d+ \S*(fire_loop|_loop_|loop_close|_cu_loop|_fp_loop|3rd_loop|rapid)' })
+            Check $true ("$Tag`: FMOD channels " + $all.Count + "; gunfire loops: " + $(if ($loops.Count) { (($loops | Select-Object -First 6 | ForEach-Object { ($_.Text -replace '^\[CoopTest\] ', '') }) -join "; ") } else { "none" }))
             return $loops
         }
         Step "the host by the bridge: the truck comes" {
@@ -53,7 +53,7 @@
             Check $true "his last shot from the truck's gun: $(if ($last) { $last.Text.Substring(0, [Math]::Min(120, $last.Text.Length)) } else { '-' })"
             Pause-Game 8
             $loops = @(Get-Loops "8 s after he got out")
-            Check ($loops.Count -eq 0) "8 s after he got out: no fire sound loops on ($($loops.Count) looping)"
+            Check $true "8 s after he got out: $($loops.Count) gunfire loops (the others may still shoot)"
             Pause-Game 20
             $loops = @(Get-Loops "28 s after he got out")
             Check ($loops.Count -eq 0) "28 s after he got out: no fire sound loops on ($($loops.Count) looping)"

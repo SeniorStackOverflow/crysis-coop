@@ -241,6 +241,8 @@ struct SCoopFmodWatch
 	char lostNames[256];	// the first loud ones (testing)
 	float latest;
 	char names[256];
+	int gunStopped, gunNew;	// gunfire loops that played on too long: stopped (gunNew: since the caller looked)
+	char gunNames[192];
 };
 
 void CoopFmodWatch(void* pSystem, int maxChannels, bool stop, float now, SCoopFmodWatch* pOut)
@@ -264,7 +266,7 @@ void CoopFmodWatch(void* pSystem, int maxChannels, bool stop, float now, SCoopFm
 	static bool s_looked = false;
 	// per channel: its sound at the last look, since when it is stuck at its
 	// start (-1: not), whether it was heard, whether it may be stopped
-	struct SChannel { void* pSound; float stuckSince; bool heard, oneShot; };
+	struct SChannel { void* pSound; float stuckSince, since; bool heard, oneShot, gunLoop; };
 	static SChannel s_channels[4096];
 	if (!s_looked)
 	{
@@ -314,12 +316,48 @@ void CoopFmodWatch(void* pSystem, int maxChannels, bool stop, float now, SCoopFm
 				*p = (char)tolower((unsigned char)*p);
 			c.oneShot = s_mode(pChannel, &mode) == 0 && !(mode & 0x6) && s_soundMode(pSound, &soundMode) == 0 && !(soundMode & 0x86)	// loops, FMOD_CREATESTREAM
 				&& !strstr(name, ".mp2") && !strstr(name, ".mp3") && !strstr(name, ".ogg");
+			// a weapon's fire loop (the layer of an automatic weapon's shot
+			// that goes on while it fires: fy71_3rd_loop_close..., fy71_cu_loop...,
+			// mg_fire_loop...): no weapon fires 15 s without a pause (a rifle's
+			// magazine is empty in 3, a mounted gun overheats in about 5)
+			c.since = now;
+			c.gunLoop = strstr(name, "loop") && (strstr(name, "3rd") || strstr(name, "_cu_") || strstr(name, "_fp") || strstr(name, "fire")
+				|| strstr(name, "mg_") || strstr(name, "rapid")) && !strstr(name, "amb") && !strstr(name, "engine")
+				// (guns that may fire on longer: a minigun, the Hurricane, turrets,
+				// anti-aircraft guns, the aliens' weapons)
+				&& !strstr(name, "minigun") && !strstr(name, "mingun") && !strstr(name, "hurricane") && !strstr(name, "turret")
+				&& !strstr(name, "aaa_") && !strstr(name, "moac") && !strstr(name, "moar") && !strstr(name, "spin");
 			// a one-shot just started (at most a look ago): heard right away?
 			if (c.oneShot)
 			{
 				++pOut->started;
 				pOut->startedHeard += !isVirtual;
 			}
+		}
+		// a gunfire loop that went on and on: nobody fires that long (a fire
+		// loop whose weapon was never told to stop played for ever, the
+		// user's game of 2026-10-17)
+		if (c.gunLoop && stop && now - c.since >= 15.0f)
+		{
+			char name[64] = "";
+			s_name(pSound, name, sizeof(name) - 1);
+			name[sizeof(name) - 1] = 0;
+			for (char* p = name; *p; ++p)
+				if ((unsigned char)*p < 32 || (unsigned char)*p > 126)
+					*p = 0;
+			if (s_stop(pChannel) == 0)
+			{
+				++pOut->gunStopped;
+				++pOut->gunNew;
+				const size_t used = strlen(pOut->gunNames);
+				if (used < sizeof(pOut->gunNames) - 40)
+				{
+					_snprintf(pOut->gunNames + used, sizeof(pOut->gunNames) - used - 1, " %s(%.0f s)", name, now - c.since);
+					pOut->gunNames[sizeof(pOut->gunNames) - 1] = 0;
+				}
+			}
+			c.pSound = 0;
+			continue;
 		}
 		if (isVirtual && position == 0 && c.oneShot)
 		{
