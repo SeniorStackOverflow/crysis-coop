@@ -1736,6 +1736,43 @@ namespace
 		return s;
 	}
 
+	// the turret's yaw is turned by its rotate actions alone. CryAction keeps
+	// a client gunner's turret where it pointed in the world
+	// (CVehiclePartBase::UpdateRotation's world-space hold, worldSpace="1" on
+	// the LTV's turret), reckoned against its parent's frame; for a car's
+	// body that frame stayed in the companion's game where the car first
+	// stood: each frame the gun turned on by all the car had turned since.
+	// Not seen driving straight; once the host turned, the gun spun ever
+	// faster and stayed spinning, 2.5 rad a frame with the car at rest, its
+	// own turn 0.14 at most: never on an enemy, never a shot (the user's game
+	// of 2026-10-17 on 0.11.39; the autotester's companion-gunner-weave-
+	// continue). A yaw joint on the body: its worldSpace (a float at +0xB0 of
+	// CVehiclePartBase, build 6156; yawSpeed at +0x88) off, every frame it
+	// sits at a gun, fire at will or not; the aim turns against the car's own
+	// turn instead. A yaw joint on a turning joint (a tank's machine gun on
+	// its turret) keeps the hold: that frame is right, and the hold also
+	// covers the main turret's swing (the review). Returns whether the yaw
+	// keeps it. Nothing reads worldSpace again: coop_test_turret_hold 1 (as
+	// CryAction does, for testing) has to be set before it first takes the gun
+	bool TurretHoldOff(IVehicle* pVehicle)
+	{
+		static ICVar* pTurretHold = gEnv->pConsole->GetCVar("coop_test_turret_hold");
+		bool held = false;
+		for (int i = 0, n = pVehicle->GetPartCount(); i < n; ++i)
+		{
+			IVehiclePart* pPart = pVehicle->GetPart((unsigned int)i);
+			if (!pPart || pPart->GetType() != IVehiclePart::eVPT_AnimatedJoint || *(float*)((char*)pPart + 0x88) == 0.0f)
+				continue;
+			IVehiclePart* pParent = pPart->GetParent();
+			const bool onJoint = pParent && pParent->GetType() == IVehiclePart::eVPT_AnimatedJoint && *(float*)((char*)pParent + 0x88) != 0.0f;
+			if (onJoint || (pTurretHold && pTurretHold->GetIVal()))
+				held = held || *(float*)((char*)pPart + 0xB0) > 0.0f;
+			else
+				*(float*)((char*)pPart + 0xB0) = 0.0f;
+		}
+		return held;
+	}
+
 	// the vehicle's gun: its trigger
 	void VehicleFire(CPlayer* pMe, IVehicle* pVehicle, bool on)
 	{
@@ -1768,11 +1805,31 @@ namespace
 		// the view in the vehicle's frame: what the rotate actions move
 		const Vec3 local = Matrix33(pVehicle->GetEntity()->GetWorldTM()).GetInverted() * look;
 		const float localYaw = Yaw(local), localPitch = Pitch(local);
+		// (the car's own turn since the last frame, from its frame: the gun
+		// turns along with it)
+		static float s_lastCarYaw = 0.0f;
+		const float carYaw = Yaw(pVehicle->GetEntity()->GetWorldTM().GetColumn1());
+		float carTurn = Wrap(carYaw - s_lastCarYaw);
+		s_lastCarYaw = carYaw;
+		// (back at the gun after a while: the car's turn and the last action
+		// are of then)
+		static float s_gunAt = -100.0f;
+		if (Now() - s_gunAt > 0.3f)
+		{
+			carTurn = 0.0f;
+			s_lastCmdYaw = s_lastCmdPitch = 0.0f;
+		}
+		s_gunAt = Now();
 		if (pVehicle->GetEntityId() != s_gunVehicle)
 		{
 			s_gunVehicle = pVehicle->GetEntityId();
 			s_voteYaw = s_votePitch = 0;
 			s_lastCmdYaw = s_lastCmdPitch = 0.0f;
+			// (CryAction's rotate turret turns against the action's value,
+			// both ways: from there, a gun learnt wrong in one car keeps it no
+			// longer)
+			s_signYaw = s_signPitch = -1.0f;
+			carTurn = 0.0f;
 		}
 		else
 		{
@@ -1792,6 +1849,18 @@ namespace
 					s_signPitch = s_votePitch > 0 ? 1.0f : -1.0f;
 			}
 		}
+		// testing (coop_test_guntrace 1): each frame, what it told the turret
+		// and how the view moved in the vehicle's frame
+		static ICVar* pGunTrace = gEnv->pConsole->GetCVar("coop_test_guntrace");
+		if (pGunTrace && pGunTrace->GetIVal())
+		{
+			pe_status_dynamics dyn;
+			IPhysicalEntity* pPhys = pVehicle->GetEntity()->GetPhysics();
+			const float wz = pPhys && pPhys->GetStatus(&dyn) ? dyn.w.z : 0.0f;
+			CryLogAlways("[CoopGun] cmd %.1f %.1f -> local d %.4f %.4f, local %.3f %.3f, world %.3f, car w %.2f, dt %.3f, votes %d %d",
+				s_lastCmdYaw, s_lastCmdPitch, Wrap(localYaw - s_lastLocalYaw), localPitch - s_lastLocalPitch, localYaw, localPitch, Yaw(look), wz,
+				gEnv->pTimer->GetFrameTime(), s_voteYaw, s_votePitch);
+		}
 		s_lastLocalYaw = localYaw;
 		s_lastLocalPitch = localPitch;
 		s_lastCmdYaw = s_lastCmdPitch = 0.0f;
@@ -1801,6 +1870,9 @@ namespace
 		static ICVar* pGunAwake = gEnv->pConsole->GetCVar("coop_test_gun_awake");
 		if (!pGunAwake || pGunAwake->GetIVal())
 			pVehicle->NeedsUpdate();
+		// (CryAction's world hold of the turret's yaw off where it spins the
+		// gun: TurretHoldOff)
+		const bool yawHeld = TurretHoldOff(pVehicle);
 		EntityId enemy = PickEnemy(pMe, eye, 150.0f);
 		IActor* pEnemy = ActorOf(enemy);
 		if (enemy != s_bot.enemy)
@@ -1915,9 +1987,13 @@ namespace
 			s_sumPitch *= 0.5f;
 		s_sumYaw = clamp_tpl(s_sumYaw + yawErr * dt, -maxCmd / sumGain, maxCmd / sumGain);
 		s_sumPitch = clamp_tpl(s_sumPitch + pitchErr * dt, -maxCmd / sumGain, maxCmd / sumGain);
-		if (fabsf(yawErr) > 0.005f || fabsf(s_sumYaw) > 0.01f)
+		// (and against the car's turn: with the turret's world hold off the gun
+		// turns with the car, which the host steers; as much again next frame.
+		// Not where the yaw keeps its hold: it turns against it already)
+		const float carFeed = !yawHeld && fabsf(carTurn) < 0.3f ? carTurn / 0.002f : 0.0f;
+		if (fabsf(yawErr) > 0.005f || fabsf(s_sumYaw) > 0.01f || fabsf(carFeed) > 0.25f)
 		{
-			s_lastCmdYaw = s_signYaw * clamp_tpl(yawErr * gain + s_sumYaw * sumGain, -maxCmd, maxCmd);
+			s_lastCmdYaw = s_signYaw * clamp_tpl(yawErr * gain + s_sumYaw * sumGain - carFeed, -maxCmd, maxCmd);
 			pVehicle->OnAction(eVAI_RotateYaw, eAAM_OnPress, s_lastCmdYaw, pMe->GetEntityId());
 		}
 		if (fabsf(pitchErr) > 0.005f || fabsf(s_sumPitch) > 0.01f)
@@ -3005,6 +3081,9 @@ namespace
 		{
 			Fire(pMe, false);
 			IVehicleSeat* pSeat = pMyVehicle->GetSeatForPassenger(pMe->GetEntityId());
+			// (at a gun with fire held too: the gun spun all the same)
+			if (pSeat && pSeat->IsGunner() && !pSeat->IsDriver() && !gEnv->bServer)
+				TurretHoldOff(pMyVehicle);
 			if (pSeat && pSeat->IsGunner() && !pSeat->IsDriver() && s_bot.fireAtWill)
 			{
 				VehicleGunner(pMe, pMyVehicle);
@@ -5553,6 +5632,8 @@ void CoopAgent::Init()
 	gEnv->pConsole->AddCommand("coop_test_onehand", CmdTestOneHand, 0, "Crysis Coop testing: coop_test_onehand <player> [grab]: his weapon in the one-hand pose, or (grab) his left hand held up (this game)");
 	gEnv->pConsole->AddCommand("coop_test_anim", CmdTestAnim, 0, "Crysis Coop testing: coop_test_anim <player>: logs his animation graph inputs as this game plays them");
 	gEnv->pConsole->RegisterInt("coop_test_gun_awake", 1, VF_NOT_NET_SYNCED, "Crysis Coop testing: 0 = the companion at a vehicle's gun does not tell the vehicle to update every frame (default 1)");
+	gEnv->pConsole->RegisterInt("coop_test_turret_hold", 0, VF_NOT_NET_SYNCED, "Crysis Coop testing: 1 = the companion's game keeps CryAction's world hold of a turret's yaw it guns (it spun the gun once the car turned) and no turn against the car's");
+	gEnv->pConsole->RegisterInt("coop_test_guntrace", 0, VF_NOT_NET_SYNCED, "Crysis Coop testing: 1 = the companion at a vehicle's gun logs each frame what it told the turret and how the view moved");
 	gEnv->pConsole->RegisterInt("coop_test_vehicle_force", 1, VF_NOT_NET_SYNCED, "Crysis Coop testing: 0 = the companion's game leaves the update of the vehicle it rides in to the engine (seen or near only; default 1)");
 	gEnv->pConsole->AddCommand("coop_test_key", CmdTestKey, 0, "Crysis Coop testing: coop_test_key <action> <1|0>: this game's player presses (lets go of) a key's action");
 	gEnv->pConsole->AddCommand("coop_test_cam", CmdTestCam, 0, "Crysis Coop testing: coop_test_cam logs this game's camera, its view and the vehicle seat's view");

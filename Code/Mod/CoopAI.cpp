@@ -638,12 +638,29 @@ namespace
 			(int)pMovement->IsMovementProcessingEnabled(), (int)pVehicle->IsDestroyed());
 	}
 
-	// coop_vehtest [seconds]: the local player presses "forward"+"up" in his
-	// vehicle for a while; the vehicle's speed is logged (testing controls)
+	// coop_vehtest [seconds] [weave s]: the local player presses "forward"+"up"
+	// in his vehicle for a while; the vehicle's speed is logged (testing
+	// controls). With a weave time he steers too, left and right in turn, that
+	// long each way (as a player drives: the companion's gun has to keep on
+	// its enemy while the car turns under it)
 	float s_vehTestTime = -1.0f;
+	float s_vehTestWeave = 0.0f, s_vehTestWeaveAt = 0.0f;
+	int s_vehTestTurn = 0;
+	void VehTestSteer(IVehicle* pVehicle, EntityId actorId, int turn)
+	{
+		if (turn == s_vehTestTurn)
+			return;
+		if (s_vehTestTurn)
+			pVehicle->OnAction(s_vehTestTurn < 0 ? eVAI_TurnLeft : eVAI_TurnRight, eAAM_OnRelease, 0.0f, actorId);
+		if (turn)
+			pVehicle->OnAction(turn < 0 ? eVAI_TurnLeft : eVAI_TurnRight, eAAM_OnPress, 1.0f, actorId);
+		s_vehTestTurn = turn;
+	}
 	void CmdVehTest(IConsoleCmdArgs* pArgs)
 	{
 		s_vehTestTime = pArgs->GetArgCount() > 1 ? (float)atof(pArgs->GetArg(1)) : 4.0f;
+		s_vehTestWeave = pArgs->GetArgCount() > 2 ? (float)atof(pArgs->GetArg(2)) : 0.0f;
+		s_vehTestWeaveAt = 0.0f;
 		IActor* pActor = g_pGame->GetIGameFramework()->GetClientActor();
 		IVehicle* pVehicle = pActor ? pActor->GetLinkedVehicle() : 0;
 		CryLogAlways("[CoopVehTest] start: actor=%s vehicle=%s", pActor ? pActor->GetEntity()->GetName() : "-",
@@ -686,6 +703,11 @@ namespace
 		static float s_acc = 0.0f;
 		s_acc += frameTime;
 		s_vehTestTime -= frameTime;
+		if (pVehicle && s_vehTestWeave > 0.0f && s_vehTestTime >= 0.0f)
+		{
+			s_vehTestWeaveAt += frameTime;
+			VehTestSteer(pVehicle, pActor->GetEntityId(), ((int)(s_vehTestWeaveAt / s_vehTestWeave)) % 2 ? 1 : -1);
+		}
 		if (pVehicle && s_acc >= 1.0f)
 		{
 			s_acc = 0.0f;
@@ -693,7 +715,8 @@ namespace
 			IPhysicalEntity* pPhys = pVehicle->GetEntity()->GetPhysics();
 			float speed = (pPhys && pPhys->GetStatus(&dyn)) ? dyn.v.len() : -1.0f;
 			Vec3 p = pVehicle->GetEntity()->GetWorldPos();
-			CryLogAlways("[CoopVehTest] speed=%.1f pos=(%.0f,%.0f,%.0f)", speed, p.x, p.y, p.z);
+			CryLogAlways("[CoopVehTest] speed=%.1f pos=(%.0f,%.0f,%.0f) turning %d (%.2f rad/s)", speed, p.x, p.y, p.z, s_vehTestTurn,
+				(pPhys && pPhys->GetStatus(&dyn)) ? dyn.w.z : 0.0f);
 			pVehicle->OnAction(eVAI_MoveForward, eAAM_OnHold, 1.0f, pActor->GetEntityId());
 			pVehicle->OnAction(eVAI_MoveUp, eAAM_OnHold, 1.0f, pActor->GetEntityId());
 		}
@@ -701,6 +724,7 @@ namespace
 		{
 			pVehicle->OnAction(eVAI_MoveForward, eAAM_OnRelease, 0.0f, pActor->GetEntityId());
 			pVehicle->OnAction(eVAI_MoveUp, eAAM_OnRelease, 0.0f, pActor->GetEntityId());
+			VehTestSteer(pVehicle, pActor->GetEntityId(), 0);
 			CryLogAlways("[CoopVehTest] done");
 		}
 	}
@@ -1847,6 +1871,7 @@ void CoopAI::Init()
 			->SetFlags(VF_NOT_NET_SYNCED);
 		gEnv->pConsole->RegisterInt("coop_test_free_cursor", 0, 0, "Crysis Coop testing: 1 keeps the system cursor free (as with a menu open): a test window never takes the mouse")
 			->SetFlags(VF_NOT_NET_SYNCED);
+		gEnv->pConsole->RegisterInt("coop_test_mirror_ride", 1, VF_NOT_NET_SYNCED, "Crysis Coop testing: 0 = the companion's copy of the car it rides in is not moved by the server's states from the start (only when it lags behind)");
 		gEnv->pConsole->RegisterInt("coop_test_sync_vehicle_hide", 1, 0, "Crysis Coop testing: 0 = a joining player is told only the vehicles hidden or shown otherwise than in the level file (as before 0.11.39; default 1: every vehicle)");
 		gEnv->pConsole->RegisterString("coop_debug_flow", "", 0, "Crysis Coop debugging: \"<graph entity> <node> <output port index or name>\" is activated on the server coop_debug_flow_time s after the game started");
 		gEnv->pConsole->RegisterFloat("coop_debug_flow_time", 20.0f, 0, "Crysis Coop debugging: see coop_debug_flow");
@@ -7546,7 +7571,8 @@ void CoopAI::OnVehicleState(uint32 id, uint16 seq, const Vec3& pos, const Quat& 
 	// gun from where the car was not, or the gun hung while the copy slept
 	// ("gun aim ... view (-0.66 -0.66 -0.36)" for 8 s, the user's game of
 	// 2026-10-16; the autotester's companion-gunner-uphill)
-	if (!m.active && pLocal && pLocal->GetLinkedVehicle() == pVehicle && CoopAgent::IsCompanion())
+	static ICVar* pMirrorRide = gEnv->pConsole->GetCVar("coop_test_mirror_ride");
+	if (!m.active && pLocal && pLocal->GetLinkedVehicle() == pVehicle && CoopAgent::IsCompanion() && (!pMirrorRide || pMirrorRide->GetIVal()))
 	{
 		m.active = true;
 		CryLogAlways("[CoopAI] vehicle %s is moved by the server's state (the companion rides in it)", pEntity->GetName());
