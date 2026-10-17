@@ -852,6 +852,12 @@ namespace
 
 	// diagnostics (coop_debug_flags 16): log every spawned entity
 	bool s_inLoading = false;
+	// (a client: what the server said is being applied, not this game's own)
+	bool s_applyingSync = false;
+	// (a client: what this game hid or showed by itself while loading, by class)
+	std::map<string, int> s_loadHides;
+	// (a client: the server's last word on an entity's hiding)
+	std::map<EntityId, bool> s_serverHidden;
 	bool s_coopServerLoading = false;
 	bool s_coopLevelLoading = false;
 	bool s_coopLevelActive = false;
@@ -1089,6 +1095,16 @@ namespace
 				break;
 			default:
 				return;
+			}
+			// (a client: a vehicle this game hid or showed by itself, not as
+			// the server said)
+			if ((event.event == ENTITY_EVENT_HIDE || event.event == ENTITY_EVENT_UNHIDE) && !gEnv->bServer && !s_applyingSync && g_pGame)
+			{
+				const bool vehicle = g_pGame->GetIGameFramework()->GetIVehicleSystem()->GetVehicle(pEntity->GetId()) != 0;
+				if (s_inLoading)
+					++s_loadHides[string(vehicle ? "vehicles" : pEntity->GetClass()->GetName()) + (event.event == ENTITY_EVENT_HIDE ? " hidden" : " shown")];
+				else if (vehicle)
+					CryLogAlways("[CoopSync] vehicle %s %s by this game itself", pEntity->GetName(), event.event == ENTITY_EVENT_HIDE ? "hidden" : "shown");
 			}
 			if ((event.event == ENTITY_EVENT_HIDE || event.event == ENTITY_EVENT_UNHIDE) && !s_inLoading && !CoopAI::TraceOn())
 			{
@@ -1654,6 +1670,12 @@ int CoopAI::GodMode()
 	return pGod ? pGod->GetIVal() : 0;
 }
 
+bool CoopAI::ServerSaysHidden(EntityId id)
+{
+	std::map<EntityId, bool>::const_iterator it = s_serverHidden.find(id);
+	return it != s_serverHidden.end() && it->second;
+}
+
 bool CoopAI::TraceOn()
 {
 	return s_traceFile && s_pTrace && s_pTrace->GetIVal() && g_pGame;
@@ -1825,6 +1847,7 @@ void CoopAI::Init()
 			->SetFlags(VF_NOT_NET_SYNCED);
 		gEnv->pConsole->RegisterInt("coop_test_free_cursor", 0, 0, "Crysis Coop testing: 1 keeps the system cursor free (as with a menu open): a test window never takes the mouse")
 			->SetFlags(VF_NOT_NET_SYNCED);
+		gEnv->pConsole->RegisterInt("coop_test_sync_vehicle_hide", 1, 0, "Crysis Coop testing: 0 = a joining player is told only the vehicles hidden or shown otherwise than in the level file (as before 0.11.39; default 1: every vehicle)");
 		gEnv->pConsole->RegisterString("coop_debug_flow", "", 0, "Crysis Coop debugging: \"<graph entity> <node> <output port index or name>\" is activated on the server coop_debug_flow_time s after the game started");
 		gEnv->pConsole->RegisterFloat("coop_debug_flow_time", 20.0f, 0, "Crysis Coop debugging: see coop_debug_flow");
 		gEnv->pConsole->RegisterFloat("coop_debug_menu_at", 0.0f, 0, "Crysis Coop debugging: the host opens the in-game menu this many s after coop_debug_flow fired (0: never)");
@@ -2381,6 +2404,14 @@ void CoopAI::OnLoadingComplete()
 	}
 	s_inLoading = false;
 	s_coopServerLoading = false;
+	if (!s_loadHides.empty())
+	{
+		string line;
+		for (std::map<string, int>::iterator it = s_loadHides.begin(); it != s_loadHides.end(); ++it)
+			line += string().Format(" %s %d,", it->first.c_str(), it->second);
+		CryLogAlways("[CoopSync] this game hid or showed by itself while loading:%s", line.c_str());
+		s_loadHides.clear();
+	}
 	// the interactive objects' flags as loaded, before the story changes them
 	if (gEnv->bServer && g_pGame)
 		ScanUsableObjects(true);
@@ -5074,7 +5105,6 @@ namespace
 	enum ESeqOp { eSeq_Start = 1, eSeq_Stop = 2, eSeq_Time = 3 };
 	const char* const s_radarOpNames[] = { "?", "tag", "add", "add_temp", "story_add", "story_remove", "remove", "teammate", "jammer", "show_temp" };
 
-	bool s_applyingSync = false;
 	struct SSyncMsg { int op; EntityId entity; string name, text; int type; float f; };
 	std::vector<SSyncMsg> s_radarHistory;
 	std::map<EntityId, float> s_radarTempSent;
@@ -5919,6 +5949,7 @@ namespace
 
 	void ResetSync()
 	{
+		s_serverHidden.clear();
 		s_suitHistory.clear();
 		s_seatWant.clear();
 		s_playerSeatSent.clear();
@@ -7017,11 +7048,13 @@ namespace
 		// hidden or shown as now: what the story changed, and what differs
 		// from the level file (a loaded game). The recorded state may be
 		// older than a load that came after it
-		int hides = 0, loaded = 0;
+		int hides = 0, loaded = 0, vehicles = 0;
+		std::set<EntityId> hideSent;
 		for (std::map<EntityId, std::pair<string, bool> >::iterator it = s_hideState.begin(); it != s_hideState.end(); ++it)
 			if (IEntity* pEntity = gEnv->pEntitySystem->GetEntity(it->first))
 			{
 				pRules->CoopSendSync(eSync_Hide, pEntity->IsHidden() ? 1 : 0, it->first, pEntity->GetName(), "", 0, 0.0f, channelId);
+				hideSent.insert(it->first);
 				++hides;
 			}
 		for (std::map<EntityId, bool>::iterator it = s_hideBase.begin(); it != s_hideBase.end(); ++it)
@@ -7030,8 +7063,30 @@ namespace
 				if (pEntity->IsHidden() != it->second)
 				{
 					pRules->CoopSendSync(eSync_Hide, pEntity->IsHidden() ? 1 : 0, it->first, pEntity->GetName(), "", 0, 0.0f, channelId);
+					hideSent.insert(it->first);
 					++loaded;
 				}
+		// and every vehicle as it is now, whatever the level file says: after
+		// a load without the clients (a campaign continued) the armed
+		// vehicles are bound to the network again (OnGameLoaded), and a
+		// friend's game that joins hides exactly those while it loads the
+		// level; one the level file and the server both show stayed hidden
+		// there. Its engine never updated it: the AI companion sat down at its
+		// gun and never got the gun ("entering" for the whole ride, the
+		// user's games of 2026-10-16/17)
+		static ICVar* pSyncVehicleHide = gEnv->pConsole->GetCVar("coop_test_sync_vehicle_hide");
+		if (!pSyncVehicleHide || pSyncVehicleHide->GetIVal())
+		{
+			IVehicleIteratorPtr pHideVehicles = g_pGame->GetIGameFramework()->GetIVehicleSystem()->CreateVehicleIterator();
+			while (IVehicle* pVehicle = pHideVehicles->Next())
+			{
+				IEntity* pEntity = pVehicle->GetEntity();
+				if (hideSent.count(pEntity->GetId()))
+					continue;
+				pRules->CoopSendSync(eSync_Hide, pEntity->IsHidden() ? 1 : 0, pEntity->GetId(), pEntity->GetName(), "", 0, 0.0f, channelId);
+				++vehicles;
+			}
+		}
 		for (std::map<EntityId, std::pair<string, int> >::iterator it = s_aiStateSent.begin(); it != s_aiStateSent.end(); ++it)
 			pRules->CoopSendSync(eSync_AIState, it->second.second, it->first, it->second.first.c_str(), "", 0, 0.0f, channelId);
 		if (IActor* pHost = g_pGame->GetIGameFramework()->GetClientActor())
@@ -7054,7 +7109,8 @@ namespace
 			pRules->CoopSendSync(eSync_Progress, 1, 0, "", s_progress.text.c_str(), s_progress.packed, (float)s_progress.progress, channelId);
 		CryLogAlways("[CoopSync] sent %d AI states, progress bar %s to channel %d", (int)s_aiStateSent.size(),
 			s_progress.visible ? "shown" : "hidden", channelId);
-		CryLogAlways("[CoopSync] sent %d hidden/shown entity states (%d more not as in the level file) to channel %d", hides, loaded, channelId);
+		CryLogAlways("[CoopSync] sent %d hidden/shown entity states (%d more not as in the level file, %d more vehicles) to channel %d", hides, loaded,
+			vehicles, channelId);
 		SendVehicleStates(channelId);
 		CryLogAlways("[CoopSync] sent %d map markers and %d running cutscenes to channel %d",
 			(int)s_radarHistory.size(), (int)s_seqServer.size(), channelId);
@@ -7770,8 +7826,11 @@ void CoopAI::OnSyncMirror(int kind, int op, uint32 entity, const char* name, con
 			pEntity = gEnv->pEntitySystem->FindEntityByName(name);
 		if (!pEntity)
 			return;
+		s_serverHidden[pEntity->GetId()] = op != 0;
 		if (pEntity->IsHidden() != (op != 0))
 		{
+			if (g_pGame->GetIGameFramework()->GetIVehicleSystem()->GetVehicle(pEntity->GetId()))
+				CryLogAlways("[CoopSync] vehicle %s %s as on the server", pEntity->GetName(), op ? "hidden" : "shown");
 			s_applyingSync = true;
 			pEntity->Hide(op != 0);
 			s_applyingSync = false;

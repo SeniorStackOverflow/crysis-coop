@@ -377,6 +377,14 @@ function Start-Boot([hashtable]$Session, [string]$RunDir, [string]$Name) {
     $dir = New-BootDir $RunDir $Name
     $prof = Join-Path $dir "host"
     Write-GameCfg $prof $Session.Sound
+    # (a profile as after a first game: the engine runs its first-login spec
+    # detection otherwise, every test boot; the person's games never do)
+    if ($Session.SeedProfile) {
+        $seed = Join-Path $script:TestHome "seed_profile\Profiles"
+        if (-not (Test-Path -LiteralPath $seed)) { throw "INFRA: no seed profile $seed" }
+        Assert-SafeWrite $prof
+        Copy-Item -LiteralPath $seed $prof -Recurse -Force
+    }
     $a = @("-mod", $script:TestMod, "-dx9", "-devmode", "-userpath", "`"$prof`"", "-logfile", "at_host.log",
         "+coop_test_free_cursor", "1", "+coop_test_cmdfile", "at_host_cmd.txt", "+r_Fullscreen", "0",
         "+cl_voice_recording", "0", "+net_enable_voice_chat", "0", "+coop_relay", "ws://127.0.0.1:9/", "+coop_cloud", "0")

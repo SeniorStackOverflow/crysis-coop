@@ -1721,6 +1721,21 @@ namespace
 		return true;
 	}
 
+	// how the engine updates a vehicle in this game (for the traces): a client
+	// updates its seats, gun and engine only while it counts as seen or near
+	string VehicleUpdateInfo(IVehicle* pVehicle)
+	{
+		IGameObject* pGO = pVehicle->GetGameObject();
+		IEntity* pEntity = pVehicle->GetEntity();
+		string s;
+		s.Format("entity active %d hidden %d policy %d, game object update %d visible %d distant %d slots %d %d %d",
+			(int)pEntity->IsActive(), (int)pEntity->IsHidden(), (int)pEntity->GetUpdatePolicy(), pGO ? (int)pGO->ShouldUpdate() : -1,
+			pGO ? (int)pGO->IsProbablyVisible() : -1, pGO ? (int)pGO->IsProbablyDistant() : -1,
+			pGO ? (int)pGO->GetUpdateSlotEnables(pVehicle, 0) : -1, pGO ? (int)pGO->GetUpdateSlotEnables(pVehicle, 1) : -1,
+			pGO ? (int)pGO->GetUpdateSlotEnables(pVehicle, 2) : -1);
+		return s;
+	}
+
 	// the vehicle's gun: its trigger
 	void VehicleFire(CPlayer* pMe, IVehicle* pVehicle, bool on)
 	{
@@ -2857,20 +2872,88 @@ namespace
 		static string s_vehTraceLast;
 		IVehicleSeat* pTraceSeat = pMyVehicle ? pMyVehicle->GetSeatForPassenger(pMe->GetEntityId()) : 0;
 		IVehicle* pTraceLeaderVehicle = pMyVehicle && pLeader ? pLeader->GetLinkedVehicle() : 0;
+		// its vehicle is updated every frame while it rides. A client updates a
+		// vehicle (its seats, the gun, the turret, the engine) only while it
+		// counts as seen or near, and the companion renders nothing; the seat
+		// it sat down in stays "entering" until the seat's update ends it, and
+		// till then the vehicle hands it no gun: never one shot from the car's
+		// gun in the user's games of 2026-10-16/17 ("seat state 1", "gun (0.00
+		// 0.00 0.00)", powered=0; there the car was hidden in its game, see
+		// below). Forced as the game's own items do (CItem::RequireUpdate)
+		bool forced = false;
+		// one its own game keeps hidden by itself (the server shows every
+		// vehicle to a joining player; this is in case one is still missed):
+		// the engine updates no hidden entity, whatever is forced. Not one the
+		// server hid (the story disabled the vehicle it sits in: as for
+		// everybody), and the 2 s are its vehicle's
+		static float s_hiddenSince = -1.0f;
+		static EntityId s_hiddenVehicle = 0;
+		if (!pMyVehicle || pMyVehicle->GetEntityId() != s_hiddenVehicle)
+		{
+			s_hiddenVehicle = pMyVehicle ? pMyVehicle->GetEntityId() : 0;
+			s_hiddenSince = -1.0f;
+		}
+		if (pMyVehicle && !gEnv->bServer && pMyVehicle->GetGameObject())
+		{
+			if (!pMyVehicle->GetEntity()->IsHidden() || CoopAI::ServerSaysHidden(pMyVehicle->GetEntityId()))
+				s_hiddenSince = -1.0f;
+			else if (s_hiddenSince < 0.0f)
+				s_hiddenSince = Now();
+			else if (Now() - s_hiddenSince > 2.0f)
+			{
+				pMyVehicle->GetEntity()->Hide(false);
+				Event("%s was hidden in its own game for 2 s while it rode in it: shown", pMyVehicle->GetEntity()->GetName());
+				s_hiddenSince = -1.0f;
+			}
+			static ICVar* pForce = gEnv->pConsole->GetCVar("coop_test_vehicle_force");
+			if (!pForce || pForce->GetIVal())
+			{
+				IGameObject* pGO = pMyVehicle->GetGameObject();
+				pGO->ForceUpdateExtension(pMyVehicle, IVehicle::eVUS_Always);
+				pGO->ForceUpdateExtension(pMyVehicle, IVehicle::eVUS_EnginePowered);
+				pGO->ForceUpdateExtension(pMyVehicle, IVehicle::eVUS_PassengerIn);
+				forced = true;
+			}
+		}
+		// (its seat's transition here, each change: one that stayed "entering"
+		// left it without the gun for the whole ride, the user's game of
+		// 2026-10-17)
+		{
+			static int s_seatState = -1;
+			static float s_seatStateSince = 0.0f;
+			const int seatState = pTraceSeat ? (int)pTraceSeat->GetCurrentTransition() : -1;
+			if (seatState != s_seatState)
+			{
+				if (pTraceSeat)
+				{
+					CryLogAlways("[CoopAgent] its seat %s of %s: transition %d -> %d (%.1f s after the last change), gun %s; the vehicle %s, %s",
+						pTraceSeat->GetSeatName(), pMyVehicle->GetEntity()->GetName(), s_seatState, seatState, Now() - s_seatStateSince,
+						pMyVehicle->GetCurrentWeaponId(pMe->GetEntityId()) ? "in hand" : "none", forced ? "updated every frame" : "left to the engine",
+						VehicleUpdateInfo(pMyVehicle).c_str());
+				}
+				else
+					CryLogAlways("[CoopAgent] its seat: none any more (transition was %d for %.1f s)", s_seatState, Now() - s_seatStateSince);
+				s_seatState = seatState;
+				s_seatStateSince = Now();
+			}
+		}
 		string vehTrace;
 		if (pMyVehicle)
 			vehTrace.Format("%s|%s|%d|%d|%s", pMyVehicle->GetEntity()->GetName(), pTraceSeat ? pTraceSeat->GetSeatName() : "-", (int)s_bot.fireAtWill,
 				(int)s_bot.order, pTraceLeaderVehicle ? pTraceLeaderVehicle->GetEntity()->GetName() : "-");
 		if (pMyVehicle && (Now() >= s_vehTraceAt || vehTrace != s_vehTraceLast))
 		{
-			s_vehTraceAt = Now() + 30.0f;
+			// (every 5 s while its seat is still "entering": the judge's D22)
+			s_vehTraceAt = Now() + (pTraceSeat && pTraceSeat->GetCurrentTransition() == IVehicleSeat::eVT_Entering ? 5.0f : 30.0f);
 			s_vehTraceLast = vehTrace;
 			IVehicleSeat* pSeat = pTraceSeat;
 			IVehicle* pLeaderVehicle = pTraceLeaderVehicle;
-			CryLogAlways("[CoopAgent] in %s: seat %s (gunner %d, driver %d), fire at will %d, order %d, the leader %s in %s",
+			CryLogAlways("[CoopAgent] in %s: seat %s (gunner %d, driver %d, transition %d, gun %d), fire at will %d, order %d, the leader %s in %s; %s",
 				pMyVehicle->GetEntity()->GetName(), pSeat ? pSeat->GetSeatName() : "-", pSeat ? (int)pSeat->IsGunner() : -1,
-				pSeat ? (int)pSeat->IsDriver() : -1, (int)s_bot.fireAtWill, (int)s_bot.order, pLeader ? pLeader->GetEntity()->GetName() : "-",
-				pLeaderVehicle ? pLeaderVehicle->GetEntity()->GetName() : "nothing");
+				pSeat ? (int)pSeat->IsDriver() : -1, pSeat ? (int)pSeat->GetCurrentTransition() : -1,
+				pMyVehicle->GetCurrentWeaponId(pMe->GetEntityId()) ? 1 : 0, (int)s_bot.fireAtWill, (int)s_bot.order,
+				pLeader ? pLeader->GetEntity()->GetName() : "-", pLeaderVehicle ? pLeaderVehicle->GetEntity()->GetName() : "nothing",
+				VehicleUpdateInfo(pMyVehicle).c_str());
 		}
 		if (follows && pLeader)
 		{
@@ -5333,6 +5416,27 @@ namespace
 		CryLogAlways("[CoopTest] the host gets into %s seat %s: %s", pEntity->GetName(), pSeat->GetSeatName(), ok ? "ok" : "refused");
 	}
 
+	// coop_test_vehinfo [m]: how this game updates the vehicles near its
+	// player (seen, near, update slots)
+	void CmdTestVehInfo(IConsoleCmdArgs* pArgs)
+	{
+		IActor* pMe = g_pGame->GetIGameFramework()->GetClientActor();
+		if (!pMe)
+			return;
+		const float range = pArgs->GetArgCount() > 1 ? (float)atof(pArgs->GetArg(1)) : 100.0f;
+		const Vec3 at = pMe->GetEntity()->GetWorldPos();
+		IGameObject* pMine = pMe->GetGameObject();
+		CryLogAlways("[CoopTest] vehinfo: me %s at (%.0f %.0f %.0f), my game object visible %d distant %d, channel %d", pMe->GetEntity()->GetName(),
+			at.x, at.y, at.z, pMine ? (int)pMine->IsProbablyVisible() : -1, pMine ? (int)pMine->IsProbablyDistant() : -1, pMine ? (int)pMine->GetChannelId() : -1);
+		IVehicleIteratorPtr pIt = g_pGame->GetIGameFramework()->GetIVehicleSystem()->CreateVehicleIterator();
+		while (IVehicle* pVehicle = pIt->Next())
+		{
+			const float d = pVehicle->GetEntity()->GetWorldPos().GetDistance(at);
+			if (d <= range)
+				CryLogAlways("[CoopTest] vehinfo: %s %.0f m: %s", pVehicle->GetEntity()->GetName(), d, VehicleUpdateInfo(pVehicle).c_str());
+		}
+	}
+
 	void CmdTestPath(IConsoleCmdArgs* pArgs)
 	{
 		IEntity* pTo = pArgs->GetArgCount() > 1 ? gEnv->pEntitySystem->FindEntityByName(pArgs->GetArg(1)) : 0;
@@ -5449,6 +5553,7 @@ void CoopAgent::Init()
 	gEnv->pConsole->AddCommand("coop_test_onehand", CmdTestOneHand, 0, "Crysis Coop testing: coop_test_onehand <player> [grab]: his weapon in the one-hand pose, or (grab) his left hand held up (this game)");
 	gEnv->pConsole->AddCommand("coop_test_anim", CmdTestAnim, 0, "Crysis Coop testing: coop_test_anim <player>: logs his animation graph inputs as this game plays them");
 	gEnv->pConsole->RegisterInt("coop_test_gun_awake", 1, VF_NOT_NET_SYNCED, "Crysis Coop testing: 0 = the companion at a vehicle's gun does not tell the vehicle to update every frame (default 1)");
+	gEnv->pConsole->RegisterInt("coop_test_vehicle_force", 1, VF_NOT_NET_SYNCED, "Crysis Coop testing: 0 = the companion's game leaves the update of the vehicle it rides in to the engine (seen or near only; default 1)");
 	gEnv->pConsole->AddCommand("coop_test_key", CmdTestKey, 0, "Crysis Coop testing: coop_test_key <action> <1|0>: this game's player presses (lets go of) a key's action");
 	gEnv->pConsole->AddCommand("coop_test_cam", CmdTestCam, 0, "Crysis Coop testing: coop_test_cam logs this game's camera, its view and the vehicle seat's view");
 	gEnv->pConsole->AddCommand("coop_test_vehview", CmdTestVehView, 0, "Crysis Coop testing: coop_test_vehview: the vehicle seat's next view for this game's player");
@@ -5459,6 +5564,7 @@ void CoopAgent::Init()
 	gEnv->pConsole->AddCommand("coop_test_levelmodels", CmdTestLevelModels, 0, "Crysis Coop testing: coop_test_levelmodels: the level's own brush models found / default balls");
 	gEnv->pConsole->RegisterInt("coop_test_shottrace", 0, 0, "Crysis Coop testing: log the players' shots from vehicle guns (where from, at what, what the line meets)");
 	gEnv->pConsole->AddCommand("coop_test_enter", CmdTestEnter, 0, "Crysis Coop testing: coop_test_enter <vehicle> <seat id>: the host's player gets in (server)");
+	gEnv->pConsole->AddCommand("coop_test_vehinfo", CmdTestVehInfo, 0, "Crysis Coop testing: coop_test_vehinfo [m]: how this game updates the vehicles near its player");
 	gEnv->pConsole->AddCommand("coop_test_path", CmdTestPath, 0,
 		"Crysis Coop testing: coop_test_path <entity name> logs the AI navigation's way from the host's player to it (server)");
 }
