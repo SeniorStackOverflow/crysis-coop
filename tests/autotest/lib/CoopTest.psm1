@@ -571,4 +571,100 @@ function Step([string]$Name, [scriptblock]$Body) {
 
 function Get-Boot { return $script:Boot }
 
+# ---- the companion's moves and fights: orders over its bridge, a watch of it on the host ----
+
+# ---- orders to the bot without C++ changes: the companion's agent bridge -----
+# The companion listens on 127.0.0.1:<port> (CoopAgent.cpp Handle(): "<id> <cmd> [args]"
+# -> "<id> <json>\n"); in a test its port file is <boot>\lad\companion\agent.port
+# ("port pid", CompanionBase() = COOP_AUTOTEST_DIR). One client at a time.
+# Commands: observe | follow [name] | free | hold | goto <x y z | name> | move <dir> <m>
+#           attack <name|nearest> | revive [name] | fire | grenade | use | weapon <cls> | suit <speed|strength|cloak|armor>
+function Send-Agent([string]$Line, [double]$Within = 10) {
+    $pf = Join-Path $script:Boot.Dir "lad\companion\agent.port"
+    if (-not (Test-Path -LiteralPath $pf)) { throw "INFRA: no agent.port in $pf" }
+    $port = [int](((Get-Content -LiteralPath $pf -Raw).Trim() -split '\s+')[0])
+    $c = New-Object Net.Sockets.TcpClient
+    try {
+        $c.Connect("127.0.0.1", $port)
+        $s = $c.GetStream(); $s.ReadTimeout = [int]($Within * 1000)
+        $w = New-Object IO.StreamWriter($s); $w.AutoFlush = $true
+        $r = New-Object IO.StreamReader($s)
+        $script:Boot.Batch++
+        $id = "at$($script:Boot.Batch)"
+        $w.WriteLine("$id $Line")
+        $reply = $null
+        $until = (Get-Date).AddSeconds($Within)
+        while ((Get-Date) -lt $until) {
+            # (the bridge is served from the companion's game loop: ~16 fps)
+            $l = $r.ReadLine()
+            if ($l -and $l.StartsWith("$id ")) { $reply = $l.Substring($id.Length + 1); break }
+        }
+    } finally { $c.Close() }
+    if (-not $reply) { throw "INFRA: no answer from the companion's bridge to '$Line'" }
+    Write-Step "  > agent: $Line -> $($reply.Substring(0, [Math]::Min(140, $reply.Length)))"
+    return ($reply | ConvertFrom-Json)
+}
+
+# ---- an oracle on the host: every 0.5 s the companion as the server sees it ----
+# One "[CHK] w ..." line per tick: position, moved since the last tick, a static/
+# rigid thing within 0.7 m in front at waist height, head height above the feet
+# (crouch < 1.25), suit mode (0 speed 1 strength 2 cloak 3 armor) and energy,
+# health, how many of the watched foes see its head (ray eye->head, terrain +
+# static + rigid), distance to the host and to the goal.
+# Each line < 1000 chars (Send-Game's limit); functions in separate lines.
+function Start-Watch([string[]]$FoeNames = @(), $Goal = $null) {
+    $foes = ($FoeNames | ForEach-Object { '"' + $_ + '"' }) -join ","
+    $g = if ($Goal) { "{x=$($Goal[0]),y=$($Goal[1]),z=$($Goal[2])}" } else { "nil" }
+    Send-Game host ("#AtW={on=true,t=0,name=""Companion"",goal=$g,foes={}}; for _,n in ipairs({$foes}) do local e=System.GetEntityByName(n); if e then table.insert(AtW.foes,e.id) end end; System.LogAlways(""[CHK] watch on, foes ""..#AtW.foes)")
+    Send-Game host '#function AtWHead(e) local h=e:GetBonePos("Bip01 Head"); if h and h.z then return {x=h.x,y=h.y,z=h.z} end local p=e:GetWorldPos(); return {x=p.x,y=p.y,z=p.z+1.6} end'
+    Send-Game host '#function AtWSeen(c) local n=0; local hd=AtWHead(c); for _,id in ipairs(AtW.foes) do local e=System.GetEntity(id); if e and e.actor and e.actor:GetHealth()>0 then local s=AtWHead(e); if Physics.RayWorldIntersection(s,{x=hd.x-s.x,y=hd.y-s.y,z=hd.z-s.z},1,ent_terrain+ent_static+ent_rigid+ent_sleeping_rigid,e.id,c.id,g_HitTable)==0 then n=n+1 end end end return n end'
+    Send-Game host '#function AtWWall(c,p) local f=c:GetDirectionVector(1); return Physics.RayWorldIntersection({x=p.x,y=p.y,z=p.z+1.0},{x=f.x*0.7,y=f.y*0.7,z=0},1,ent_static+ent_rigid+ent_sleeping_rigid,c.id,nil,g_HitTable)>0 and 1 or 0 end'
+    Send-Game host '#function AtWLine(c) local p=c:GetWorldPos(); local lp=AtW.last or p; local mv=math.sqrt((p.x-lp.x)^2+(p.y-lp.y)^2); AtW.last={x=p.x,y=p.y,z=p.z}; local dg=-1; if AtW.goal then dg=math.sqrt((p.x-AtW.goal.x)^2+(p.y-AtW.goal.y)^2) end; return string.format("[CHK] w t=%.1f pos=%.1f,%.1f,%.1f mv=%.2f wall=%d head=%.2f suit=%d en=%.0f hp=%d seen=%d dh=%.1f dg=%.1f",AtW.t,p.x,p.y,p.z,mv,AtWWall(c,p),AtWHead(c).z-p.z,c.actor:GetNanoSuitMode(),c.actor:GetNanoSuitEnergy(),c.actor:GetHealth(),AtWSeen(c),c:GetDistance(g_localActorId),dg) end'
+    Send-Game host '#function AtWTick() if not AtW.on then return end AtW.t=AtW.t+0.5; local c=System.GetEntityByName(AtW.name); if c and c.actor then System.LogAlways(AtWLine(c)) end Script.SetTimer(500,AtWTick) end; AtWTick()'
+}
+function Stop-Watch { Send-Game host '#AtW.on=false; System.LogAlways("[CHK] watch off")' }
+function Set-WatchGoal($Goal) { Send-Game host "#AtW.goal={x=$($Goal[0]),y=$($Goal[1]),z=$($Goal[2])}; AtW.last=nil; System.LogAlways(""[CHK] watch goal $($Goal -join ' ')"")" }
+
+# the watch lines after a mark, as objects
+function Get-Watch($Since) {
+    $rx = '^\[CHK\] w t=([\d.]+) pos=(-?[\d.]+),(-?[\d.]+),(-?[\d.]+) mv=([\d.]+) wall=(\d) head=(-?[\d.]+) suit=(-?\d+) en=(-?[\d.]+) hp=(-?\d+) seen=(\d+) dh=(-?[\d.]+) dg=(-?[\d.]+)'
+    @(Find-Log host $rx $Since -All | ForEach-Object {
+        $g = $_.Match.Groups
+        [pscustomobject]@{ No = $_.No; T = [double]$g[1].Value; X = [double]$g[2].Value; Y = [double]$g[3].Value; Z = [double]$g[4].Value; Mv = [double]$g[5].Value
+            Wall = [int]$g[6].Value; Head = [double]$g[7].Value; Suit = [int]$g[8].Value; En = [double]$g[9].Value; Hp = [int]$g[10].Value
+            Seen = [int]$g[11].Value; Dh = [double]$g[12].Value; Dg = [double]$g[13].Value }
+    })
+}
+
+# seconds pressed into something: not moving (< 0.1 m in 0.5 s), a solid thing
+# within 0.7 m in front, alive, and not where it should be (goal > 2.5 m off, or
+# with no goal the host > 4.5 m off)
+function Get-BumpSeconds($W) {
+    0.5 * @($W | Where-Object { $_.Hp -gt 0 -and $_.Mv -lt 0.1 -and $_.Wall -eq 1 -and $(if ($_.Dg -ge 0) { $_.Dg -gt 2.5 } else { $_.Dh -gt 4.5 }) }).Count
+}
+# inside an axis-aligned box (x0 x1 y0 y1, the building's waypoint box) at floor height
+function Test-Inside($S, $Box, [double]$Floor) {
+    $S.X -ge $Box[0] - 0.3 -and $S.X -le $Box[1] + 0.3 -and $S.Y -ge $Box[2] - 0.3 -and $S.Y -le $Box[3] + 0.3 -and [Math]::Abs($S.Z - $Floor) -lt 1.2
+}
+# peeks: exposed stretches (seen > 0) of 0.5-4 s between hidden ones, with a hit by the companion in them
+function Get-Peeks($W, $Since) {
+    $hits = @(Find-Log host '\] HIT \S+ by Companion ' $Since -All)
+    $n = 0; $exposedFrom = $null
+    for ($i = 1; $i -lt $W.Count; $i++) {
+        if ($W[$i].Hp -le 0) { $exposedFrom = $null; continue }
+        if ($W[$i].Seen -gt 0 -and $W[$i - 1].Seen -eq 0) { $exposedFrom = $i }
+        elseif ($W[$i].Seen -eq 0 -and $W[$i - 1].Seen -gt 0 -and $null -ne $exposedFrom) {
+            $len = 0.5 * ($i - $exposedFrom)
+            # (a peek: short, standing still, and a hit by it in that stretch;
+            # any short exposure passing by counted before)
+            $from = $W[[Math]::Max(0, $exposedFrom - 1)].No; $to = $W[$i].No
+            $still = @($W[$exposedFrom..($i - 1)] | Where-Object { $_.Mv -ge 0.1 }).Count -eq 0
+            $shot = @($hits | Where-Object { $_.No -gt $from -and $_.No -le $to }).Count -gt 0
+            if ($len -le 4.0 -and $still -and $shot) { $n++ }
+            $exposedFrom = $null
+        }
+    }
+    return [pscustomobject]@{ Peeks = $n; HitsByCompanion = $hits.Count }
+}
+
 Export-ModuleMember -Function * -Variable Boot

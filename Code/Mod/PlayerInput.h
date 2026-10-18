@@ -125,6 +125,7 @@ private:
 	SPlayerStats* m_pStats;
 	uint32 m_actions;
 	uint32 m_lastActions;
+	uint32 m_netLean;    // coop: this frame's lean, kept for the network (PostUpdate lets go of it)
 	Vec3 m_deltaMovement;
 	Vec3 m_xi_deltaMovement;
   Vec3 m_deltaMovementPrev;

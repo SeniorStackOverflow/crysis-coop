@@ -1152,6 +1152,8 @@ IMPLEMENT_RMI(CGameRules, ClResetObjectives)
 IMPLEMENT_RMI(CGameRules, ClHitIndicator)
 {
 	SAFE_HUD_FUNC(IndicateHit(false, NULL,params.success));
+	// coop: the AI companion counts its hits (on the one it fights)
+	CoopAgent::OnHitIndicator(params.success);
 
 	return true;
 }
@@ -1161,6 +1163,9 @@ IMPLEMENT_RMI(CGameRules, ClDamageIndicator)
 {
 	Vec3 dir(ZERO);
 	bool vehicle=false;
+	// (the AI companion learns who shoots it: its health alone missed the
+	// hits its suit's armor took)
+	CoopAgent::OnDamaged(params.shooterId, params.weaponId);
 
 	if (IEntity *pEntity=gEnv->pEntitySystem->GetEntity(params.shooterId))
 	{

@@ -18,6 +18,7 @@
 #include "HUD/HUD.h"
 #include "OffHand.h"
 #include "Item.h"
+#include "AmmoPickup.h"
 #include "IPlayerInput.h"
 #include "Player.h"
 #include "NanoSuit.h"
@@ -154,6 +155,28 @@ namespace
 		pEntity->GetWorldBounds(box);
 		Vec3 c = box.GetCenter();
 		c.z += (box.max.z - box.min.z) * 0.18f;
+		// one at a vehicle's gun: the head, over the side (at his chest the
+		// shots went into the truck: 10 of 12 hits, its armor took them, no
+		// soldier killed in 20 fights at the bridge)
+		IActor* pActor = g_pGame ? g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(pEntity->GetId()) : 0;
+		if (pActor && pActor->GetLinkedVehicle() && !box.IsEmpty())
+		{
+			Vec3 head(c.x, c.y, box.max.z - 0.15f);
+			ICharacterInstance* pChar = pEntity->GetCharacter(0);
+			if (ISkeletonPose* pPose = pChar ? pChar->GetISkeletonPose() : 0)
+			{
+				const int16 h = pPose->GetJointIDByName("Bip01 Head");
+				if (h >= 0)
+				{
+					const Vec3 bone = pEntity->GetSlotWorldTM(0) * pPose->GetAbsJointByID(h).t;
+					AABB grown = box;
+					grown.Expand(Vec3(0.3f, 0.3f, 0.3f));
+					if (grown.IsContainPoint(bone))
+						head = bone;
+				}
+			}
+			return head;
+		}
 		return c;
 	}
 
@@ -356,6 +379,7 @@ namespace
 		// weapons: when it looks again, the one it goes to pick up
 		float weaponAt;
 		EntityId loot;
+		string lootClass;        // what it is (gone from the ground once taken)
 		float lootSince, useAt, useBlocked;
 		int lootUses;            // use pressed at the one it goes for
 		float lootNear;          // the closest its eyes came to it
@@ -365,6 +389,14 @@ namespace
 		std::vector<Vec3> path;
 		Vec3 pathGoal;
 		float pathAt, pathAskAt;
+		float pathNoneAt;       // the host's game found no way there, then, to
+		Vec3 pathNoneGoal;
+		bool localFound;        // the way round close by gets there (not just nearer)
+		bool doorMode;          // along the host's way point by point (its own squares find none)
+		Vec3 doorFor;
+		float arriveBlockedSince;   // next to the one it follows with something between, since
+		float jumpAt;           // when it last jumped up onto something on its way
+		float waitWayUntil;     // stands till then for the host's way (its own squares only got nearer)
 		float reviveSince;      // at the body of whom it revives, since
 		float reachFailSince;   // next to the body with something between, since
 		EntityId bodyToldFor;   // said where the host's game has his body
@@ -387,14 +419,53 @@ namespace
 		float coverAt;          // when the host's game named that cover
 		float peekUntil;        // fighting from cover: up shooting / down
 		bool peekUp;
+		int coverPeek;          // how it fights from the cover: 0 standing up, 1 leaning left, 2 right, 3 no shot
+		float peekSince;        // up (or down) since
+		float peekSeenAt;       // its enemy last in sight while up
+		int peekSide;           // the side it leans out to now (it changes sides)
+		float openSince;        // fighting in the open since (-1: not)
+		int peeks, peekHits, hiddenReloads;   // for the log, now and then
+		int leanPeeks;          // of the peeks, leaning out round the cover's side
+		int hitsConfirmed;      // its hits the server marked (the last minute)
+		float leanHoldUntil;    // the agent's "lean": held till then, to that side
+		int leanHoldSide;
+		float zoomAt;           // the sights may go up or down again then
+		bool zoomWant;          // FightStep wants the sights up this frame
+		bool cloakEscape;       // falling back cloaked (out of their sight)
+		float strengthJumpAt;   // a strength jump onto what is in the way: wanted since (-1: none)
+		Vec3 strengthJumpDir;
+		float heavyHitAt;       // hit by a heavy gun (a vehicle's, a minigun, a rocket) then
+		float retreatNowAt;     // shot in cover by a heavy gun then: falls back (Survive, within 1 s)
+		Vec3 ownNoneFor;        // its own squares found no way to there, then
+		float ownNoneAt;
+		Vec3 longWayFor;        // the host's long way round taken for there, then
+		float longWayAt;
+		Vec3 circleAt;          // where it has been going round in a few metres since, to the one it follows
+		float circleSince, circleLast, circleBest;
+		Vec3 sjPlace;           // where it tried strength jumps lately, and how often
+		float sjPlaceAt;
+		int sjTries;
+		float meleeAt;          // a blow at one right next to it again then
+		float meleeWantUntil;   // strength wanted for a blow till then
+		int suitSwitches;
+		float suitHoldUntil;    // the agent's own suit mode kept till then (0: SuitStep chooses)
+		bool coverOpenAsk;      // the cover was asked for in the open, not shot at (one with no shot is no use then)
+		Vec3 pathAskGoal;       // the last way asked for, to where
+		Vec3 waitedFor;         // it stood for the host's way to there, then
+		float waitedAt;
+		float fineGridAt;       // the quarter-metre squares looked at last then
+		float fightOpen, fightHidden, fightPeek, fightBack;   // seconds this minute
 		SBrain(): order(eO_Free), spot(ZERO), haveSpot(false), fireAtWill(true), enemy(0), burstUntil(0), pauseUntil(0), reloadAt(0),
 			switchAt(0), attackHeld(false), progGoal(ZERO), progBest(1e9f), progAt(0), progSeen(-100), progPath(-100), stuck(0),
 			slideDir(ZERO), slideUntil(0), localFor(ZERO), localAt(-100), localStage(0), localPlans(0), nextCheckFor(ZERO), toCheckFor(ZERO),
 			nextCheckAt(0), toCheckAt(0), nextClear(true), toClear(true), wayCheckAt(0), wayCheckPath(-100), farSince(-1), askAt(0), reportAt(0), useHeld(false), useFor(0), useSince(0), lastHealth(-1), wasDown(false), named(false),
-			weaponAt(0), loot(0), lootSince(0), useAt(0), useBlocked(0), pathGoal(ZERO), pathAt(-100), pathAskAt(0), reviveSince(-1), reachFailSince(-1), bodyToldFor(0),
+			weaponAt(0), loot(0), lootSince(0), useAt(0), useBlocked(0), pathGoal(ZERO), pathAt(-100), pathAskAt(0), pathNoneAt(-100), pathNoneGoal(ZERO),
+			localFound(false), doorMode(false), doorFor(ZERO), arriveBlockedSince(-1), jumpAt(-100), waitWayUntil(0), reviveSince(-1), reachFailSince(-1), bodyToldFor(0),
 			dodgeUntil(0), dodgeSide(1), retreating(false), hitAt(-100), lastFought(0), bursts(0), heldFire(0), stuckTimes(0), unseen(0), turning(0), statsAt(0), dropAt(0), downedFor(0), downedSince(0), enemySeenAt(-100),
 			cover(ZERO), haveCover(false), coverAskAt(0), retreatSince(-100), recoveredAt(-100),
-			coverAt(-100), peekUntil(0), peekUp(true) {}
+			coverAt(-100), peekUntil(0), peekUp(true), coverPeek(0), peekSince(0), peekSeenAt(-100), peekSide(1), openSince(-1), peeks(0), leanPeeks(0), hitsConfirmed(0), leanHoldUntil(0), leanHoldSide(0),
+			peekHits(0), hiddenReloads(0), zoomAt(0), zoomWant(false), cloakEscape(false), strengthJumpAt(-1), strengthJumpDir(ZERO), sjPlace(ZERO), sjPlaceAt(-100), sjTries(0), heavyHitAt(-100), retreatNowAt(-100), ownNoneFor(ZERO), ownNoneAt(-100), longWayFor(ZERO), longWayAt(-100), circleAt(ZERO), circleSince(-1), circleLast(-100), circleBest(0), meleeAt(0), meleeWantUntil(0),
+			suitSwitches(0), suitHoldUntil(0), coverOpenAsk(false), pathAskGoal(ZERO), waitedFor(ZERO), waitedAt(-100), fineGridAt(-100), fightOpen(0), fightHidden(0), fightPeek(0), fightBack(0) {}
 	} s_bot;
 
 	// where the downed teammates lie in the host's game, and when it said so
@@ -404,6 +475,42 @@ namespace
 		float at;
 	};
 	std::map<string, SHostBody> s_hostBodies;
+
+	// who shot it, lately: when first and last, how often, from where (the
+	// server's damage indicator; a hit its suit's armor took left its health
+	// as it was, and only a third to two thirds of the hits were noticed)
+	struct SThreat
+	{
+		float first, last;
+		int hits;
+		Vec3 pos;
+		SThreat(): first(0), last(-100), hits(0), pos(ZERO) {}
+	};
+	std::map<EntityId, SThreat> s_threats;
+	std::vector<float> s_hitTimes;          // when it was hit lately
+
+	int HitsWithin(float seconds)
+	{
+		int n = 0;
+		for (size_t i = 0; i < s_hitTimes.size(); ++i)
+			if (Now() - s_hitTimes[i] < seconds)
+				++n;
+		return n;
+	}
+
+	// the one who shot it last within that long (0: nobody)
+	EntityId LastShooter(float within)
+	{
+		EntityId best = 0;
+		float at = Now() - within;
+		for (std::map<EntityId, SThreat>::const_iterator it = s_threats.begin(); it != s_threats.end(); ++it)
+			if (it->second.last >= at)
+			{
+				at = it->second.last;
+				best = it->first;
+			}
+		return best;
+	}
 
 	// what SteerInput hands the player input
 	struct SControl
@@ -415,7 +522,8 @@ namespace
 		bool sprint;
 		bool jump;
 		bool crouch;
-		SControl(): moveDir(ZERO), look(false), yaw(0), pitch(0), turnRate(6.0f), sprint(false), jump(false), crouch(false) {}
+		int lean;               // -1 left, 1 right (out round a corner of its cover)
+		SControl(): moveDir(ZERO), look(false), yaw(0), pitch(0), turnRate(6.0f), sprint(false), jump(false), crouch(false), lean(0) {}
 	} s_ctl;
 
 	void Press(CPlayer* pPlayer, const ActionId& action, bool press)
@@ -497,12 +605,27 @@ namespace
 	float s_footBlockedSince = -1.0f;
 	float s_footBlockedLastAt = -100.0f;
 
+	// its hits on each enemy (the server's hit marker, put on the one it
+	// fought then), forgotten 15 s after the last
+	struct SMyHits { int n; float last; };
+	std::map<EntityId, SMyHits> s_myHits;
+	int MyHitsOn(EntityId id, float within)
+	{
+		std::map<EntityId, SMyHits>::const_iterator it = s_myHits.find(id);
+		return it != s_myHits.end() && Now() - it->second.last < within ? it->second.n : 0;
+	}
+
 	EntityId PickEnemy(CPlayer* pMe, const Vec3& eye, float range)
 	{
 		if (s_bot.order == eO_Attack && !s_bot.target.empty())
 		{
 			IActor* pTarget = ActorByName(s_bot.target.c_str());
-			return pTarget && pTarget->GetHealth() > 0 ? pTarget->GetEntityId() : 0;
+			if (!pTarget || pTarget->GetHealth() <= 0)
+				return 0;
+			// (seen: a threat for the suit too)
+			if (Visible(pMe, eye, pTarget->GetEntity(), AimPoint(pTarget->GetEntity())))
+				s_bot.enemySeenAt = Now();
+			return pTarget->GetEntityId();
 		}
 		// the one it fights stays its target while it is alive and was seen
 		// a moment ago (a branch passing between them is no reason to turn
@@ -517,7 +640,15 @@ namespace
 			{
 				if (Visible(pMe, eye, pCurrent->GetEntity(), aim))
 					s_bot.enemySeenAt = Now();
-				if (Now() - s_bot.enemySeenAt < 2.5f)
+				const EntityId shooter = LastShooter(1.5f);
+				IActor* pShooter = shooter && shooter != s_bot.enemy ? ActorOf(shooter) : 0;
+				const bool shooterSeen = pShooter && Hostile(pShooter) && Visible(pMe, eye, pShooter->GetEntity(), AimPoint(pShooter->GetEntity()));
+				// (one it has hit twice lately: finished first, in sight, whoever
+				// else shoots; it went to each new shooter in turn, the hits spread
+				// over all of them, 1 kill in 20 fights. Its hits: the server's hit
+				// marker, its health here is only ever 100 or 0)
+				const bool wounded = MyHitsOn(s_bot.enemy, 10.0f) >= 2;
+				if (Now() - s_bot.enemySeenAt < 2.5f && (!shooterSeen || (wounded && Now() - s_bot.enemySeenAt < 0.5f)))
 					return s_bot.enemy;
 			}
 		}
@@ -535,8 +666,16 @@ namespace
 			const float d = aim.GetDistance(eye);
 			if (d > range || !Visible(pMe, eye, pActor->GetEntity(), aim))
 				continue;
-			// the one it fights already a little preferred
-			const float score = d - (pActor->GetEntityId() == s_bot.enemy ? 8.0f : 0.0f);
+			// the one it fights already a little preferred; one who shot it a
+			// moment ago much more (it shot at the nearest while another one
+			// shot it down)
+			std::map<EntityId, SThreat>::const_iterator threat = s_threats.find(pActor->GetEntityId());
+			const bool shotMe = threat != s_threats.end() && Now() - threat->second.last < 4.0f;
+			// (one at a vehicle's gun, behind its shield and the cab, after
+			// the others on foot it can hit; one it hit lately first: 4 m nearer
+			// as it were a hit, up to 16, the hits on one, not spread over all)
+			const float hurt = (float)min(MyHitsOn(pActor->GetEntityId(), 15.0f), 4);
+			const float score = d - (pActor->GetEntityId() == s_bot.enemy ? 8.0f : 0.0f) - (shotMe ? 25.0f : 0.0f) + (pActor->GetLinkedVehicle() ? 20.0f : 0.0f) - hurt * 4.0f;
 			if (score < bestScore)
 			{
 				bestScore = score;
@@ -612,7 +751,7 @@ namespace
 	// not move (a thin ray slipped past the post of a fence the body then
 	// was caught on), rays at the middle and both sides against what moves
 	// (a bin is pushed aside, a car or a pallet of crates is not)
-	bool ClearWay(CPlayer* pMe, const Vec3& from, const Vec3& to)
+	bool ClearWay(CPlayer* pMe, const Vec3& from, const Vec3& to, float radius = 0.3f)
 	{
 		const Vec3 dir = to - from;
 		if (dir.x * dir.x + dir.y * dir.y < 0.04f)
@@ -623,7 +762,7 @@ namespace
 		{
 			primitives::sphere ball;
 			ball.center = from + Vec3(0, 0, s_heights[i]);
-			ball.r = 0.3f;
+			ball.r = radius;
 			geom_contact* pContact = 0;
 			const float hit = gEnv->pPhysicalWorld->PrimitiveWorldIntersection(ball.type, &ball, dir, ent_static, &pContact, 0,
 				WALK_GEOM, 0, 0, 0, &pSkip, pSkip ? 1 : 0);
@@ -634,7 +773,7 @@ namespace
 		side.NormalizeSafe(Vec3(1, 0, 0));
 		for (int i = 0; i < 6; ++i)
 		{
-			const Vec3 at = from + Vec3(0, 0, i < 3 ? 0.65f : 1.25f) + side * (0.3f * (float)(i % 3 - 1));
+			const Vec3 at = from + Vec3(0, 0, i < 3 ? 0.65f : 1.25f) + side * (radius * (float)(i % 3 - 1));
 			ray_hit hit;
 			if (gEnv->pPhysicalWorld->RayWorldIntersection(at, dir, ent_rigid | ent_sleeping_rigid, WALK_GEOM, &hit, 1, &pSkip, pSkip ? 1 : 0)
 				&& hit.pCollider && Heavy(hit.pCollider))
@@ -663,7 +802,14 @@ namespace
 				const float a = s_angles[i] * (k ? -s_side : s_side);
 				const float c = cosf(a), sn = sinf(a);
 				const Vec3 d(dir.x * c - dir.y * sn, dir.x * sn + dir.y * c, 0);
-				if (ClearWay(pMe, pos, pos + d * 1.8f))
+				// (the probe's end on the ground there: a stair is no wall)
+				Vec3 end = pos + d * 1.8f;
+				ray_hit ground;
+				IPhysicalEntity* pSelf = pMe->GetEntity()->GetPhysics();
+				if (gEnv->pPhysicalWorld->RayWorldIntersection(end + Vec3(0, 0, 1.5f), Vec3(0, 0, -3.0f), ent_static | ent_terrain, WALK_GEOM, &ground, 1,
+					&pSelf, pSelf ? 1 : 0) && ground.pt.z - pos.z < 0.6f)
+					end.z = std::max(pos.z, ground.pt.z);
+				if (ClearWay(pMe, pos, end))
 				{
 					if (i)
 						s_side = k ? -s_side : s_side;
@@ -687,32 +833,46 @@ namespace
 	struct SGrid
 	{
 		float x0, y0, z;                   // the corner, the height it looks from
+		float cell;                        // the squares' size (0.5 m; 0.25 m to look again close by)
 		int n;                             // squares a side
 		std::vector<signed char> state;    // -1 not looked at yet, 0 the body does not fit, 1 it does
 		std::vector<float> ground;         // the ground's height
 		std::vector<unsigned char> cost;   // 1, more where a loose thing is pushed aside
 		std::vector<AABB> light;           // loose things pushed aside (walked round if it can)
 		std::vector<IPhysicalEntity*> skip;   // not in the way: itself, those loose things, bodies lying there
-		SGrid(): x0(0), y0(0), z(0), n(0) {}
+		std::vector<unsigned char> why;    // why the body does not fit (EGridWhy)
+		SGrid(): x0(0), y0(0), z(0), cell(GRID_CELL), n(0) {}
 	} s_grid;
+	// why a square is not walked on (for the log: what keeps it in)
+	enum EGridWhy { eGW_None, eGW_NoGround, eGW_Knee, eGW_Waist, eGW_Chest, eGW_Step };
+
+	// a step up or down from one square to the next the body takes (a stair
+	// is no wall: 0.5 m on half-metre squares)
+	float GridStep(bool diag)
+	{
+		const float step = 0.25f + 0.5f * s_grid.cell;
+		return diag ? step * 1.4f : step;
+	}
 
 	// the squares around a place (it stands in the middle of one)
-	void GridBegin(CPlayer* pMe, const Vec3& center, float radius)
+	void GridBegin(CPlayer* pMe, const Vec3& center, float radius, float cell = GRID_CELL)
 	{
 		SGrid& g = s_grid;
-		g.n = 2 * std::max(2, (int)(radius / GRID_CELL)) + 1;
-		g.x0 = center.x - g.n * GRID_CELL * 0.5f;
-		g.y0 = center.y - g.n * GRID_CELL * 0.5f;
+		g.cell = cell;
+		g.n = 2 * std::max(2, (int)(radius / cell)) + 1;
+		g.x0 = center.x - g.n * cell * 0.5f;
+		g.y0 = center.y - g.n * cell * 0.5f;
 		g.z = center.z;
 		g.state.assign(g.n * g.n, -1);
 		g.ground.assign(g.n * g.n, center.z);
 		g.cost.assign(g.n * g.n, 1);
+		g.why.assign(g.n * g.n, eGW_None);
 		g.light.clear();
 		g.skip.clear();
 		if (IPhysicalEntity* p = pMe ? pMe->GetEntity()->GetPhysics() : 0)
 			g.skip.push_back(p);
 		IPhysicalEntity** list = 0;
-		const float size = g.n * GRID_CELL;
+		const float size = g.n * cell;
 		const int count = gEnv->pPhysicalWorld->GetEntitiesInBox(Vec3(g.x0, g.y0, g.z - 6.0f), Vec3(g.x0 + size, g.y0 + size, g.z + 6.0f),
 			list, ent_rigid | ent_sleeping_rigid);
 		for (int i = 0; i < count; ++i)
@@ -740,14 +900,17 @@ namespace
 		if (g.state[i] >= 0)
 			return g.state[i] == 1;
 		g.state[i] = 0;
-		const float x = g.x0 + (cx + 0.5f) * GRID_CELL, y = g.y0 + (cy + 0.5f) * GRID_CELL;
+		const float x = g.x0 + (cx + 0.5f) * g.cell, y = g.y0 + (cy + 0.5f) * g.cell;
 		const float top = std::max(g.z, gEnv->p3DEngine->GetTerrainElevation(x, y)) + 2.0f;
 		IPhysicalEntity** pSkip = g.skip.empty() ? 0 : &g.skip[0];
 		const int nSkip = (int)g.skip.size();
 		ray_hit hit;
 		if (!gEnv->pPhysicalWorld->RayWorldIntersection(Vec3(x, y, top), Vec3(0, 0, -8.0f), ent_static | ent_terrain, WALK_GEOM, &hit, 1,
 			pSkip, nSkip))
+		{
+			g.why[i] = eGW_NoGround;
 			return false;
+		}
 		g.ground[i] = hit.pt.z;
 		for (int k = 0; k < 3; ++k)
 		{
@@ -756,7 +919,10 @@ namespace
 			ball.r = 0.3f;
 			if (gEnv->pPhysicalWorld->PrimitiveWorldIntersection(ball.type, &ball, Vec3(ZERO), ent_static | ent_rigid | ent_sleeping_rigid, 0, 0,
 				WALK_GEOM, 0, 0, 0, pSkip, nSkip) > 0.0f)
+			{
+				g.why[i] = (unsigned char)(eGW_Knee + k);
 				return false;
+			}
 		}
 		const Vec3 mid(x, y, hit.pt.z + 0.8f);
 		for (size_t k = 0; k < g.light.size(); ++k)
@@ -769,7 +935,7 @@ namespace
 	int GridIndex(const Vec3& p)
 	{
 		const SGrid& g = s_grid;
-		const int cx = (int)floorf((p.x - g.x0) / GRID_CELL), cy = (int)floorf((p.y - g.y0) / GRID_CELL);
+		const int cx = (int)floorf((p.x - g.x0) / g.cell), cy = (int)floorf((p.y - g.y0) / g.cell);
 		return cx < 0 || cy < 0 || cx >= g.n || cy >= g.n ? -1 : cy * g.n + cx;
 	}
 
@@ -778,18 +944,68 @@ namespace
 	bool GridLine(const Vec3& a, const Vec3& b)
 	{
 		SGrid& g = s_grid;
-		const int steps = std::max(1, (int)(Dist2D(a, b) / (GRID_CELL * 0.5f)));
+		const int steps = std::max(1, (int)(Dist2D(a, b) / (g.cell * 0.5f)));
 		int prev = -1;
 		for (int s = 0; s <= steps; ++s)
 		{
 			const int i = GridIndex(a + (b - a) * ((float)s / (float)steps));
 			if (i < 0 || !GridFree(i % g.n, i / g.n))
 				return false;
-			if (prev >= 0 && prev != i && fabsf(g.ground[i] - g.ground[prev]) > 0.45f)
+			if (prev >= 0 && prev != i && fabsf(g.ground[i] - g.ground[prev]) > GridStep(true))
 				return false;
 			prev = i;
 		}
 		return true;
+	}
+
+	// a ball the width of the body swept between two places at the knees,
+	// the waist and the chest against what does not move or is heavy (a
+	// door at an angle to the squares: both squares beside a diagonal step
+	// through it touch its frame, the step itself does not)
+	bool GridSweep(const Vec3& a, const Vec3& b, float radius)
+	{
+		SGrid& g = s_grid;
+		IPhysicalEntity** pSkip = g.skip.empty() ? 0 : &g.skip[0];
+		const int nSkip = (int)g.skip.size();
+		const float base = std::max(a.z, b.z);
+		Vec3 dir = b - a;
+		dir.z = 0;
+		for (int k = 0; k < 3; ++k)
+		{
+			primitives::sphere ball;
+			ball.center = Vec3(a.x, a.y, base + 0.65f + 0.5f * k);
+			ball.r = radius;
+			geom_contact* pContact = 0;
+			if (gEnv->pPhysicalWorld->PrimitiveWorldIntersection(ball.type, &ball, dir, ent_static | ent_rigid | ent_sleeping_rigid, &pContact, 0,
+				WALK_GEOM, 0, 0, 0, pSkip, nSkip) > 0.0f && pContact)
+				return false;
+		}
+		return true;
+	}
+
+	// what keeps it in, round where it stands (for the log): the squares
+	// next to it it does not fit on, and why
+	string GridWhyAround(const Vec3& pos)
+	{
+		const SGrid& g = s_grid;
+		const int i = GridIndex(pos);
+		if (i < 0)
+			return "";
+		int counts[6] = { 0, 0, 0, 0, 0, 0 };
+		const int cx = i % g.n, cy = i / g.n;
+		for (int dy = -1; dy <= 1; ++dy)
+			for (int dx = -1; dx <= 1; ++dx)
+			{
+				const int nx = cx + dx, ny = cy + dy;
+				if ((dx || dy) && nx >= 0 && ny >= 0 && nx < g.n && ny < g.n && g.state[ny * g.n + nx] == 0)
+					++counts[g.why[ny * g.n + nx]];
+			}
+		static const char* const s_names[] = { "", "no ground", "at the knees", "at the waist", "at the chest", "a step" };
+		string out;
+		for (int k = 1; k < 6; ++k)
+			if (counts[k])
+				out += string().Format("%s%d %s", out.empty() ? "" : ", ", counts[k], s_names[k]);
+		return out;
 	}
 
 	// the shortest walk over the squares from where it stands to a place
@@ -811,8 +1027,9 @@ namespace
 			g.state[start] = 1;
 			g.ground[start] = from.z;
 		}
-		const float edge = GRID_CELL * 0.5f;
-		const Vec3 goal(clamp_tpl(to.x, g.x0 + edge, g.x0 + n * GRID_CELL - edge), clamp_tpl(to.y, g.y0 + edge, g.y0 + n * GRID_CELL - edge), to.z);
+		const float cell = g.cell;
+		const float edge = cell * 0.5f;
+		const Vec3 goal(clamp_tpl(to.x, g.x0 + edge, g.x0 + n * cell - edge), clamp_tpl(to.y, g.y0 + edge, g.y0 + n * cell - edge), to.z);
 		const int target = GridIndex(goal);
 		const int tx = target % n, ty = target / n;
 		struct SOpen
@@ -825,7 +1042,7 @@ namespace
 		std::vector<int> back(n * n, -1);
 		std::vector<bool> closed(n * n, false);
 		std::priority_queue<SOpen> open;
-		#define COOP_GRID_H(i) (GRID_CELL * (float)(std::max(abs((i) % n - tx), abs((i) / n - ty)) + 0.414f * std::min(abs((i) % n - tx), abs((i) / n - ty))))
+		#define COOP_GRID_H(i) (cell * (float)(std::max(abs((i) % n - tx), abs((i) / n - ty)) + 0.414f * std::min(abs((i) % n - tx), abs((i) / n - ty))))
 		cost[start] = 0.0f;
 		const SOpen o0 = { COOP_GRID_H(start), start };
 		open.push(o0);
@@ -860,12 +1077,18 @@ namespace
 			{
 				const int nx = cx + s_dx[k], ny = cy + s_dy[k];
 				const bool diag = k >= 4;
-				if (!GridFree(nx, ny) || (diag && (!GridFree(nx, cy) || !GridFree(cx, ny))))
+				if (!GridFree(nx, ny))
 					continue;
 				const int ni = ny * n + nx;
-				if (closed[ni] || fabsf(g.ground[ni] - g.ground[cur.i]) > (diag ? 0.6f : 0.45f))
+				if (closed[ni] || fabsf(g.ground[ni] - g.ground[cur.i]) > GridStep(diag))
 					continue;
-				const float c = cost[cur.i] + (diag ? 1.414f : 1.0f) * GRID_CELL * (float)g.cost[ni];
+				// (a diagonal step past a corner: both squares beside it free,
+				// or the body's sweep through it free: a door at an angle)
+				if (diag && (!GridFree(nx, cy) || !GridFree(cx, ny))
+					&& !GridSweep(Vec3(g.x0 + (cx + 0.5f) * cell, g.y0 + (cy + 0.5f) * cell, g.ground[cur.i]),
+						Vec3(g.x0 + (nx + 0.5f) * cell, g.y0 + (ny + 0.5f) * cell, g.ground[ni]), 0.3f))
+					continue;
+				const float c = cost[cur.i] + (diag ? 1.414f : 1.0f) * cell * (float)g.cost[ni];
 				if (c < cost[ni])
 				{
 					cost[ni] = c;
@@ -885,7 +1108,7 @@ namespace
 			return false;
 		std::vector<Vec3> cells;
 		for (int i = best; i >= 0; i = back[i])
-			cells.push_back(Vec3(g.x0 + (i % n + 0.5f) * GRID_CELL, g.y0 + (i / n + 0.5f) * GRID_CELL, g.ground[i]));
+			cells.push_back(Vec3(g.x0 + (i % n + 0.5f) * cell, g.y0 + (i / n + 0.5f) * cell, g.ground[i]));
 		std::reverse(cells.begin(), cells.end());
 		// the corners: from each to the farthest one in a straight walk
 		Vec3 at = from;
@@ -893,7 +1116,7 @@ namespace
 		{
 			size_t reach = i;
 			for (size_t j = cells.size() - 1; j > i; --j)
-				if (GridLine(at, cells[j]))
+				if (GridLine(at, cells[j]) && GridSweep(at, cells[j], 0.36f))
 				{
 					reach = j;
 					break;
@@ -912,6 +1135,7 @@ namespace
 		if (Now() < s_bot.pathAskAt)
 			return;
 		s_bot.pathAskAt = Now() + 3.0f;
+		s_bot.pathAskGoal = goal;
 		string where;
 		where.Format("%.1f %.1f %.1f", goal.x, goal.y, goal.z);
 		if (CGameRules* pRules = g_pGame->GetGameRules())
@@ -920,13 +1144,32 @@ namespace
 
 	// asks the host's game for cover from an enemy: a place close by out of
 	// its sight that it can walk to (the answer comes as OnPath, op 1)
-	void AskCover(IActor* pThreat)
+	// (targetFirst: a place with a shot at him above all, the host's search
+	// takes its peek at the first one named)
+	void AskCover(IActor* pThreat, bool open = false, bool targetFirst = false)
 	{
 		if (Now() < s_bot.coverAskAt || !pThreat)
 			return;
 		s_bot.coverAskAt = Now() + 4.0f;
+		s_bot.coverOpenAsk = open;
+		// who shot it lately first (the newest), then the one it fights: it
+		// hid from the one it aimed at while others shot it
+		std::vector<std::pair<float, EntityId> > shooters;
+		for (std::map<EntityId, SThreat>::const_iterator it = s_threats.begin(); it != s_threats.end(); ++it)
+			if (Now() - it->second.last < 6.0f && it->first != pThreat->GetEntityId())
+				if (IActor* p = ActorOf(it->first))
+					if (p->GetHealth() > 0 && Hostile(p))
+						shooters.push_back(std::make_pair(-it->second.last, it->first));
+		std::sort(shooters.begin(), shooters.end());
+		string names;
+		if (targetFirst)
+			names = pThreat->GetEntity()->GetName();
+		for (size_t i = 0; i < shooters.size() && i < 2; ++i)
+			names += (names.empty() ? string() : string(",")) + NameOf(shooters[i].second);
+		if (!targetFirst)
+			names += (names.empty() ? string() : string(",")) + pThreat->GetEntity()->GetName();
 		if (CGameRules* pRules = g_pGame->GetGameRules())
-			pRules->CoopSendSyncToServer(15, 6, 0, pThreat->GetEntity()->GetName(), "", 0, 0.0f);
+			pRules->CoopSendSyncToServer(15, 6, 0, names.c_str(), "", 0, 0.0f);
 	}
 
 	// the length of a walk from here along points
@@ -958,7 +1201,57 @@ namespace
 	Vec3 Waypoint(CPlayer* pMe, const Vec3& pos, const Vec3& to, float dist, bool blocked)
 	{
 		std::vector<Vec3>& path = s_bot.path;
-		const bool fresh = !path.empty() && Now() - s_bot.pathAt < 12.0f && Dist2D(s_bot.pathGoal, to) < 4.0f;
+		bool fresh = !path.empty() && Now() - s_bot.pathAt < 12.0f && Dist2D(s_bot.pathGoal, to) < 4.0f;
+		// a way many times the straight line, close by: not followed (from
+		// behind a hut's wall the host's navigation sent it 800 m round for
+		// the 15 m to the door; it ran 60 m off before it turned back)
+		if (fresh && dist > 10.0f && dist < 40.0f)
+		{
+			const float way = WayLeft(pos, to);
+			// (once for a goal: its own squares found none since, the long way
+			// is the way; else a goto to a walled place never got there)
+			static float s_rejectedAt = -100.0f;
+			static Vec3 s_rejectedFor(ZERO);
+			// (taken once its own squares found no way to this goal since the
+			// rejection, and kept for it: a plan toward one of the host's
+			// points found and the way was dropped again at the first post.
+			// A plan of its own that finds the goal ends that, MoveTo. The
+			// plan in the same frame as the rejection counts: 0.5 s slack)
+			const bool latched = Dist2D(s_bot.longWayFor, to) < 4.0f && Now() - s_bot.longWayAt < 120.0f;
+			const bool triedOwn = latched || (Dist2D(s_rejectedFor, to) < 4.0f && Dist2D(s_bot.ownNoneFor, to) < 4.0f
+				&& s_bot.ownNoneAt > s_rejectedAt - 0.5f && Now() - s_bot.ownNoneAt < 30.0f);
+			if (way > 4.0f * dist + 60.0f && triedOwn)
+			{
+				// (moved along with the goal: the one it follows walks on)
+				if (!latched)
+					s_bot.longWayAt = Now();
+				s_bot.longWayFor = to;
+				static float s_takenToldAt = -100.0f;
+				if (Now() - s_takenToldAt > 20.0f)
+				{
+					Event("the host's way there is %.0f m for %.0f m straight, its own squares found none: the long way", way, dist);
+					s_takenToldAt = Now();
+				}
+			}
+			else if (way > 4.0f * dist + 60.0f)
+			{
+				if (!(Dist2D(s_rejectedFor, to) < 4.0f && Now() - s_rejectedAt < 30.0f))
+				{
+					s_rejectedAt = Now();
+					s_rejectedFor = to;
+				}
+				static float s_toldAt = -100.0f;
+				static Vec3 s_toldFor(ZERO);
+				if (Now() - s_toldAt > 20.0f || Dist2D(s_toldFor, to) > 4.0f)
+				{
+					Event("the host's way there is %.0f m for %.0f m straight: its own way round instead", way, dist);
+					s_toldAt = Now();
+					s_toldFor = to;
+				}
+				path.clear();
+				fresh = false;
+			}
+		}
 		if (!fresh)
 		{
 			path.clear();
@@ -977,7 +1270,11 @@ namespace
 			if (Dist2D(path[i], pos) < Dist2D(path[nearest], pos))
 				nearest = i;
 		path.erase(path.begin(), path.begin() + nearest);
-		while (!path.empty() && Dist2D(path[0], pos) < 1.0f)
+		// a point is passed when it is reached, or when it is behind and the
+		// next one is in a straight walk (a door's point dropped a metre
+		// before it left the walk to the next one grazing the frame)
+		while (!path.empty() && (Dist2D(path[0], pos) < 0.5f
+			|| (path.size() > 1 && Dist2D(path[0], pos) < 1.5f && (pos - path[0]).Dot(path[1] - path[0]) > 0.0f && ClearWay(pMe, pos, path[1], 0.38f))))
 			path.erase(path.begin());
 		// the farthest of the next points the body walks to straight (the
 		// corner of a fence is walked round, not cut)
@@ -986,7 +1283,7 @@ namespace
 			s_bot.wayCheckAt = Now() + 0.25f;
 			s_bot.wayCheckPath = s_bot.pathAt;
 			for (size_t k = std::min(path.size(), (size_t)6); k-- > 1; )
-				if (Dist2D(path[k], pos) < 25.0f && ClearWay(pMe, pos, path[k]))
+				if (Dist2D(path[k], pos) < 25.0f && ClearWay(pMe, pos, path[k], 0.38f))
 				{
 					path.erase(path.begin(), path.begin() + k);
 					break;
@@ -1030,6 +1327,30 @@ namespace
 		return along;
 	}
 
+	// in a doorway, or between two things close on both sides: toward the
+	// middle of the gap (the body caught on a door's frame it went through
+	// a hand's breadth off the middle)
+	Vec3 Centered(CPlayer* pMe, const Vec3& pos, const Vec3& dir)
+	{
+		IPhysicalEntity* pSkip = pMe->GetEntity()->GetPhysics();
+		const Vec3 right(dir.y, -dir.x, 0);
+		const Vec3 at = pos + Vec3(0, 0, 1.0f);
+		ray_hit hl, hr;
+		const int ents = ent_static | ent_rigid | ent_sleeping_rigid;
+		const bool l = gEnv->pPhysicalWorld->RayWorldIntersection(at, -right * 0.8f, ents, WALK_GEOM, &hl, 1, &pSkip, pSkip ? 1 : 0) > 0;
+		const bool r = gEnv->pPhysicalWorld->RayWorldIntersection(at, right * 0.8f, ents, WALK_GEOM, &hr, 1, &pSkip, pSkip ? 1 : 0) > 0;
+		float push = 0.0f;
+		if (l && r)
+			push = (hr.dist - hl.dist) * 0.5f * 0.6f;
+		else if (l && hl.dist < 0.45f)
+			push = 0.4f;
+		else if (r && hr.dist < 0.45f)
+			push = -0.4f;
+		return push ? (dir + right * push).GetNormalizedSafe(dir) : dir;
+	}
+
+	float LedgeAhead(CPlayer* pMe, const Vec3& pos, const Vec3& dir);
+
 	// walk toward a point; true when there
 	bool MoveTo(CPlayer* pMe, const Vec3& to, float stopAt, bool mayRun, bool mayCatchUp, const char* toName)
 	{
@@ -1038,7 +1359,19 @@ namespace
 		Vec3 d = to - pos;
 		d.z = 0;
 		const float dist = d.GetLength();
-		if (dist <= stopAt)
+		// next to the one it follows with a wall between (he inside a hut,
+		// it outside by the wall): not there yet, round by the door (for a
+		// while: clutter may keep it from a straight walk to him for good)
+		bool reached = dist <= stopAt;
+		if (reached && mayCatchUp && dist > 1.5f && !ClearWay(pMe, pos, to))
+		{
+			if (s_bot.arriveBlockedSince < 0.0f)
+				s_bot.arriveBlockedSince = now;
+			reached = now - s_bot.arriveBlockedSince > 10.0f;
+		}
+		else
+			s_bot.arriveBlockedSince = -1.0f;
+		if (reached)
 		{
 			s_ctl.moveDir.zero();
 			s_bot.stuck = 0;
@@ -1089,9 +1422,17 @@ namespace
 		const float toNext = Dist2D(pos, next);
 		std::vector<Vec3>& local = s_bot.local;
 		// close to the goal: the whole way there on its own (the host's way
-		// may lead right through what it does not know: under a truck)
-		const Vec3 target = dist < 14.0f ? to : next;
+		// may lead right through what it does not know: under a truck). Not
+		// when the host's way goes round (by a door): its own squares, made
+		// to go straight to the goal, found none through the wall and led it
+		// into the wall nearest to him (the user's game of 2026-10-17: 20-30
+		// s inside the bridge house by the door the host's way went out of)
+		const bool hostWay = !s_bot.path.empty() && now - s_bot.pathAt < 12.0f && Dist2D(s_bot.pathGoal, to) < 4.0f;
+		const bool navDetour = hostWay && WayLeft(pos, to) > 1.3f * dist + 1.0f;
+		const Vec3 target = dist < 14.0f && !navDetour ? to : next;
 		const float toTarget = Dist2D(pos, target);
+		if (!hostWay || Dist2D(s_bot.doorFor, to) > 4.0f)
+			s_bot.doorMode = false;
 		if ((!s_bot.nextClear && toNext < 16.0f) || s_bot.stuck > 0)
 		{
 			const bool moved = Dist2D(s_bot.localFor, target) > 1.5f || s_bot.localStage != s_bot.stuck;
@@ -1111,15 +1452,90 @@ namespace
 					int more = 0;
 					bool there = false;
 					if (GridPath(pos, next, alt, &more, &there) && there)
+					{
 						local.swap(alt);
+						found = true;
+					}
 					looked += more;
+				}
+				string why = found ? string() : GridWhyAround(pos);
+				// not found: once more on quarter-metre squares close by (a
+				// narrow door, a gap between crates)
+				float cell = GRID_CELL;
+				if (!found && toTarget < 6.0f && now - s_bot.fineGridAt > 3.0f)
+				{
+					s_bot.fineGridAt = now;
+					std::vector<Vec3> fine;
+					int more = 0;
+					bool there = false;
+					GridBegin(pMe, pos, 6.0f, 0.25f);
+					if (GridPath(pos, target, fine, &more, &there) && there)
+					{
+						local.swap(fine);
+						found = true;
+						cell = 0.25f;
+					}
+					looked += more;
+				}
+				s_bot.localFound = found;
+				// (its own squares found no way to the goal itself: the host's
+				// long way round is taken for it then, see Waypoint)
+				if (!found && Dist2D(target, to) < 0.5f)
+				{
+					s_bot.ownNoneFor = to;
+					s_bot.ownNoneAt = now;
+				}
+				else if (found && Dist2D(target, to) < 0.5f)
+				{
+					// (its own way to the goal: not the host's long way round)
+					s_bot.ownNoneAt = -100.0f;
+					s_bot.longWayAt = -100.0f;
+				}
+				if (found)
+					s_bot.doorMode = false;
+				// only nearer, not there: not walked into the wall between
+				// (the square nearest to the goal is that wall's face). Along
+				// the host's way point by point instead; with none, it waits
+				// for one a moment (its own squares' best when the host's
+				// navigation has no way either)
+				const char* plan = found ? "found" : local.empty() ? "none" : "partial";
+				if (!found && hostWay)
+				{
+					local.clear();
+					if (!s_bot.doorMode || Dist2D(s_bot.doorFor, to) > 4.0f)
+						Event("its own squares find no way to %s (%d looked at): along the host's navigation (%d points)", toName && *toName ? toName : "where it goes",
+							looked, (int)s_bot.path.size());
+					s_bot.doorMode = true;
+					s_bot.doorFor = to;
+				}
+				else if (!found && !(now - s_bot.pathNoneAt < 10.0f && Dist2D(s_bot.pathNoneGoal, to) < 4.0f))
+				{
+					AskPath(to);
+					// (waits only for the answer to an ask for this goal, 2 s at
+					// most after it: not again with each plan while the one it
+					// follows walks on)
+					// (once for a goal: then its own squares' best, as before; it
+					// stood by the hut's door, asking and waiting again every 3 s)
+					const float askedAt = s_bot.pathAskAt - 3.0f;
+					const bool waitedHere = Dist2D(s_bot.waitedFor, to) < 4.0f && now - s_bot.waitedAt < 15.0f;
+					if (now - askedAt < 2.0f && s_bot.pathAt < askedAt && Dist2D(s_bot.pathAskGoal, to) < 4.0f && (!waitedHere || now < s_bot.waitWayUntil))
+					{
+						local.clear();
+						s_bot.waitWayUntil = askedAt + 2.0f;
+						if (!waitedHere)
+						{
+							s_bot.waitedFor = to;
+							s_bot.waitedAt = now;
+						}
+					}
 				}
 				if (moved)
 				{
 					++s_bot.localPlans;
-					CryLogAlways("[CoopAgent] a way round to %s close by: %s (%d squares looked at, %.1f ms)", toName && *toName ? toName : "where it goes",
+					CryLogAlways("[CoopAgent] a way round to %s close by: %s%s (%d squares looked at, %.1f ms, %.2f m squares%s%s)", toName && *toName ? toName : "where it goes",
 						local.empty() ? "none" : string().Format("%d corners, %.1f m to the point %.1f m away", (int)local.size(),
-							WayLeftOf(pos, local), toTarget).c_str(), looked, (gEnv->pTimer->GetAsyncCurTime() - t0) * 1000.0f);
+							WayLeftOf(pos, local), toTarget).c_str(), local.empty() ? "" : string().Format(", %s", plan).c_str(), looked,
+						(gEnv->pTimer->GetAsyncCurTime() - t0) * 1000.0f, cell, why.empty() ? "" : "; blocked round it: ", why.c_str());
 				}
 				s_bot.localFor = target;
 				s_bot.localAt = now;
@@ -1135,7 +1551,10 @@ namespace
 		const float left = local.empty() ? WayLeft(pos, to) : WayLeftOf(pos, local) + Dist2D(local.back(), target) + tail;
 		if (left < s_bot.progBest - 0.5f)
 		{
-			if (s_bot.progBest < 1e8f)
+			// (nearer only in the air, on a jump onto a ledge it fell back
+			// from: not counted)
+			const bool jumping = now - s_bot.jumpAt < 2.0f && Dist2D(pos, s_bot.sjPlace) < 3.0f && s_bot.sjTries >= 2;
+			if (s_bot.progBest < 1e8f && !jumping)
 			{
 				s_bot.progAt = now;
 				s_bot.stuck = 0;
@@ -1143,8 +1562,36 @@ namespace
 			s_bot.progBest = left;
 		}
 		Vec3 dn = (local.empty() ? next : local[0]) - pos;
+		const float rise = (local.empty() ? next.z : local[0].z) - pos.z;
+		// (the goal itself is no floor to jump onto: an item on a table, the
+		// one it follows on a rock)
+		const bool stepIsGoal = Dist2D(local.empty() ? next : local[0], to) < 0.3f;
 		dn.z = 0;
 		Vec3 dir = dn.GetLength() > 0.1f ? dn.GetNormalized() : d / dist;
+		// up onto what the way goes on (a container's floor, a step too high
+		// to walk): a jump right before it, not only when it got nowhere
+		if (rise > 0.45f && rise < 1.3f && dn.GetLength() < 1.2f && now - s_bot.jumpAt > 1.5f && !stepIsGoal)
+		{
+			s_ctl.jump = true;
+			s_bot.jumpAt = now;
+		}
+		// a strength jump wanted: in strength mode a moment, then up and on
+		if (s_bot.strengthJumpAt >= 0.0f)
+		{
+			CNanoSuit* pSuit = pMe->GetNanoSuit();
+			const float since = now - s_bot.strengthJumpAt;
+			if (since > 2.5f || !pSuit)
+				s_bot.strengthJumpAt = -1.0f;
+			else
+			{
+				dir = s_bot.strengthJumpDir;
+				if (pSuit->GetMode() == NANOMODE_STRENGTH && since > 0.4f && now - s_bot.jumpAt > 1.5f)
+				{
+					s_ctl.jump = true;
+					s_bot.jumpAt = now;
+				}
+			}
+		}
 		// no nearer for a while: a fresh way from where it stands and a few
 		// steps along what is in the way (first to the side the way goes,
 		// then to the other, longer each time); a jump only onto something
@@ -1167,11 +1614,63 @@ namespace
 			const bool low = LowObstacleAhead(pMe, pos, dir);
 			if (low)
 				s_ctl.jump = true;
+			// too high to jump onto as it is (a container's floor, a crate):
+			// a strength jump (the suit's mode first: SuitStep)
+			else if (s_bot.strengthJumpAt < 0.0f && pMe->GetNanoSuit() && pMe->GetNanoSuit()->GetSuitEnergy() >= 90.0f && now - s_bot.hitAt > 6.0f
+				&& !s_bot.retreating && !(s_bot.enemy && now - s_bot.enemySeenAt < 8.0f))
+			{
+				const float ledge = LedgeAhead(pMe, pos, dir);
+				// (twice at the same place and still there: not again. It jumped
+				// at a 1.6 m ledge a dozen times on the way to the host, fell back
+				// each time, the energy gone each time, and as each jump got it a
+				// little nearer it never counted as stuck long enough to be put
+				// next to him)
+				const bool samePlace = Dist2D(pos, s_bot.sjPlace) < 3.0f && now - s_bot.sjPlaceAt < 60.0f;
+				if (ledge > 0.0f && rise > 0.3f && !(samePlace && s_bot.sjTries >= 2))
+				{
+					if (!samePlace)
+					{
+						s_bot.sjPlace = pos;
+						s_bot.sjTries = 0;
+					}
+					s_bot.sjPlaceAt = now;
+					++s_bot.sjTries;
+					s_bot.strengthJumpAt = now;
+					s_bot.strengthJumpDir = dir;
+					Event("a strength jump onto something %.1f m high in the way", ledge);
+				}
+			}
 			Event("no nearer to %s for %.0f s (%.0f m to go): a new way, a way round close by%s", toName && *toName ? toName : "where it goes",
 				stalled, dist, low ? ", a jump over something low" : "");
 		}
-		if (s_bot.stuck >= 4 && mayCatchUp && dist > 8.0f)
+		// (close to him too, long without getting anywhere: inside a hut, it
+		// outside by the wall, it pressed against that wall for good)
+		if (s_bot.stuck >= 4 && mayCatchUp && (dist > 8.0f || s_bot.stuck >= 5))
 			Ask(1, toName);
+		// going round within 4 m for 15 s, no nearer to the one it follows:
+		// put next to him. (The host's navigation led up a rock 4 m high over
+		// 2 m, as the soldiers go; it went to and fro under it a minute, each
+		// step a little nearer, so never stuck long enough by the count above)
+		// (not in a fight: side steps there are going round on purpose)
+		const bool inFight = now - s_bot.hitAt < 5.0f || (s_bot.enemy && now - s_bot.enemySeenAt < 3.0f);
+		if (mayCatchUp && dist > 8.0f && !inFight)
+		{
+			if (s_bot.circleSince < 0.0f || now - s_bot.circleLast > 1.0f || Dist2D(pos, s_bot.circleAt) > 4.0f || dist < s_bot.circleBest - 2.0f)
+			{
+				s_bot.circleAt = pos;
+				s_bot.circleSince = now;
+				s_bot.circleBest = dist;
+			}
+			else if (now - s_bot.circleSince > 15.0f)
+			{
+				Event("going round within 4 m for %.0f s, %.0f m from %s: put next to him", now - s_bot.circleSince, dist, toName && *toName ? toName : "him");
+				Ask(1, toName);
+				s_bot.circleSince = -1.0f;
+			}
+			s_bot.circleLast = now;
+		}
+		else
+			s_bot.circleSince = -1.0f;
 		if (now < s_bot.slideUntil && local.empty())
 		{
 			// past its end: the way to the point is free again
@@ -1194,8 +1693,18 @@ namespace
 		else
 			s_bot.farSince = -1;
 		// the way round close by goes between what is there: no steering
-		// off it (that took it back against the fence)
-		s_ctl.moveDir = local.empty() ? Steer(pMe, pos, dir) : dir;
+		// off it (that took it back against the fence). Along the host's way
+		// through a door: none either, the middle of the doorway; straight on
+		// to a point in a free walk close by neither (a stair looked like a
+		// wall ahead). Waiting for the host's way: still
+		if (local.empty() && !hostWay && now < s_bot.waitWayUntil)
+			s_ctl.moveDir.zero();
+		else if (s_bot.doorMode && local.empty())
+			s_ctl.moveDir = Centered(pMe, pos, dir);
+		else if (local.empty() && !(s_bot.nextClear && toNext < 6.0f))
+			s_ctl.moveDir = Steer(pMe, pos, dir);
+		else
+			s_ctl.moveDir = local.empty() ? dir : Dist2D(local[0], pos) < 1.5f ? Centered(pMe, pos, dir) : dir;
 		s_ctl.sprint = mayRun && dist > 15.0f;
 		return false;
 	}
@@ -1325,6 +1834,44 @@ namespace
 			Event("leaves the %s and %d more there: %s", pLoot->GetClass()->GetName(), max(0, n - 1), why);
 	}
 
+	// the one it follows under a follow/free order, alive (0: none)
+	IActor* FollowedLeader()
+	{
+		if (s_bot.order != eO_Follow && s_bot.order != eO_Free)
+			return 0;
+		IActor* pLead = s_bot.leader.empty() ? HostPlayer() : ActorByName(s_bot.leader.c_str());
+		return pLead && pLead->GetHealth() > 0 ? pLead : 0;
+	}
+
+	// a carried weapon that shoots the ammo in that box, and how much it has
+	// for it (-1: none of its weapons does)
+	int ShotsForAmmo(CPlayer* pMe, const char* ammo)
+	{
+		IInventory* pInventory = pMe->GetInventory();
+		IItemSystem* pItems = g_pGame->GetIGameFramework()->GetIItemSystem();
+		int best = -1;
+		for (int i = 0; pInventory && ammo && *ammo && i < pInventory->GetCount(); ++i)
+		{
+			IItem* pItem = pItems->GetItem(pInventory->GetItem(i));
+			IWeapon* pWeapon = pItem && pItem->CanSelect() && WeaponRank(pItem->GetEntity()->GetClass()->GetName()) ? pItem->GetIWeapon() : 0;
+			IFireMode* pMode = pWeapon ? pWeapon->GetFireMode(pWeapon->GetCurrentFireMode()) : 0;
+			if (pMode && pMode->GetAmmoType() && !stricmp(pMode->GetAmmoType()->GetName(), ammo))
+				best = max(best, WeaponShots(pMe, pItem));
+		}
+		return best;
+	}
+
+	// the ammo in a box on the ground (its archetype's properties)
+	string BoxAmmo(IEntity* pBox)
+	{
+		IScriptTable* pScript = pBox->GetScriptTable();
+		SmartScriptTable props;
+		const char* name = 0;
+		if (pScript && pScript->GetValue("Properties", props) && props->GetValue("AmmoName", name) && name)
+			return name;
+		return "";
+	}
+
 	// a weapon or ammo on the ground worth going for: a better weapon than
 	// it has, or ammo for one it has when it runs low
 	IEntity* FindLoot(CPlayer* pMe, const Vec3& pos, float range)
@@ -1333,6 +1880,10 @@ namespace
 		IItem* pBest = BestWeapon(pMe, &bestRank);
 		const int shots = pBest ? WeaponShots(pMe, pBest) : 0;
 		const bool low = !pBest || bestRank < 6 || shots < 60;
+		// (following: nothing farther than 12 m from him, it would turn back
+		// at 14 m and come again for it)
+		IActor* pLead = pBest ? FollowedLeader() : 0;
+		const Vec3 leadPos = pLead ? pLead->GetEntity()->GetWorldPos() : Vec3(ZERO);
 		SEntityProximityQuery query;
 		query.box = AABB(pos - Vec3(range, range, 4.0f), pos + Vec3(range, range, 4.0f));
 		gEnv->pEntitySystem->QueryProximity(query);
@@ -1356,6 +1907,23 @@ namespace
 			// box) when it runs low
 			if (!(rank > bestRank && !have) && !(low && ((have && rank) || ammoBox)))
 				continue;
+			if (pLead && Dist2D(pEntity->GetWorldPos(), leadPos) > 12.0f)
+				continue;
+			// (a box the server would not give it: full of that ammo, or none
+			// of its weapons takes it. It never got one: 0 of 10, use pressed
+			// 15 times at each)
+			if (ammoBox && !static_cast<CAmmoPickup*>(pItem)->CheckAmmoRestrictions(pMe->GetEntityId()))
+				continue;
+			// (a box only with ammo for one of its weapons that runs low on it,
+			// the empty rifle too: low on the SCAR's it took one FY71 box after
+			// another in the hut, the SCAR as low; with a pistol full of
+			// rounds it went from box to box)
+			if (ammoBox)
+			{
+				const int forIt = ShotsForAmmo(pMe, BoxAmmo(pEntity).c_str());
+				if (forIt < 0 || forIt >= 60)
+					continue;
+			}
 			const float d = Dist2D(pEntity->GetWorldPos(), pos);
 			if (d < foundDist && fabsf(pEntity->GetWorldPos().z - pos.z) < 3.0f)
 			{
@@ -1374,9 +1942,12 @@ namespace
 		IItem* pItem = pLoot ? g_pGame->GetIGameFramework()->GetIItemSystem()->GetItem(pLoot->GetId()) : 0;
 		if (s_bot.loot && (!pItem || pItem->GetOwnerId() || pLoot->IsHidden()))
 		{
-			// taken (by it, or by someone)
+			// taken (by it, or by someone; an ammo box is gone from the
+			// ground once taken: it went unlogged so)
 			if (pItem && pItem->GetOwnerId() == pMe->GetEntityId())
 				Event("picked up the %s", pLoot->GetClass()->GetName());
+			else if ((!pItem || pLoot->IsHidden()) && s_bot.lootUses > 0)
+				Event("picked up the %s (gone from the ground)", s_bot.lootClass.c_str());
 			s_bot.loot = 0;
 			pLoot = 0;
 			ChooseWeapon(pMe, true);
@@ -1388,17 +1959,43 @@ namespace
 			const bool armed = BestWeapon(pMe, &rank) != 0;
 			if (fighting && armed)
 				return false;
+			// (sent somewhere: there, not to a box on the way; it stood 17 s
+			// on a bed in the beach hut pressing use at one under a pillow)
+			if (s_bot.order == eO_Goto && armed)
+				return false;
+			// (following one who walks off: with him, not to a box behind)
+			if ((s_bot.order == eO_Follow || s_bot.order == eO_Free) && armed)
+			{
+				IActor* pLead = s_bot.leader.empty() ? HostPlayer() : ActorByName(s_bot.leader.c_str());
+				if (pLead && pLead->GetHealth() > 0 && Dist2D(pLead->GetEntity()->GetWorldPos(), pos) > 10.0f)
+					return false;
+			}
 			pLoot = FindLoot(pMe, pos, armed ? 20.0f : 45.0f);
 			if (!pLoot)
 				return false;
 			s_bot.loot = pLoot->GetId();
+			s_bot.lootClass = pLoot->GetClass()->GetName();
 			s_bot.lootSince = Now();
 			s_bot.lootUses = 0;
 			s_bot.lootNear = 1000.0f;
 			Event("goes to pick up the %s (%.0f m, at %.1f %.1f %.1f)", pLoot->GetClass()->GetName(), Dist2D(pLoot->GetWorldPos(), pos),
 				pLoot->GetWorldPos().x, pLoot->GetWorldPos().y, pLoot->GetWorldPos().z);
 		}
-		if (Now() - s_bot.lootSince > 20.0f)
+		// (the one it follows walked off meanwhile: after him, the box stays)
+		if ((s_bot.order == eO_Follow || s_bot.order == eO_Free) && BestWeapon(pMe) != 0)
+		{
+			IActor* pLead = s_bot.leader.empty() ? HostPlayer() : ActorByName(s_bot.leader.c_str());
+			if (pLead && pLead->GetHealth() > 0 && Dist2D(pLead->GetEntity()->GetWorldPos(), pos) > 14.0f)
+			{
+				// (given up a minute: else back for it as soon as it is near him)
+				s_bot.lootFailed[pLoot->GetId()] = Now();
+				s_bot.loot = 0;
+				return false;
+			}
+		}
+		// (in reach, use pressed again and again, not taken: the hand gets
+		// something else there)
+		if (Now() - s_bot.lootSince > 20.0f || (s_bot.lootUses >= 5 && s_bot.lootNear < 2.2f))
 		{
 			// out of reach: something else
 			string why;
@@ -1469,6 +2066,8 @@ namespace
 
 	// hurt in a fight: away from the enemy, out of its sight, down low until
 	// the suit has healed it (it would die standing there); true meanwhile
+	void FightStep(CPlayer* pMe, const Vec3& eye, IActor* pEnemy);
+
 	bool Survive(CPlayer* pMe, const Vec3& pos, const Vec3& eye, IActor* pEnemy)
 	{
 		const float health = (float)pMe->GetHealth() / (float)max(1, pMe->GetMaxHealth());
@@ -1496,58 +2095,107 @@ namespace
 						pSuit->SetMode(NANOMODE_DEFENSE);
 			}
 			s_bot.retreating = false;
+			s_bot.retreatNowAt = -100.0f;
 			return false;
 		}
 		// falls back badly hurt (just back from it: only when worse still);
-		// back to it only healed and after a while (no running to and fro)
+		// back to it only healed and after a while (no running to and fro).
+		// Also before the armor is gone: shot again and again, hurt, still
+		// some energy, it gets away cloaked (the soldiers lose sight of it,
+		// as of the player). Before, it waited for 60 % health, by then the
+		// armor had taken all the energy: it never cloaked once in 9 games
+		CNanoSuit* pSuit = pMe->GetNanoSuit();
+		const float energy = pSuit ? pSuit->GetSuitEnergy() : 0.0f;
 		const float limit = Now() - s_bot.recoveredAt < 8.0f ? 0.35f : 0.6f;
-		if (!s_bot.retreating && health < limit)
+		// (a heavy gun takes 70 energy a hit: the armor gone in three, the
+		// health still whole; away cloaked while there is energy left)
+		// (a heavy gun: away cloaked at its first hit, while there is energy
+		// for more than a second of cloak; at its second the energy was 60,
+		// the cloak lasted a second)
+		// (three hits of it may come before it looks: the energy 200, then 0.
+		// Walking cloaked, 40 lasts a few seconds)
+		const bool heavy = Now() - s_bot.heavyHitAt < 1.5f && energy >= 40.0f;
+		// (a heavy gun again right after it came back: away at once, not 8 s
+		// in its fire first)
+		const bool pounded = (heavy && Now() - s_bot.recoveredAt > 2.0f)
+			|| (HitsWithin(3.0f) >= 2 && energy >= 50.0f && (energy < 150.0f || health < 0.75f) && Now() - s_bot.recoveredAt > 8.0f);
+		// (the armor gone, each hit on the health: away before it is half
+		// gone, not at 60 % with four soldiers round it)
+		const bool bare = HitsWithin(3.0f) >= 2 && energy < 20.0f && health < 0.95f && Now() - s_bot.recoveredAt > 8.0f;
+		const bool retreatNow = Now() - s_bot.retreatNowAt < 1.0f;
+		if (!s_bot.retreating && (health < limit || pounded || bare || retreatNow))
 		{
-			// cloaked the soldiers lose sight of it, as of the player
-			CNanoSuit* pSuit = pMe->GetNanoSuit();
-			if (pSuit && pSuit->GetSuitEnergy() > 40.0f && pSuit->GetMode() != NANOMODE_CLOAK)
-			{
-				pSuit->SetMode(NANOMODE_CLOAK);
-				Event("cloaks to get away");
-			}
+			s_bot.retreatNowAt = -100.0f;
+			s_bot.cloakEscape = energy >= (heavy ? 40.0f : 50.0f);
+			if (s_bot.cloakEscape)
+				Event("cloaks to get away (health %d, energy %.0f, %d hits in 3 s)", pMe->GetHealth(), energy, HitsWithin(3.0f));
 			s_bot.retreating = true;
 			s_bot.retreatSince = Now();
 			s_bot.haveCover = false;
 			s_bot.coverAskAt = 0.0f;
 			Event("hurt (health %d): falls back to cover", pMe->GetHealth());
 		}
-		else if (s_bot.retreating && health > 0.95f && Now() - s_bot.retreatSince > 6.0f)
+		// (a heavy gun about: back only with the suit charged again, not
+		// into its fire with the armor half gone, each hit on the health)
+		else if (s_bot.retreating && ((Now() - s_bot.heavyHitAt > 20.0f || energy >= 120.0f) && ((health > 0.95f && Now() - s_bot.retreatSince > 6.0f)
+			|| (health > 0.85f && energy > 80.0f && Now() - s_bot.retreatSince > 12.0f)) || Now() - s_bot.retreatSince > 40.0f))
 		{
-			if (CNanoSuit* pSuit = pMe->GetNanoSuit())
-				if (pSuit->GetMode() != NANOMODE_DEFENSE)
-					pSuit->SetMode(NANOMODE_DEFENSE);
+			s_bot.cloakEscape = false;
 			s_bot.retreating = false;
 			s_bot.recoveredAt = Now();
 			Event("recovered (health %d): back to it", pMe->GetHealth());
 		}
 		if (!s_bot.retreating)
 			return false;
-		Fire(pMe, false);
 		const Vec3 enemyAim = AimPoint(pEnemy->GetEntity());
 		const bool seen = Visible(pMe, eye, pEnemy->GetEntity(), enemyAim);
+		// one right in its way or close behind: shot at, not run past with
+		// its back to him (it fell back past a shotgunner without a shot)
+		const bool engage = seen && enemyAim.GetDistance(eye) < 10.0f && !pEnemy->GetLinkedVehicle();
+		if (engage)
+		{
+			s_bot.cloakEscape = false;
+			FightStep(pMe, eye, pEnemy);
+		}
+		else
+			Fire(pMe, false);
+		s_bot.fightBack += gEnv->pTimer->GetFrameTime();
 		if (!s_bot.haveCover)
 			AskCover(pEnemy);
 		if (s_bot.haveCover)
 		{
-			if (!MoveTo(pMe, s_bot.cover, 0.8f, true, false, ""))
+			// (cloaked it does not sprint: the energy went in two seconds so)
+			const bool cloaked = pSuit && pSuit->GetMode() == NANOMODE_CLOAK;
+			if (!MoveTo(pMe, s_bot.cover, 0.8f, !cloaked, false, ""))
 			{
-				s_ctl.look = true;
-				s_ctl.yaw = Yaw(s_ctl.moveDir.GetLengthSquared() > 0.01f ? s_ctl.moveDir : s_bot.cover - pos);
-				s_ctl.pitch = 0.0f;
-				s_ctl.turnRate = 6.0f;
+				// (shooting one close by: its aim stays on him, it strafes)
+				if (!engage)
+				{
+					s_ctl.look = true;
+					s_ctl.yaw = Yaw(s_ctl.moveDir.GetLengthSquared() > 0.01f ? s_ctl.moveDir : s_bot.cover - pos);
+					s_ctl.pitch = 0.0f;
+					s_ctl.turnRate = 6.0f;
+				}
 				s_bot.doing.Format("running to cover (health %d, %.0f m)", pMe->GetHealth(), Dist2D(s_bot.cover, pos));
 			}
 			else
 			{
-				// in cover: down low, watching where the danger is
+				// in cover: down low, watching where the danger is (out of
+				// their sight the armor again: it heals faster in it)
 				s_ctl.crouch = true;
 				LookAt(eye, enemyAim, 3.0f);
+				if (Now() - s_bot.hitAt > 2.0f)
+					s_bot.cloakEscape = false;
 				s_bot.doing.Format("in cover, recovering (health %d)", pMe->GetHealth());
+				// (a soldier on foot in sight, itself well enough: shot at from
+				// down there, not a heavy gun's vehicle; it sat out most of the
+				// fight recovering, two hits in two minutes)
+				if (seen && !pEnemy->GetLinkedVehicle() && health > 0.7f && Now() - s_bot.hitAt > 1.0f
+					&& !(pSuit && pSuit->GetMode() == NANOMODE_CLOAK))
+				{
+					FightStep(pMe, eye, pEnemy);
+					s_bot.doing.Format("in cover, recovering, shooting %s (health %d)", pEnemy->GetEntity()->GetName(), pMe->GetHealth());
+				}
 				if (underFire && seen)
 				{
 					// no cover at all from there: another one
@@ -1585,20 +2233,199 @@ namespace
 					away = (away + toLeader.GetNormalized() * 0.6f).GetNormalizedSafe(away);
 			}
 			s_ctl.moveDir = Steer(pMe, pos, away);
-			s_ctl.sprint = true;
-			s_ctl.look = true;
-			s_ctl.yaw = Yaw(s_ctl.moveDir);
-			s_ctl.pitch = 0.0f;
-			s_ctl.turnRate = 6.0f;
+			// (shooting one close by: it backs off with its aim on him, not
+			// running off with its back to him, uncloaked for that shot)
+			if (engage)
+				s_ctl.sprint = false;
+			else
+			{
+				s_ctl.sprint = !(pSuit && pSuit->GetMode() == NANOMODE_CLOAK);
+				s_ctl.look = true;
+				s_ctl.yaw = Yaw(s_ctl.moveDir);
+				s_ctl.pitch = 0.0f;
+				s_ctl.turnRate = 6.0f;
+			}
 			s_bot.doing.Format("falling back (health %d)", pMe->GetHealth());
 		}
 		else
 		{
 			s_ctl.crouch = true;
 			LookAt(eye, enemyAim, 3.0f);
+			// (out of their sight: the armor again, it recharges and heals in
+			// it; cloaked the energy only went down)
+			if (Now() - s_bot.hitAt > 2.0f)
+				s_bot.cloakEscape = false;
 			s_bot.doing.Format("out of sight, recovering (health %d)", pMe->GetHealth());
 		}
 		return true;
+	}
+
+	// the weapon's sights: up while FightStep wants them (up from cover, a
+	// target far off) and it does not move this frame; down otherwise (in
+	// the sights it walks at a third of its speed). Not up and down faster
+	// than every 0.8 s
+	void ZoomStep(CPlayer* pMe)
+	{
+		IItem* pItem = pMe && !pMe->GetLinkedVehicle() ? pMe->GetCurrentItem() : 0;
+		IWeapon* pWeapon = pItem ? pItem->GetIWeapon() : 0;
+		if (!pWeapon)
+			return;
+		// (down at once to run: a third of its speed to cover otherwise)
+		const bool moves = s_ctl.moveDir.GetLengthSquared() >= 0.01f || s_ctl.sprint;
+		if (Now() < s_bot.zoomAt && !moves)
+			return;
+		static ICVar* pZoom = gEnv->pConsole->GetCVar("coop_agent_zoom");
+		const bool want = s_bot.zoomWant && (!pZoom || pZoom->GetIVal()) && !moves && pMe->GetHealth() > 0;
+		if (want && !pWeapon->IsZoomed() && !pWeapon->IsZooming())
+		{
+			pWeapon->StartZoom(pMe->GetEntityId(), 1);
+			s_bot.zoomAt = Now() + 0.8f;
+		}
+		else if (!want && (pWeapon->IsZoomed() || pWeapon->IsZooming()))
+		{
+			pWeapon->StopZoom(pMe->GetEntityId());
+			s_bot.zoomAt = Now() + 0.8f;
+		}
+	}
+
+	// the suit's mode: armor (the only one that takes hits for it), but for
+	// short moves another one and back: cloaked to get away (no shot while
+	// cloaked: a shot uncloaks), speed to catch up with the one it follows
+	// far off or to a downed teammate with nobody about, strength for a
+	// jump onto what it can not step onto and for a blow at one right next
+	// to it. Never in a vehicle, never down
+	void SuitStep(CPlayer* pMe, const Vec3& pos, IActor* pLeader, IActor* pEnemy)
+	{
+		CNanoSuit* pSuit = pMe->GetNanoSuit();
+		if (!pSuit || pMe->GetHealth() <= 0)
+			return;
+		static float s_switchAt = 0.0f;
+		const float now = Now();
+		const float energy = pSuit->GetSuitEnergy();
+		const ENanoMode mode = pSuit->GetMode();
+		static const char* const s_modes[] = { "speed", "strength", "cloak", "armor" };
+		// (changed by something else: the suit out of energy, a fall back
+		// ended, the agent; logged too, the cloak's end went unseen so)
+		static int s_seenMode = -1;
+		if (s_seenMode >= 0 && s_seenMode != (int)mode)
+		{
+			CryLogAlways("[CoopAgent] suit: %s -> %s (not its choice; energy %.0f, health %d)", (unsigned)s_seenMode < 4 ? s_modes[s_seenMode] : "?",
+				(unsigned)mode < 4 ? s_modes[mode] : "?", energy, pMe->GetHealth());
+			// (the suit itself let go of the cloak, out of energy below 20:
+			// one escape, one cloak; else cloaked again at 25 for a moment, too
+			// short for the soldiers' eyes, and again)
+			if (s_seenMode == NANOMODE_CLOAK)
+				s_bot.cloakEscape = false;
+		}
+		s_seenMode = (int)mode;
+		// (the AI agent chose a mode: kept a while)
+		if (now < s_bot.suitHoldUntil)
+			return;
+		// (as MoveTo arms a strength jump: an enemy seen lately, not one it
+		// only remembers; else a jump it armed was never made)
+		const bool threatened = s_bot.retreating || now - s_bot.hitAt < 6.0f || (s_bot.enemy && now - s_bot.enemySeenAt < 8.0f);
+		ENanoMode want = NANOMODE_DEFENSE;
+		const char* why = "the default";
+		IActor* pDowned = s_bot.order == eO_Hold || s_bot.order == eO_Goto ? 0 : DownedTeammate(pMe, pos, 200.0f);
+		if (pMe->GetLinkedVehicle())
+			why = "in a vehicle";
+		else if (s_bot.strengthJumpAt >= 0.0f && now - s_bot.strengthJumpAt < 2.5f && energy >= 50.0f && !threatened)
+		{
+			want = NANOMODE_STRENGTH;
+			why = "a jump onto what is in the way";
+		}
+		else if (now < s_bot.meleeWantUntil && energy >= 40.0f)
+		{
+			want = NANOMODE_STRENGTH;
+			why = "a blow at one right next to it";
+		}
+		else if (s_bot.retreating && s_bot.cloakEscape && energy > (mode == NANOMODE_CLOAK ? 21.0f : 25.0f))
+		{
+			want = NANOMODE_CLOAK;
+			why = "getting away out of their sight";
+		}
+		else if (!threatened && pDowned && Dist2D(pDowned->GetEntity()->GetWorldPos(), pos) > 15.0f && energy > (mode == NANOMODE_SPEED ? 40.0f : 100.0f))
+		{
+			want = NANOMODE_SPEED;
+			why = "to a downed teammate";
+		}
+		else if (!threatened && pLeader && (s_bot.order == eO_Free || s_bot.order == eO_Follow) && pLeader->GetHealth() > 0
+			&& Dist2D(pLeader->GetEntity()->GetWorldPos(), pos) > (mode == NANOMODE_SPEED ? 12.0f : 30.0f) && energy > (mode == NANOMODE_SPEED ? 50.0f : 120.0f))
+		{
+			want = NANOMODE_SPEED;
+			why = "catching up";
+		}
+		// (a mode the suit refused a moment ago: armor meanwhile)
+		static int s_refusedMode = -1;
+		static float s_refusedUntil = 0.0f;
+		if ((int)want == s_refusedMode && now < s_refusedUntil)
+		{
+			want = NANOMODE_DEFENSE;
+			why = "the default (that mode refused)";
+		}
+		if (want == mode)
+			return;
+		// (not to and fro: a while between switches, but armor at once when
+		// shot at)
+		if (now < s_switchAt && !(want == NANOMODE_DEFENSE && threatened) && !(want == NANOMODE_STRENGTH && now < s_bot.meleeWantUntil))
+			return;
+		// (leaving the cloak itself, at 21: that escape is over, one cloak)
+		if (mode == NANOMODE_CLOAK && want != NANOMODE_CLOAK && want != NANOMODE_STRENGTH)
+			s_bot.cloakEscape = false;
+		if (pSuit->SetMode(want))
+		{
+			s_seenMode = (int)want;
+			s_switchAt = now + 1.5f;
+			++s_bot.suitSwitches;
+			CryLogAlways("[CoopAgent] suit: %s -> %s (%s; energy %.0f, health %d)", (unsigned)mode < 4 ? s_modes[mode] : "?", (unsigned)want < 4 ? s_modes[want] : "?",
+				why, energy, pMe->GetHealth());
+			if (want == NANOMODE_SPEED)
+				s_ctl.sprint = true;
+		}
+		else
+		{
+			// (refused: a mode the campaign took away; it never cloaked so)
+			s_refusedMode = (int)want;
+			s_refusedUntil = now + 10.0f;
+			if (want != NANOMODE_DEFENSE && mode != NANOMODE_DEFENSE && threatened && pSuit->SetMode(NANOMODE_DEFENSE))
+			{
+				s_seenMode = NANOMODE_DEFENSE;
+				s_switchAt = now + 1.5f;
+				++s_bot.suitSwitches;
+				CryLogAlways("[CoopAgent] suit: %s -> armor (%s refused; energy %.0f, health %d)", (unsigned)mode < 4 ? s_modes[mode] : "?",
+					(unsigned)want < 4 ? s_modes[want] : "?", energy, pMe->GetHealth());
+			}
+			static float s_refusedAt = -100.0f;
+			if (now - s_refusedAt > 10.0f)
+			{
+				s_refusedAt = now;
+				CryLogAlways("[CoopAgent] suit: %s refused (%s; modes given: speed %d strength %d cloak %d armor %d; energy %.0f)",
+					(unsigned)want < 4 ? s_modes[want] : "?", why, (int)pSuit->IsModeActive(NANOMODE_SPEED), (int)pSuit->IsModeActive(NANOMODE_STRENGTH),
+					(int)pSuit->IsModeActive(NANOMODE_CLOAK), (int)pSuit->IsModeActive(NANOMODE_DEFENSE), energy);
+			}
+		}
+	}
+
+	// something to jump up onto right ahead, too high to step onto, low
+	// enough for a strength jump, room to stand on it: how high (0: none)
+	float LedgeAhead(CPlayer* pMe, const Vec3& pos, const Vec3& dir)
+	{
+		IPhysicalEntity* pSkip = pMe->GetEntity()->GetPhysics();
+		const int ents = ent_static | ent_terrain | ent_rigid | ent_sleeping_rigid;
+		ray_hit hit;
+		if (!gEnv->pPhysicalWorld->RayWorldIntersection(pos + Vec3(0, 0, 0.6f), dir * 1.2f, ents, WALK_GEOM, &hit, 1, &pSkip, pSkip ? 1 : 0))
+			return 0.0f;
+		const Vec3 over = pos + dir * (hit.dist + 0.6f);
+		ray_hit top;
+		if (!gEnv->pPhysicalWorld->RayWorldIntersection(over + Vec3(0, 0, 3.6f), Vec3(0, 0, -3.6f), ents, WALK_GEOM, &top, 1, &pSkip, pSkip ? 1 : 0))
+			return 0.0f;
+		const float h = top.pt.z - pos.z;
+		if (h < 0.9f || h > 2.8f)
+			return 0.0f;
+		ray_hit head;
+		if (gEnv->pPhysicalWorld->RayWorldIntersection(top.pt + Vec3(0, 0, 0.1f), Vec3(0, 0, 1.9f), ents, WALK_GEOM, &head, 1, &pSkip, pSkip ? 1 : 0))
+			return 0.0f;
+		return h;
 	}
 
 	// standing its ground in a fight: side steps now and then, crouched in
@@ -1664,11 +2491,48 @@ namespace
 		if (!FirstBlock(eye, look * range, ent_all, skip, n, hit))
 			return false;    // aimed at nothing (the enemy is not where it aims)
 		IPhysicalEntity* pEnemyPhys = pEnemy->GetEntity()->GetPhysics();
+		// where the bullet leaves (the gun, lower than the eyes): its line
+		// must be free too. Up from a cover that hid a crouching head the
+		// eyes saw him over its top, the gun did not: 16 bursts aimed right
+		// at a soldier 21 m off, no hit, all into its own cover
+		{
+			IItem* pItem = pMe->GetCurrentItem();
+			IWeapon* pWeapon = pItem ? pItem->GetIWeapon() : 0;
+			IFireMode* pMode = pWeapon ? pWeapon->GetFireMode(pWeapon->GetCurrentFireMode()) : 0;
+			if (pMode)
+			{
+				const Vec3 muzzle = pMode->GetFiringPos(aim);
+				const Vec3 toAim = aim - muzzle;
+				ray_hit gunHit;
+				if (muzzle.GetDistance(eye) < 2.0f && toAim.GetLengthSquared() > 1.0f
+					&& FirstBlock(muzzle, toAim, ent_all, skip, n, gunHit) && gunHit.pCollider != pEnemyPhys
+					&& gunHit.dist < toAim.GetLength() - 0.8f)
+				{
+					IEntity* pGunHit = gunHit.pCollider ? gEnv->pEntitySystem->GetEntityFromPhysics(gunHit.pCollider) : 0;
+					IActor* pGunHitActor = pGunHit ? g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(pGunHit->GetId()) : 0;
+					if (!(pGunHitActor && Hostile(pGunHitActor)))
+					{
+						static ICVar* pGunTrace = gEnv->pConsole->GetCVar("coop_test_shottrace");
+						static float s_gunToldAt = 0.0f;
+						if (pGunTrace && pGunTrace->GetIVal() && Now() - s_gunToldAt > 1.0f)
+						{
+							s_gunToldAt = Now();
+							CryLogAlways("[CoopAgent] the gun's line at %s blocked %.1f m off (of %.0f) by %s; the gun %.2f m below the eyes", pEnemy->GetEntity()->GetName(),
+								gunHit.dist, toAim.GetLength(), pGunHit ? pGunHit->GetName() : "something static", eye.z - muzzle.z);
+						}
+						return false;
+					}
+				}
+			}
+		}
 		if (hit.pCollider == pEnemyPhys)
 			return true;
-		if (IVehicle* pVehicle = pEnemy->GetLinkedVehicle())
-			if (hit.pCollider == pVehicle->GetEntity()->GetPhysics())
-				return true;
+		// (his vehicle is no shot at him: at the truck's gunner 10 of 12 hits
+		// went into the truck, its armor took them all. One at a vehicle's
+		// gun only when the line reaches him himself: 0.8 m from his head is
+		// the gun's shield and the cab)
+		if (pEnemy->GetLinkedVehicle())
+			return false;
 		// the hit is right at him (his weapon, a part of him)
 		if (hit.pt.GetDistance(aim) < 0.8f)
 			return true;
@@ -1696,28 +2560,86 @@ namespace
 	{
 		if (!s_bot.haveCover)
 			return false;
-		if (!MoveTo(pMe, s_bot.cover, 0.8f, false, false, ""))
+		if (!MoveTo(pMe, s_bot.cover, 0.8f, Dist2D(s_bot.cover, pos) > 4.0f, false, ""))
 		{
 			s_bot.doing.Format("to cover (%.0f m), fighting %s", Dist2D(s_bot.cover, pos), pEnemy->GetEntity()->GetName());
 			return true;
 		}
-		if (Now() >= s_bot.peekUntil)
+		const float now = Now();
+		const Vec3 eye = EyePos(pMe);
+		const bool seen = Visible(pMe, eye, pEnemy->GetEntity(), AimPoint(pEnemy->GetEntity()));
+		int clip = -1, reserve = -1;
+		IWeapon* pWeapon = CurrentWeapon(pMe, &clip, &reserve);
+		const int clipSize = pWeapon && pWeapon->GetFireMode(pWeapon->GetCurrentFireMode()) ? pWeapon->GetFireMode(pWeapon->GetCurrentFireMode())->GetClipSize() : 0;
+		const bool lowClip = clipSize > 0 && clip >= 0 && clip < clipSize * 3 / 10 && reserve > 0;
+		if (s_bot.peekUp)
 		{
-			s_bot.peekUp = !s_bot.peekUp;
-			s_bot.peekUntil = Now() + (s_bot.peekUp ? 1.4f + cry_frand() : 1.0f + cry_frand() * 0.8f);
+			// up: standing, or leaning out round its cover's side, firing
+			// short bursts at him (FightStep aims and fires); down again when
+			// shot, the clip low, him out of sight a moment, or up long
+			if (seen)
+				s_bot.peekSeenAt = now;
+			const bool shot = now - s_bot.hitAt < 0.3f && now - s_bot.peekSince > 0.2f;
+			if (shot)
+				++s_bot.peekHits;
+			if (shot || lowClip || (now - s_bot.peekSeenAt > 0.7f && now - s_bot.peekSince > 0.7f) || now - s_bot.peekSince > 2.5f)
+			{
+				s_bot.peekUp = false;
+				s_bot.peekSince = now;
+				Fire(pMe, false);
+			}
 		}
-		if (!s_bot.peekUp)
+		else
 		{
+			// down: crouched out of their sight, a reload, then up again, a
+			// while after the last hit (not up into the same fire)
 			s_ctl.crouch = true;
 			Fire(pMe, false);
+			if (lowClip && reserve > 0 && now > s_bot.reloadAt)
+			{
+				Press(pMe, g_pGame->Actions().reload, true);
+				Press(pMe, g_pGame->Actions().reload, false);
+				s_bot.reloadAt = now + 2.5f;
+				++s_bot.hiddenReloads;
+			}
 			// shot even down there: no cover from it here
-			if (Now() - s_bot.hitAt < 0.3f)
+			if (now - s_bot.hitAt < 0.3f && now - s_bot.peekSince > 0.5f)
 			{
 				s_bot.haveCover = false;
 				s_bot.coverAskAt = 0.0f;
+				// (a heavy gun through it: away out of its sight, cloaked if it
+				// can, not across the open to the next cover in its fire: it
+				// went down so at the bridge)
+				if (now - s_bot.heavyHitAt < 1.0f)
+				{
+					s_bot.retreatNowAt = now;
+					Event("shot in cover by a heavy gun: falls back out of its sight");
+				}
+				else
+					Event("shot in cover: another one");
+			}
+			const float down = now - s_bot.peekSince;
+			if (down > 1.2f + cry_frand() * 0.6f && (now - s_bot.hitAt > 1.5f || down > 6.0f) && now > s_bot.reloadAt && !lowClip)
+			{
+				s_bot.peekUp = true;
+				s_bot.peekSince = now;
+				s_bot.peekSeenAt = now;
+				++s_bot.peeks;
+				if (s_bot.coverPeek == 1 || s_bot.coverPeek == 2)
+					++s_bot.leanPeeks;
 			}
 		}
-		s_bot.doing.Format("in cover, fighting %s", pEnemy->GetEntity()->GetName());
+		if (s_bot.peekUp)
+		{
+			// leaning out where the cover's side gives a shot; else standing up
+			if (s_bot.coverPeek == 1 || s_bot.coverPeek == 2)
+			{
+				s_ctl.lean = s_bot.coverPeek == 1 ? -1 : 1;
+				s_ctl.crouch = false;
+			}
+		}
+		s_bot.doing.Format("in cover (%s), fighting %s", s_bot.peekUp ? (s_ctl.lean ? (s_ctl.lean < 0 ? "leaning out left" : "leaning out right") : "up") : "down",
+			pEnemy->GetEntity()->GetName());
 		return true;
 	}
 
@@ -2127,6 +3049,24 @@ namespace
 			Fire(pMe, false);
 			ChooseWeapon(pMe, true);
 		}
+		else if (seen && aim.GetDistance(eye) < 2.2f && Now() >= s_bot.meleeAt)
+		{
+			// right next to it: a blow (with strength's force when it can; the
+			// mode first, the server takes it a moment later)
+			Fire(pMe, false);
+			CNanoSuit* pSuit = pMe->GetNanoSuit();
+			if (pSuit && pSuit->GetMode() != NANOMODE_STRENGTH && pSuit->GetSuitEnergy() >= 40.0f && Now() >= s_bot.meleeWantUntil)
+				s_bot.meleeWantUntil = Now() + 1.2f;
+			else if (!pSuit || pSuit->GetMode() == NANOMODE_STRENGTH || pSuit->GetSuitEnergy() < 40.0f || Now() - (s_bot.meleeWantUntil - 1.2f) > 0.5f)
+			{
+				Press(pMe, g_pGame->Actions().special, true);
+				Press(pMe, g_pGame->Actions().special, false);
+				s_bot.meleeAt = Now() + 1.2f;
+				// (strength only for the blow: a shot in strength costs energy)
+				s_bot.meleeWantUntil = Now() + 0.4f;
+				Event("a blow at %s right next to it", pEnemy->GetEntity()->GetName());
+			}
+		}
 		else if (clip == 0 && Now() > s_bot.reloadAt)
 		{
 			Fire(pMe, false);
@@ -2169,31 +3109,102 @@ namespace
 				s_footNoLineUntil[id] = Now() + 8.0f;
 				s_footBlockedSince = -1.0f;
 				Event("no line of fire at %s: another enemy", pEnemy->GetEntity()->GetName());
+				// (and a place with a shot at him, round what covers him: behind
+				// their truck the soldiers were out of its line the whole fight,
+				// it shot once in two minutes)
+				if (!s_bot.retreating)
+				{
+					s_bot.haveCover = false;
+					s_bot.coverAskAt = 0.0f;
+					AskCover(pEnemy, true, true);
+				}
 			}
 			s_footBlockedLastAt = Now();
 		}
+		else if (seen && off < 0.06f && clip != 0 && pWeapon->IsZooming())
+			Fire(pMe, false);    // (the sights going up or down: no shot then)
 		else if (seen && off < 0.06f && clip != 0)
 		{
 			s_footBlockedSince = -1.0f;
-			// bursts: held a while, then let go (single shot weapons fire again)
+			// short bursts with a pause between (the spread grows each shot
+			// and shrinks in the pause: long bursts were sprayed at 25 m);
+			// shorter still far off
 			const float now = Now();
-			if (now >= s_bot.pauseUntil && now < s_bot.burstUntil)
+			const float range = aim.GetDistance(eye);
+			// (not a burst while the spread is wide, moving or just landed:
+			// 7-9 degrees at 30-60 m, every round wide of him; a moment later)
+			IFireMode* pSpreadMode = pWeapon->GetFireMode(pWeapon->GetCurrentFireMode());
+			const bool wide = !s_bot.attackHeld && range > 10.0f && pSpreadMode && pSpreadMode->GetSpread() > 3.0f;
+			if (wide && now >= s_bot.pauseUntil && now < s_bot.burstUntil)
+			{
+				const float len = s_bot.burstUntil - s_bot.pauseUntil;
+				s_bot.pauseUntil = now + 0.1f;
+				s_bot.burstUntil = s_bot.pauseUntil + len;
+				Fire(pMe, false);
+			}
+			else if (now >= s_bot.pauseUntil && now < s_bot.burstUntil)
 			{
 				if (!s_bot.attackHeld)
+				{
 					++s_bot.bursts;
+					// testing (coop_test_shottrace 1): at what each burst goes and
+					// what the aim meets first (the truck took most of its shots)
+					static ICVar* pBurstTrace = gEnv->pConsole->GetCVar("coop_test_shottrace");
+					if (pBurstTrace && pBurstTrace->GetIVal())
+					{
+						IPhysicalEntity* skip[2];
+						int n = 0;
+						if (IPhysicalEntity* p = pMe->GetEntity()->GetPhysics())
+							skip[n++] = p;
+						if (IItem* pItem = pMe->GetCurrentItem())
+							if (IPhysicalEntity* p = pItem->GetEntity()->GetPhysics())
+								skip[n++] = p;
+						const Vec3 look = pMe->GetViewRotation().GetColumn1();
+						ray_hit hit;
+						const bool any = FirstBlock(eye, look * (range + 2.0f), ent_all, skip, n, hit);
+						IEntity* pHit = any && hit.pCollider ? gEnv->pEntitySystem->GetEntityFromPhysics(hit.pCollider) : 0;
+						IVehicle* pTheirs = pEnemy->GetLinkedVehicle();
+						// (where the shot goes: the game casts its ray along the
+						// movement state's fire direction, not along the view; the
+						// sights bug was there, 27-52 degrees)
+						float gunOff = -1.0f;
+						IItem* pGunItem = pMe->GetCurrentItem();
+						IWeapon* pGun = pGunItem ? pGunItem->GetIWeapon() : 0;
+						IFireMode* pGunMode = pGun ? pGun->GetFireMode(pGun->GetCurrentFireMode()) : 0;
+						if (IMovementController* pMC = pMe->GetMovementController())
+						{
+							SMovementState st;
+							pMC->GetMovementState(st);
+							const Vec3 toAim = (aim - st.weaponPosition).GetNormalizedSafe(look);
+							gunOff = RAD2DEG(acos_tpl(clamp_tpl(st.fireDirection.GetNormalizedSafe(toAim).Dot(toAim), -1.0f, 1.0f)));
+						}
+						CryLogAlways("[CoopAgent] burst at %s (%.0f m%s%s): the aim meets %s at %.1f m, %.2f m from the aim point; the gun %.1f deg off him, spread %.1f",
+							pEnemy->GetEntity()->GetName(), range, pTheirs ? ", in " : "", pTheirs ? pTheirs->GetEntity()->GetName() : "",
+							pHit ? pHit->GetName() : any ? "something static" : "nothing", any ? hit.dist : -1.0f, any ? hit.pt.GetDistance(aim) : -1.0f,
+							gunOff, pGunMode ? pGunMode->GetSpread() : -1.0f);
+					}
+				}
 				Fire(pMe, true);
 			}
 			else if (now >= s_bot.burstUntil)
 			{
 				Fire(pMe, false);
-				s_bot.pauseUntil = now + 0.15f + cry_frand() * 0.2f;
-				s_bot.burstUntil = s_bot.pauseUntil + 0.3f + cry_frand() * 0.4f;
+				s_bot.pauseUntil = now + (range > 30.0f ? 0.45f : 0.3f) + cry_frand() * 0.25f;
+				s_bot.burstUntil = s_bot.pauseUntil + (range > 30.0f ? 0.15f : 0.22f) + cry_frand() * 0.15f;
 			}
 			else
 				Fire(pMe, false);
 		}
 		else
 			Fire(pMe, false);
+		// the sights up far off while it stands or crouches still (the
+		// spread a tenth), down to move or to change weapons
+		// (wanted only up from cover, still: ZoomStep decides once it is
+		// known whether it moves this frame; in the open it toggled with each
+		// side step and never fired, the autotester's companion-fight-bridge)
+		const Vec3 myPos = pMe->GetEntity()->GetWorldPos();
+		s_bot.zoomWant = fightsWithIt && seen && aim.GetDistance(eye) > 10.0f && clip != 0 && s_bot.peekUp && s_bot.haveCover
+			&& Dist2D(s_bot.cover, myPos) < 1.5f;
 		s_bot.doing.Format("fighting %s (%.0f m%s)", pEnemy->GetEntity()->GetName(), aim.GetDistance(eye), seen ? "" : ", out of sight");
 	}
 
@@ -2654,6 +3665,8 @@ namespace
 		s_ctl.sprint = false;
 		s_ctl.jump = false;
 		s_ctl.crouch = false;
+		s_ctl.lean = 0;
+		s_bot.zoomWant = false;
 		if (!pMe || !InGame(pMe))
 		{
 			s_bot.doing = pMe ? "waiting to spawn" : "not in a game";
@@ -2665,6 +3678,11 @@ namespace
 				CryLogAlways("[CoopAgent] the last minute: %d bursts fired; no shot: %d frames something in the way, %d enemy not in sight, %d turning to him; stuck %d times, %d ways round found close by",
 					s_bot.bursts, s_bot.heldFire, s_bot.unseen, s_bot.turning, s_bot.stuckTimes, s_bot.localPlans);
 			s_bot.bursts = s_bot.heldFire = s_bot.stuckTimes = s_bot.unseen = s_bot.turning = s_bot.localPlans = 0;
+			if (s_bot.fightOpen + s_bot.fightHidden + s_bot.fightPeek + s_bot.fightBack > 1.0f || s_bot.suitSwitches)
+				CryLogAlways("[CoopAgent] the last minute in fights: open %.0f s, hidden %.0f s, up from cover %.0f s, falling back %.0f s; %d peeks (shot while up %d, %d leaning out), %d reloads in cover, %d suit switches; %d hits marked",
+					s_bot.fightOpen, s_bot.fightHidden, s_bot.fightPeek, s_bot.fightBack, s_bot.peeks, s_bot.peekHits, s_bot.leanPeeks, s_bot.hiddenReloads, s_bot.suitSwitches, s_bot.hitsConfirmed);
+			s_bot.fightOpen = s_bot.fightHidden = s_bot.fightPeek = s_bot.fightBack = 0.0f;
+			s_bot.peeks = s_bot.peekHits = s_bot.leanPeeks = s_bot.hiddenReloads = s_bot.suitSwitches = s_bot.hitsConfirmed = 0;
 			s_bot.statsAt = Now() + 60.0f;
 		}
 		IViewSystem* pView = g_pGame->GetIGameFramework()->GetIViewSystem();
@@ -2681,6 +3699,16 @@ namespace
 			s_bot.hitAt = Now();
 		}
 		s_bot.lastHealth = (float)pMe->GetHealth();
+		// (a hit the suit's armor took: the energy, not the health, went
+		// down; the damage indicator may come late or not at all)
+		{
+			static float s_lastEnergy = -1.0f;
+			CNanoSuit* pSuit = pMe->GetNanoSuit();
+			const float energy = pSuit ? pSuit->GetSuitEnergy() : -1.0f;
+			if (!down && pSuit && pSuit->GetMode() == NANOMODE_DEFENSE && s_lastEnergy >= 0.0f && energy < s_lastEnergy - 5.0f)
+				s_bot.hitAt = Now();
+			s_lastEnergy = energy;
+		}
 		{
 			IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
 			while (IActor* pActor = it->Next())
@@ -2768,6 +3796,20 @@ namespace
 		IActor* pLeader = s_bot.leader.empty() ? HostPlayer() : ActorByName(s_bot.leader.c_str());
 		if (!pLeader)
 			pLeader = HostPlayer();
+		// the suit's mode on every way out of here (falling back, reviving,
+		// picking up, getting into a vehicle return early: the cloak to get
+		// away never came, a speed or strength mode stayed on with no armor)
+		struct SSuitAtEnd
+		{
+			CPlayer* pMe;
+			Vec3 pos;
+			IActor* pLeader;
+			~SSuitAtEnd()
+			{
+				ZoomStep(pMe);
+				SuitStep(pMe, pos, pLeader, ActorOf(s_bot.enemy));
+			}
+		} suitAtEnd = { pMe, pos, pLeader };
 
 		// ---- reviving comes first (unless ordered to stay), however far: the
 		// host down 200 m off (it had been put back where it got into a car)
@@ -3159,13 +4201,24 @@ namespace
 		{
 			FightStep(pMe, eye, pEnemy);
 			aiming = true;
-			// shot at: it takes cover close by and fights from there (it
-			// does not stand in the open)
-			if (Now() - s_bot.hitAt < 3.0f && !s_bot.haveCover)
-				AskCover(pEnemy);
+			// shot at, or fighting in the open a few seconds: it takes cover
+			// close by and fights from there (it does not stand in the open
+			// till it is hit)
+			const bool seenNow = Now() - s_bot.enemySeenAt < 1.0f;
+			if (!s_bot.haveCover && seenNow)
+			{
+				if (s_bot.openSince < 0.0f)
+					s_bot.openSince = Now();
+			}
+			else
+				s_bot.openSince = -1.0f;
+			const bool hitLately = Now() - s_bot.hitAt < 3.0f;
+			if (!s_bot.haveCover && (hitLately || (s_bot.openSince >= 0.0f && Now() - s_bot.openSince > 4.0f)))
+				AskCover(pEnemy, !hitLately);
 		}
 		else
 		{
+			s_bot.openSince = -1.0f;
 			Fire(pMe, false);
 			if (s_bot.order == eO_Attack)
 			{
@@ -3176,8 +4229,12 @@ namespace
 		}
 
 		// ---- moving
-		const bool fightsFromCover = aiming && pEnemy && s_bot.haveCover && s_bot.order != eO_Hold && s_bot.order != eO_Goto
-			&& (!pLeader || Dist2D(s_bot.cover, pLeader->GetEntity()->GetWorldPos()) < 30.0f);
+		// (holding a place or going to one: a cover close to it; following:
+		// one not far from him, unless he is down)
+		const bool holdsNear = (s_bot.order == eO_Hold || s_bot.order == eO_Goto) && s_bot.haveSpot && Dist2D(s_bot.cover, s_bot.spot) < 8.0f;
+		const bool fightsFromCover = aiming && pEnemy && s_bot.haveCover
+			&& (holdsNear || (s_bot.order != eO_Hold && s_bot.order != eO_Goto
+				&& (!pLeader || pLeader->GetHealth() <= 0 || Dist2D(s_bot.cover, pLeader->GetEntity()->GetWorldPos()) < 30.0f)));
 		if (fightsFromCover)
 			FightFromCover(pMe, pos, pEnemy);
 		else
@@ -3229,6 +4286,17 @@ namespace
 		}
 		if (aiming && pEnemy && !fightsFromCover)
 			Dodge(pos, pEnemy);
+		// (where it fights from, for the log)
+		if (aiming || s_bot.retreating)
+		{
+			if (s_bot.retreating)
+				;    // (counted in Survive)
+			else if (fightsFromCover && Dist2D(s_bot.cover, pos) < 1.5f)
+				(s_bot.peekUp ? s_bot.fightPeek : s_bot.fightHidden) += frameTime;
+			else
+				s_bot.fightOpen += frameTime;
+		}
+		// (SuitStep: by the guard, as on every way out of here)
 		// facing the way it walks when it has nobody to aim at
 		if (!aiming && s_ctl.moveDir.GetLengthSquared() > 0.01f)
 		{
@@ -3540,6 +4608,34 @@ namespace
 			SetOrder(eO_Revive);
 			Reply(id.c_str(), Ok(("reviving " + (args.empty() ? string("the nearest downed teammate") : args)).c_str()));
 		}
+		else if (cmd == "lean")
+		{
+			// lean left|right [seconds] | off: held (5 s by default)
+			string side = args, secs;
+			const int sp = side.find(' ');
+			if (sp > 0)
+			{
+				secs = side.substr(sp + 1);
+				side = side.substr(0, sp);
+			}
+			side.MakeLower();
+			const float held = secs.empty() ? 5.0f : (float)atof(secs.c_str());
+			if (side != "left" && side != "right" && side != "off")
+				Reply(id.c_str(), Fail("lean left|right [seconds] | off"));
+			else if (side != "off" && !(held > 0.0f && held <= 60.0f))
+				Reply(id.c_str(), Fail("lean: seconds from 0 to 60"));
+			else
+			{
+				if (side == "off")
+					s_bot.leanHoldUntil = 0.0f;
+				else
+				{
+					s_bot.leanHoldSide = side == "left" ? -1 : 1;
+					s_bot.leanHoldUntil = Now() + held;
+				}
+				Reply(id.c_str(), Ok(side == "off" ? "not leaning" : (side == "left" ? "leaning left" : "leaning right")));
+			}
+		}
 		else if (cmd == "fire")
 		{
 			s_bot.fireAtWill = !(args == "off" || args == "0" || args == "hold");
@@ -3594,9 +4690,34 @@ namespace
 		else if (cmd == "suit" && pMe && pMe->GetNanoSuit())
 		{
 			string m = args;
+			m.Trim();
 			m.MakeLower();
+			if (m != "speed" && m != "strength" && m != "cloak" && m != "armor" && m != "auto")
+			{
+				Reply(id.c_str(), Fail("suit: speed, strength, cloak, armor or auto"));
+				return;
+			}
 			ENanoMode mode = m == "speed" ? NANOMODE_SPEED : m == "strength" ? NANOMODE_STRENGTH : m == "cloak" ? NANOMODE_CLOAK : NANOMODE_DEFENSE;
-			pMe->GetNanoSuit()->SetMode(mode);
+			CNanoSuit* pSuit = pMe->GetNanoSuit();
+			if (m == "cloak" && pSuit->GetSuitEnergy() <= 21.0f)
+			{
+				Reply(id.c_str(), Fail(string().Format("not enough energy to cloak (%.0f)", pSuit->GetSuitEnergy())));
+				return;
+			}
+			if (m == "auto")
+				s_bot.suitHoldUntil = 0.0f;
+			else if (pSuit->GetMode() != mode && !pSuit->SetMode(mode))
+			{
+				Reply(id.c_str(), Fail(string().Format("the suit refused %s (modes given: speed %d strength %d cloak %d armor %d)", m.c_str(),
+					(int)pSuit->IsModeActive(NANOMODE_SPEED), (int)pSuit->IsModeActive(NANOMODE_STRENGTH), (int)pSuit->IsModeActive(NANOMODE_CLOAK),
+					(int)pSuit->IsModeActive(NANOMODE_DEFENSE)).c_str()));
+				return;
+			}
+			// (kept 20 s, the companion's own choice after that; "auto": at once;
+			// a refused mode holds nothing)
+			if (m != "auto")
+				s_bot.suitHoldUntil = Now() + 20.0f;
+			CryLogAlways("[CoopAgent] suit: %s by the agent (energy %.0f)", m.c_str(), pSuit->GetSuitEnergy());
 			Reply(id.c_str(), Ok(("suit: " + m).c_str()));
 		}
 		else if (cmd == "screenshot")
@@ -4875,6 +5996,25 @@ namespace
 		return FirstBlock(a, b - a, ent_static | ent_terrain | ent_rigid | ent_sleeping_rigid, pSkip, nSkip, hit);
 	}
 
+	// how it fights from a place: 0 standing up, 1 leaning out to the left,
+	// 2 to the right (facing the threat) sees the point; 3 not at all
+	int PeekFrom(const Vec3& p, const Vec3& at, IPhysicalEntity** pSkip, int nSkip)
+	{
+		// (the gun's height: the eyes over the top and the gun below it was
+		// no shot, all into the cover)
+		if (!SolidBetween(p + Vec3(0, 0, 1.4f), at, pSkip, nSkip))
+			return 0;
+		Vec3 to = at - p;
+		to.z = 0;
+		to.NormalizeSafe(Vec3(0, 1, 0));
+		const Vec3 left(-to.y, to.x, 0);
+		if (!SolidBetween(p + Vec3(0, 0, 1.35f) + left * 0.4f, at, pSkip, nSkip))
+			return 1;
+		if (!SolidBetween(p + Vec3(0, 0, 1.35f) - left * 0.4f, at, pSkip, nSkip))
+			return 2;
+		return 3;
+	}
+
 	// cover from a threat: of the places around the agent (up to 20 m),
 	// the nearest one the threat can not see a crouching head at, not
 	// toward the threat, and reachable (the AI navigation's way)
@@ -4892,24 +6032,47 @@ namespace
 	// one that the nearest enemies (the one it fights first) can not see a
 	// crouching head at, not toward them, not away from the host, and that
 	// it can walk to (the AI navigation's way)
-	bool FindCover(IActor* pAgent, IActor* pThreat, std::vector<Vec3>& path, Vec3& cover)
+	bool FindCover(IActor* pAgent, const std::vector<IActor*>& named, std::vector<Vec3>& path, Vec3& cover, int& peek)
 	{
 		const Vec3 from = pAgent->GetEntity()->GetWorldPos();
-		// the threats: the one named, and the nearest others (up to 4 in all)
+		// the threats: those named (who shot it first), every soldier after
+		// it (its attention on it: it hid from the one it aimed at while
+		// others shot it, 11 of 18 times in the user's games), the nearest
+		// others: up to 8 in all
+		std::vector<IActor*> threats(named.begin(), named.end());
 		std::vector<std::pair<float, IActor*> > others;
+		IAIObject* pAgentAI = pAgent->GetEntity()->GetAI();
 		IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
 		while (IActor* pActor = it->Next())
-			if (pActor != pThreat && HostileTo(pActor, pAgent))
+			if (std::find(threats.begin(), threats.end(), pActor) == threats.end() && HostileTo(pActor, pAgent))
 			{
 				const float d = pActor->GetEntity()->GetWorldPos().GetDistance(from);
-				if (d < 60.0f)
-					others.push_back(std::make_pair(d, pActor));
+				IAIObject* pAI = pActor->GetEntity()->GetAI();
+				IPipeUser* pPipe = pAI ? pAI->CastToIPipeUser() : 0;
+				const bool after = pPipe && pAgentAI && pPipe->GetAttentionTarget() == pAgentAI;
+				if (d < 60.0f || (after && d < 120.0f))
+					others.push_back(std::make_pair(after ? d - 1000.0f : d, pActor));
 			}
 		std::sort(others.begin(), others.end());
-		std::vector<Vec3> eyes;
-		eyes.push_back(EyePos(pThreat));
-		for (size_t i = 0; i < others.size() && eyes.size() < 4; ++i)
-			eyes.push_back(EyePos(others[i].second));
+		for (size_t i = 0; i < others.size() && threats.size() < 8; ++i)
+			threats.push_back(others[i].second);
+		std::vector<Vec3> eyes, feet;
+		std::vector<IPhysicalEntity*> rides;   // a threat's own vehicle (a truck's gunner: its truck is no wall between)
+		for (size_t i = 0; i < threats.size(); ++i)
+		{
+			eyes.push_back(EyePos(threats[i]));
+			feet.push_back(threats[i]->GetEntity()->GetWorldPos());
+			IVehicle* pRide = threats[i]->GetLinkedVehicle();
+			rides.push_back(pRide ? pRide->GetEntity()->GetPhysics() : 0);
+		}
+		// burning wrecks to be: no cover next to a vehicle shot to pieces
+		// (it hid by a car the soldiers were shooting and died in its
+		// explosion, the user's game of 2026-10-17)
+		std::vector<Vec3> wrecks;
+		IVehicleIteratorPtr pVehicles = g_pGame->GetIGameFramework()->GetIVehicleSystem()->CreateVehicleIterator();
+		while (IVehicle* pVehicle = pVehicles->Next())
+			if (!pVehicle->IsDestroyed() && pVehicle->GetDamageRatio() > 0.5f && pVehicle->GetEntity()->GetWorldPos().GetDistance(from) < 45.0f)
+				wrecks.push_back(pVehicle->GetEntity()->GetWorldPos());
 		IActor* pHost = g_pGame->GetIGameFramework()->GetClientActor();
 		const Vec3 host = pHost ? pHost->GetEntity()->GetWorldPos() : from;
 		IPhysicalEntity* skip[2];
@@ -4920,6 +6083,7 @@ namespace
 		{
 			float score;
 			Vec3 pos;
+			int peek;
 			bool operator<(const SCandidate& o) const { return score < o.score; }
 		};
 		std::vector<SCandidate> candidates;
@@ -4937,22 +6101,42 @@ namespace
 				p = hit.pt;
 				if (fabsf(p.z - from.z) > 3.0f)
 					continue;
+				// not next to any of them (it fell back from 13 m to 1 m of a
+				// shotgunner), nor next to a wreck to be
+				bool close = false;
+				for (size_t e = 0; e < feet.size() && !close; ++e)
+					close = Dist2D(p, feet[e]) < 8.0f;
+				for (size_t w = 0; w < wrecks.size() && !close; ++w)
+					close = Dist2D(p, wrecks[w]) < 8.0f;
+				if (close)
+					continue;
 				// hidden: solid between each of their eyes and a crouching
-				// head there (the first threat's must hide it; the others count)
+				// head there (the first threat's must hide it; the others count;
+				// the first one first: seen by him, no more rays for this spot,
+				// the host's game cast up to 11 a spot)
 				int seenBy = 0;
-				for (size_t e = 0; e < eyes.size(); ++e)
-					if (!SolidBetween(eyes[e], p + Vec3(0, 0, 1.0f), skip, nSkip))
+				bool firstSees = false;
+				for (size_t e = 0; e < eyes.size() && !firstSees; ++e)
+				{
+					IPhysicalEntity* skipE[2];
+					int nE = 0;
+					if (nSkip)
+						skipE[nE++] = skip[0];
+					if (rides[e])
+						skipE[nE++] = rides[e];
+					if (!SolidBetween(eyes[e], p + Vec3(0, 0, 1.0f), skipE, nE))
 					{
-						if (!e)
-							seenBy = 100;
+						firstSees = e == 0;
 						++seenBy;
 					}
-				if (seenBy >= 100)
+				}
+				if (firstSees)
 					continue;
 				float closer = 0.0f;
 				for (size_t e = 0; e < eyes.size(); ++e)
 					closer += max(0.0f, Dist2D(from, eyes[e]) - Dist2D(p, eyes[e]));
-				const SCandidate c = { s_radii[r] + closer * 2.0f + seenBy * 12.0f + max(0.0f, Dist2D(p, host) - 20.0f) * 0.5f, p };
+				// (where it fights from there: looked at below, for the best few)
+				const SCandidate c = { s_radii[r] + closer * 2.0f + seenBy * 12.0f + max(0.0f, Dist2D(p, host) - 20.0f) * 0.5f, p, -1 };
 				candidates.push_back(c);
 			}
 		// no hidden place close by: the one farthest from them it can get to
@@ -4972,12 +6156,34 @@ namespace
 				float nearest = 1e9f;
 				for (size_t e = 0; e < eyes.size(); ++e)
 					nearest = min(nearest, Dist2D(p, eyes[e]));
-				const SCandidate c = { -nearest + max(0.0f, Dist2D(p, host) - 25.0f) * 0.5f, p };
+				const SCandidate c = { -nearest + max(0.0f, Dist2D(p, host) - 25.0f) * 0.5f, p, 3 };
 				candidates.push_back(c);
 			}
 		std::sort(candidates.begin(), candidates.end());
+		// a place to fight from: standing up, or leaning out to a side, it
+		// sees the first threat's chest (a blind peek is no shot), for the
+		// 12 best only (3 rays each)
+		if (!threats.empty())
+		{
+			IPhysicalEntity* skip0[2];
+			int n0 = 0;
+			if (nSkip)
+				skip0[n0++] = skip[0];
+			if (rides[0])
+				skip0[n0++] = rides[0];
+			for (size_t i = 0; i < candidates.size() && i < 12; ++i)
+				if (candidates[i].peek < 0)
+				{
+					candidates[i].peek = PeekFrom(candidates[i].pos, eyes[0] - Vec3(0, 0, 0.3f), skip0, n0);
+					if (candidates[i].peek == 3)
+						candidates[i].score += 6.0f;
+				}
+			std::sort(candidates.begin(), candidates.begin() + min(candidates.size(), (size_t)12));
+		}
 		for (size_t i = 0; i < candidates.size() && i < 8; ++i)
 		{
+			if (candidates[i].peek < 0)
+				candidates[i].peek = 3;
 			if (!FindPath(from, candidates[i].pos, path))
 				continue;
 			// the way there not much longer than the straight line
@@ -4991,6 +6197,7 @@ namespace
 			if (length < Dist2D(from, candidates[i].pos) * 2.0f + 6.0f)
 			{
 				cover = candidates[i].pos;
+				peek = candidates[i].peek;
 				return true;
 			}
 		}
@@ -5283,7 +6490,7 @@ namespace
 		}
 		const SGrid& g = s_grid;
 		CryLogAlways("[CoopTest] grid around (%.1f %.1f %.1f), %d x %d squares of %.1f m, rows north (+y) first, west (-x) left",
-			at.x, at.y, at.z, g.n, g.n, GRID_CELL);
+			at.x, at.y, at.z, g.n, g.n, g.cell);
 		for (int cy = g.n - 1; cy >= 0; --cy)
 		{
 			string row;
@@ -5298,7 +6505,7 @@ namespace
 					c = '@';
 				row += c;
 			}
-			CryLogAlways("[CoopTest] grid %+5.1f |%s|", g.y0 + (cy + 0.5f) * GRID_CELL - at.y, row.c_str());
+			CryLogAlways("[CoopTest] grid %+5.1f |%s|", g.y0 + (cy + 0.5f) * g.cell - at.y, row.c_str());
 		}
 	}
 
@@ -5632,6 +6839,11 @@ void CoopAgent::Init()
 	gEnv->pConsole->AddCommand("coop_test_onehand", CmdTestOneHand, 0, "Crysis Coop testing: coop_test_onehand <player> [grab]: his weapon in the one-hand pose, or (grab) his left hand held up (this game)");
 	gEnv->pConsole->AddCommand("coop_test_anim", CmdTestAnim, 0, "Crysis Coop testing: coop_test_anim <player>: logs his animation graph inputs as this game plays them");
 	gEnv->pConsole->RegisterInt("coop_test_gun_awake", 1, VF_NOT_NET_SYNCED, "Crysis Coop testing: 0 = the companion at a vehicle's gun does not tell the vehicle to update every frame (default 1)");
+	// (in the sights the game took a shot's direction from the system camera
+	// (zoom sway), which the companion's game without a renderer never moves:
+	// its shots went 27-52 degrees off; PlayerMovementController uses its own
+	// view for it now)
+	gEnv->pConsole->RegisterInt("coop_agent_zoom", 1, VF_NOT_NET_SYNCED, "Crysis Coop: 1 = the AI companion puts its weapon's sights up when it fights up from cover at a target over 10 m off (0: never)");
 	gEnv->pConsole->RegisterInt("coop_test_turret_hold", 0, VF_NOT_NET_SYNCED, "Crysis Coop testing: 1 = the companion's game keeps CryAction's world hold of a turret's yaw it guns (it spun the gun once the car turned) and no turn against the car's");
 	gEnv->pConsole->RegisterInt("coop_test_guntrace", 0, VF_NOT_NET_SYNCED, "Crysis Coop testing: 1 = the companion at a vehicle's gun logs each frame what it told the turret and how the view moved");
 	gEnv->pConsole->RegisterInt("coop_test_vehicle_force", 1, VF_NOT_NET_SYNCED, "Crysis Coop testing: 0 = the companion's game leaves the update of the vehicle it rides in to the engine (seen or near only; default 1)");
@@ -5735,6 +6947,13 @@ void CoopAgent::SteerInput(CPlayer* pPlayer, Ang3& deltaRotation, Vec3& deltaMov
 	}
 	else
 		actions &= ~ACTION_JUMP;
+	// (held every frame: the player input lets go of a lean each frame)
+	actions &= ~(ACTION_LEANLEFT | ACTION_LEANRIGHT);
+	const int lean = Now() < s_bot.leanHoldUntil ? s_bot.leanHoldSide : s_ctl.lean;
+	if (lean < 0)
+		actions |= ACTION_LEANLEFT;
+	else if (lean > 0)
+		actions |= ACTION_LEANRIGHT;
 }
 
 void CoopAgent::OnChat(EntityId source, const char* text)
@@ -5888,16 +7107,31 @@ void CoopAgent::OnServerRequest(EntityId agent, int op, const char* name)
 	// with the way there
 	if (op == 6 && !pMine && name)
 	{
-		IActor* pThreat = ActorByName(name);
+		// (the names: who shot it lately first, then the one it fights)
+		std::vector<IActor*> threats;
+		string names = name;
+		for (int start = 0; start < (int)names.length(); )
+		{
+			int end = (int)names.find(',', start);
+			if (end < 0)
+				end = (int)names.length();
+			if (IActor* p = ActorByName(names.substr(start, end - start).c_str()))
+				if (std::find(threats.begin(), threats.end(), p) == threats.end())
+					threats.push_back(p);
+			start = end + 1;
+		}
 		std::vector<Vec3> path;
 		Vec3 cover(ZERO);
+		int peek = 3;
 		string text, goal;
-		if (pThreat && FindCover(pAgent, pThreat, path, cover))
+		if (!threats.empty() && FindCover(pAgent, threats, path, cover, peek))
 			for (size_t i = 0; i < path.size() && i < 20; ++i)
 				text += string().Format("%s%.1f %.1f %.1f", i ? ";" : "", path[i].x, path[i].y, path[i].z);
-		goal.Format("%.1f %.1f %.1f", cover.x, cover.y, cover.z);
+		goal.Format("%.1f %.1f %.1f %d", cover.x, cover.y, cover.z, peek);
+		static const char* const s_peeks[] = { "standing up", "leaning left", "leaning right", "no shot from there" };
 		CryLogAlways("[CoopAgent] cover for %s from %s: %s", pAgent->GetEntity()->GetName(), name,
-			text.empty() ? "none found" : string().Format("%.0f m away, %d points", cover.GetDistance(pAgent->GetEntity()->GetWorldPos()), (int)path.size()).c_str());
+			text.empty() ? "none found" : string().Format("%.0f m away, %d points, fights %s", cover.GetDistance(pAgent->GetEntity()->GetWorldPos()),
+				(int)path.size(), s_peeks[peek]).c_str());
 		pRules->CoopSendSync(16, 1, 0, goal.c_str(), text.c_str(), 0, 0.0f, static_cast<CActor*>(pAgent)->GetChannelId());
 		return;
 	}
@@ -5930,6 +7164,67 @@ void CoopAgent::OnServerRequest(EntityId agent, int op, const char* name)
 	}
 }
 
+void CoopAgent::OnHitIndicator(bool explosion)
+{
+	if (!IsCompanion() || !s_bot.enemy)
+		return;
+	SMyHits& h = s_myHits[s_bot.enemy];
+	if (Now() - h.last > 15.0f)
+		h.n = 0;
+	++h.n;
+	h.last = Now();
+	++s_bot.hitsConfirmed;
+}
+
+void CoopAgent::OnDamaged(EntityId shooterId, EntityId weaponId)
+{
+	if (!IsCompanion())
+		return;
+	CPlayer* pMe = LocalPlayer();
+	IEntity* pShooter = gEnv->pEntitySystem->GetEntity(shooterId);
+	if (!pMe || !pShooter || shooterId == pMe->GetEntityId())
+		return;
+	const float now = Now();
+	SThreat& t = s_threats[shooterId];
+	if (now - t.last > 20.0f)
+	{
+		t.first = now;
+		t.hits = 0;
+	}
+	t.last = now;
+	++t.hits;
+	t.pos = pShooter->GetWorldPos();
+	s_bot.hitAt = now;
+	s_hitTimes.push_back(now);
+	while (!s_hitTimes.empty() && now - s_hitTimes.front() > 8.0f)
+		s_hitTimes.erase(s_hitTimes.begin());
+	const Vec3 pos = pMe->GetEntity()->GetWorldPos();
+	const bool inCover = s_bot.haveCover && Dist2D(s_bot.cover, pos) < 1.5f;
+	IEntity* pWeapon = gEnv->pEntitySystem->GetEntity(weaponId);
+	// (a truck's machine gun takes 70 energy a hit: the armor gone in three)
+	if (pWeapon)
+	{
+		const char* cls = pWeapon->GetClass()->GetName();
+		// (one shooting from a vehicle, or a heavy weapon by name: an energy
+		// drop says nothing, one rifle hit takes 49 of it; the helicopter's,
+		// the tank's and the APC's guns have names of their own)
+		IActor* pShooterActor = ActorOf(shooterId);
+		if ((pShooterActor && pShooterActor->GetLinkedVehicle()) || !strnicmp(cls, "Vehicle", 7) || strstr(cls, "ShiTen") || strstr(cls, "Cannon")
+			|| strstr(cls, "TACGun") || strstr(cls, "AlienMount") || strstr(cls, "Coaxial") || strstr(cls, "50Cal") || strstr(cls, "Hellfire")
+			|| strstr(cls, "RocketLauncher") || !stricmp(cls, "Hurricane") || !stricmp(cls, "LAW") || !stricmp(cls, "GaussRifle"))
+			s_bot.heavyHitAt = now;
+	}
+	CryLogAlways("[CoopAgent] shot by %s (%s, %.0f m, %s, health %d, energy %.0f)", pShooter->GetName(), pWeapon ? pWeapon->GetClass()->GetName() : "-",
+		pos.GetDistance(t.pos), s_bot.retreating ? "falling back" : inCover ? (s_bot.peekUp ? "peeking" : "hidden") : s_bot.reviveSince >= 0.0f ? "reviving" : "open",
+		pMe->GetHealth(), pMe->GetNanoSuit() ? pMe->GetNanoSuit()->GetSuitEnergy() : 0.0f);
+	// (forget those long gone quiet)
+	for (std::map<EntityId, SThreat>::iterator it = s_threats.begin(); it != s_threats.end(); )
+		if (now - it->second.last > 30.0f)
+			s_threats.erase(it++);
+		else
+			++it;
+}
+
 void CoopAgent::OnPath(int op, const char* goal, const char* text)
 {
 	if (!IsCompanion())
@@ -5960,14 +7255,38 @@ void CoopAgent::OnPath(int op, const char* goal, const char* text)
 	if (goal && sscanf(goal, "%f %f %f", &g.x, &g.y, &g.z) == 3)
 		s_bot.pathGoal = g;
 	s_bot.pathAt = Now();
+	s_bot.waitWayUntil = 0.0f;
+	// (no way there in the host's navigation either: its own squares' best)
+	if (op == 0 && path.empty())
+	{
+		s_bot.pathNoneAt = Now();
+		s_bot.pathNoneGoal = g;
+	}
 	if (op == 1)
 	{
-		// cover: where it falls back to (none found: away, as it can)
+		// cover: where it falls back to (none found: away, as it can), and
+		// how it fights from there
 		s_bot.haveCover = !path.empty();
 		if (s_bot.haveCover)
 		{
+			int peek = 3;
+			Vec3 at;
+			if (goal && sscanf(goal, "%f %f %f %d", &at.x, &at.y, &at.z, &peek) == 4)
+				s_bot.coverPeek = peek;
+			else
+				s_bot.coverPeek = 0;
 			s_bot.cover = g;
 			s_bot.coverAt = Now();
+			s_bot.peekUp = false;
+			s_bot.peekSince = Now();
+			s_bot.peekSide = s_bot.coverPeek == 2 ? 1 : -1;
+			// (asked in the open, not shot at: one it can not shoot from takes
+			// it out of the fight for nothing)
+			if (s_bot.coverOpenAsk && s_bot.coverPeek == 3)
+			{
+				s_bot.haveCover = false;
+				s_bot.coverAskAt = Now() + 6.0f;
+			}
 		}
 	}
 	if (!path.empty())

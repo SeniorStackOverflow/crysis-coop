@@ -12,6 +12,7 @@
 #include "GameCVars.h"
 #include "NetInputChainDebug.h"
 #include "Item.h"
+#include "CoopAgent.h"
 
 #define ENABLE_NAN_CHECK
 
@@ -1360,12 +1361,16 @@ void CPlayerMovementController::UpdateMovementState( SMovementState& state )
 		state.eyePosition = pEntity->GetWorldPos() + m_pPlayer->GetBaseQuat() * viewOfs;
 
 		// E3HAX E3HAX E3HAX
-		if (((SPlayerStats *)m_pPlayer->GetActorStats())->mountedWeaponID)
+		// (coop: not the AI companion's, its camera stays at the world's origin)
+		if (((SPlayerStats *)m_pPlayer->GetActorStats())->mountedWeaponID && !CoopAgent::IsCompanion())
 			state.eyePosition = GetISystem()->GetViewCamera().GetPosition();
 
 		if (!m_pPlayer->IsClient()) // marcio: fixes the eye direction for remote players
 			state.eyeDirection = (m_lookTarget-state.eyePosition).GetNormalizedSafe(state.eyeDirection);
-		else if(((SPlayerStats *)m_pPlayer->GetActorStats())->FPWeaponSwayOn) // Beni - Fixes aim direction when zoom sway applies
+		// coop: not for the AI companion, whose game has no renderer and never
+		// moves the system camera: in the sights its shots went 27-52 degrees
+		// off what it looked at (its view itself is right)
+		else if(((SPlayerStats *)m_pPlayer->GetActorStats())->FPWeaponSwayOn && !CoopAgent::IsCompanion()) // Beni - Fixes aim direction when zoom sway applies
 			state.eyeDirection = GetISystem()->GetViewCamera().GetViewdir();
 		else
 			state.eyeDirection = m_pPlayer->GetViewQuatFinal().GetColumn1();

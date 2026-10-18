@@ -48,6 +48,10 @@ namespace CoopAgent
 	// the companion: the host's answer to op 5 (op 0: a way to walk to "goal") or op 6 (op 1: cover at "goal")
 	// ("x y z;x y z;..." in text; empty: none found)
 	void OnPath(int op, const char* goal, const char* text);
+	// companion: it was shot (the server's damage indicator: who, with what)
+	void OnDamaged(EntityId shooterId, EntityId weaponId);
+	// the server's hit marker: one of its shots hit something (ClHitIndicator)
+	void OnHitIndicator(bool explosion);
 	// the companion: where a downed teammate lies in the host's game (told
 	// every couple of seconds; a body falls its own way on each computer);
 	// false: not known lately

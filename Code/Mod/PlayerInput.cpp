@@ -29,6 +29,7 @@ CPlayerInput::CPlayerInput( CPlayer * pPlayer ) :
 	m_pPlayer(pPlayer), 
 	m_pStats(&pPlayer->m_stats),
 	m_actions(ACTION_GYROSCOPE), 
+	m_netLean(0),
 	m_deltaRotation(0,0,0), 
 	m_deltaMovement(0,0,0), 
 	m_xi_deltaMovement(0,0,0),
@@ -891,8 +892,14 @@ void CPlayerInput::Update()
 
 void CPlayerInput::PostUpdate()
 {
-	if (m_actions!=m_lastActions)
+	// coop: the lean is let go of here each frame and the input goes to the
+	// server after that, so the server never saw a client lean (the
+	// companion's peeks round a corner, a friend's): this frame's lean kept
+	// for GetState, and a change of it sent
+	const uint32 lean = m_actions & (ACTION_LEANLEFT | ACTION_LEANRIGHT);
+	if (m_actions!=m_lastActions || lean != m_netLean)
 		m_pPlayer->GetGameObject()->ChangedNetworkState( INPUT_ASPECT );
+	m_netLean = lean;
 
 	m_actions &= ~(ACTION_LEANLEFT | ACTION_LEANRIGHT);
 }
@@ -909,8 +916,8 @@ void CPlayerInput::GetState( SSerializedPlayerInput& input )
 	input.deltaMovement = input.deltaMovement.GetNormalizedSafe(ZERO) * m_filteredDeltaMovement.GetLength();
 	input.sprint = (((m_actions & ACTION_SPRINT) != 0) && !m_pPlayer->m_stats.bIgnoreSprinting);
 
-	input.leanl = (m_actions & ACTION_LEANLEFT) != 0;
-	input.leanr = (m_actions & ACTION_LEANRIGHT) != 0;
+	input.leanl = ((m_actions | m_netLean) & ACTION_LEANLEFT) != 0;
+	input.leanr = ((m_actions | m_netLean) & ACTION_LEANRIGHT) != 0;
 	input.lookDirection = movementState.eyeDirection;
 	input.bodyDirection = movementState.bodyDirection;
 

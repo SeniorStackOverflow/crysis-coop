@@ -3838,6 +3838,22 @@ namespace
 	// why the last CoopCanSee said no (for the trace)
 	char s_visionWhy[160] = "";
 
+	// a joined player cloaked, farther from the soldier than the engine lets
+	// a cloak fail (ai_CloakMinDist: as for the host)
+	bool CoopHiddenByCloak(IActor* pPlayer, const Vec3& from)
+	{
+		CActor* pA = static_cast<CActor*>(pPlayer);
+		if (pA->GetActorClass() != CPlayer::GetActorClassType() || !static_cast<CPlayer*>(pA)->IsCloaked())
+			return false;
+		static ICVar* pMin = gEnv->pConsole->GetCVar("ai_CloakMinDist");
+		const float minDist = pMin ? pMin->GetFVal() : 1.0f;
+		// (eye to eye, as the engine does for the host: from his eyes to the
+		// player's feet it was never within 1 m)
+		IAIObject* pPlayerAI = pPlayer->GetEntity()->GetAI();
+		const Vec3 to = pPlayerAI ? pPlayerAI->GetPos() : pPlayer->GetEntity()->GetWorldPos() + Vec3(0, 0, 1.5f);
+		return (to - from).GetLengthSquared() > minDist * minDist;
+	}
+
 	bool CoopCanSee(IAIObject* pAI, IEntity* pAIEntity, IActor* pPlayer, const AgentParameters& params, bool alerted)
 	{
 		s_visionWhy[0] = 0;
@@ -3856,6 +3872,11 @@ namespace
 		if (dist > range || dist < 0.01f)
 		{
 			_snprintf(s_visionWhy, sizeof(s_visionWhy), "range %.0f > %.0f", dist, range);
+			return false;
+		}
+		if (CoopHiddenByCloak(pPlayer, eye))
+		{
+			_snprintf(s_visionWhy, sizeof(s_visionWhy), "cloaked at %.0f m", dist);
 			return false;
 		}
 		// field of view (degrees, full cone); very close players are always
@@ -3913,11 +3934,46 @@ namespace
 				IAIObject* pSeenAI = pSeen ? pSeen->GetAI() : 0;
 				if (!pAI || !pSeenAI || !pAI->IsEnabled())
 					continue;
+				// (seen before it cloaked: lost now. The check below left a
+				// cloaked one out and so never undid "seen": every frame the
+				// soldiers were told they saw it, and shot it cloaked)
+				IActor* pSeenActor = g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(it->first.second);
+				if (pSeenActor && CoopHiddenByCloak(pSeenActor, pAI->GetPos()))
+				{
+					it->second = false;
+					CryLogAlways("[CoopAI] %s lost sight of %s: cloaked (%.0f m)", pSoldier->GetName(), pSeen->GetName(), (pSeen->GetWorldPos() - pSoldier->GetWorldPos()).GetLength());
+					continue;
+				}
 				SAIEVENT event;
 				event.pSeen = pSeenAI;
 				event.vPosition = pSeenAI->GetPos();
 				event.fThreat = 1.0f;
 				pAI->Event(AIEVENT_ONVISUALSTIMULUS, &event);
+			}
+		}
+		// a joined player's cloak for the soldiers' own eyes: the game's script
+		// sets where it goes (1 cloaked, 0 not), the engine moves it there
+		// only for the host. For a joined player it stayed 0: the soldiers saw
+		// him cloaked as well as in armor, shot the companion cloaked 12 times
+		// in a cloak (its health then, the armor off). Moved there here
+		{
+			IActor* pHost = g_pGame->GetIGameFramework()->GetClientActor();
+			IActorIteratorPtr pCloakIt = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+			while (IActor* pActor = pCloakIt->Next())
+			{
+				if (!pActor->IsPlayer() || pActor == pHost || !pActor->GetEntity()->GetAI())
+					continue;
+				IAIActor* pPlayerAIActor = pActor->GetEntity()->GetAI()->CastToIAIActor();
+				if (!pPlayerAIActor)
+					continue;
+				const AgentParameters& cur = pPlayerAIActor->GetParameters();
+				if (cur.m_fCloakScale == cur.m_fCloakScaleTarget)
+					continue;
+				AgentParameters ap = cur;
+				const float step = 2.0f * frameTime;    // (0 to 1 in half a second)
+				ap.m_fCloakScale = ap.m_fCloakScaleTarget > ap.m_fCloakScale ? min(ap.m_fCloakScaleTarget, ap.m_fCloakScale + step)
+					: max(ap.m_fCloakScaleTarget, ap.m_fCloakScale - step);
+				pPlayerAIActor->SetParameters(ap);
 			}
 		}
 		s_visionTimer += frameTime;
@@ -3935,8 +3991,39 @@ namespace
 			CActor* pA = static_cast<CActor*>(pActor);
 			if (pA->GetSpectatorMode() != 0 || !pActor->GetEntity()->GetAI() || pActor->GetEntity()->IsHidden())
 				continue;
-			if (pA->GetActorClass() == CPlayer::GetActorClassType() && static_cast<CPlayer*>(pA)->IsCloaked())
-				continue;
+			// what the engine's own perception takes of its cloak (the game's
+			// script sets it on the "cloaking" event): logged when it changes
+			if (IAIActor* pPlayerAIActor = pActor->GetEntity()->GetAI()->CastToIAIActor())
+			{
+				static std::map<EntityId, float> s_cloakTold;
+				static std::map<EntityId, float> s_cloakCheckAt;
+				static bool s_distTold = false;
+				if (!s_distTold)
+				{
+					s_distTold = true;
+					ICVar* pMin = gEnv->pConsole->GetCVar("ai_CloakMinDist");
+					ICVar* pMax = gEnv->pConsole->GetCVar("ai_CloakMaxDist");
+					CryLogAlways("[CoopAI] the engine's cloak distances: seen within %.1f m, fading in from %.1f m", pMin ? pMin->GetFVal() : -1.0f, pMax ? pMax->GetFVal() : -1.0f);
+				}
+				const float target = pPlayerAIActor->GetParameters().m_fCloakScaleTarget;
+				std::map<EntityId, float>::iterator told = s_cloakTold.find(pActor->GetEntityId());
+				if (told == s_cloakTold.end() || told->second != target)
+				{
+					if (told != s_cloakTold.end() || target != 0.0f)
+						CryLogAlways("[CoopAI] %s's cloak for the soldiers' own eyes: %.1f (now %.2f; the suit %s)", pActor->GetEntity()->GetName(), target,
+							pPlayerAIActor->GetParameters().m_fCloakScale, pA->GetActorClass() == CPlayer::GetActorClassType() && static_cast<CPlayer*>(pA)->IsCloaked() ? "cloaked" : "not cloaked");
+					s_cloakTold[pActor->GetEntityId()] = target;
+					s_cloakCheckAt[pActor->GetEntityId()] = gEnv->pTimer->GetCurrTime() + 1.5f;
+				}
+				// (1.5 s after: does the engine move it there for a joined player?)
+				std::map<EntityId, float>::iterator check = s_cloakCheckAt.find(pActor->GetEntityId());
+				if (check != s_cloakCheckAt.end() && check->second > 0.0f && gEnv->pTimer->GetCurrTime() >= check->second)
+				{
+					check->second = 0.0f;
+					CryLogAlways("[CoopAI] %s's cloak for the soldiers' own eyes 1.5 s on: %.2f of %.1f", pActor->GetEntity()->GetName(),
+						pPlayerAIActor->GetParameters().m_fCloakScale, target);
+				}
+			}
 			players.push_back(pActor);
 		}
 		if (players.empty())
@@ -4001,6 +4088,8 @@ namespace
 				if (sees != was)
 				{
 					CoopAI::Trace("VISION %s %s %s (alerted=%d)", pEntity->GetName(), sees ? "sees" : "lost", pPlayer->GetEntity()->GetName(), (int)alerted);
+					if (!sees && !strncmp(s_visionWhy, "cloaked", 7))
+						CryLogAlways("[CoopAI] %s lost sight of %s: %s", pEntity->GetName(), pPlayer->GetEntity()->GetName(), s_visionWhy);
 					was = sees;
 				}
 				if (!sees)

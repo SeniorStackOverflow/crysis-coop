@@ -225,6 +225,23 @@ void CNetPlayerInput::DisableXI(bool disabled)
 
 void CNetPlayerInput::DoSetState(const SSerializedPlayerInput& input )
 {
+	// coop: a joined player's lean as the server gets it (logged when it
+	// changes, at most every 2 s: the proof the companion's peeks arrive)
+	if (gEnv->bServer && (input.leanl != m_curInput.leanl || input.leanr != m_curInput.leanr))
+	{
+		static float s_leanToldAt = -100.0f;
+		static int s_leanTold = 0;
+		const float now = gEnv->pTimer->GetCurrTime();
+		if (input.leanl || input.leanr)
+		{
+			++s_leanTold;
+			if (now - s_leanToldAt > 2.0f)
+			{
+				s_leanToldAt = now;
+				CryLogAlways("[Coop] %s leans %s (as the server sees it; %d leans so far)", m_pPlayer->GetEntity()->GetName(), input.leanl ? "left" : "right", s_leanTold);
+			}
+		}
+	}
 	m_curInput = input;
 	m_pPlayer->GetGameObject()->ChangedNetworkState( INPUT_ASPECT );
 
