@@ -9,6 +9,7 @@
 #include <IActorSystem.h>
 
 float CoopSoundOutputPeak(bool* pActive);	// CoopSoundMeter.cpp
+bool CoopSoundOutputMuted();	// CoopSoundMeter.cpp
 bool CoopFmodChannels(void* pSystem, int maxChannels, int* pPlaying, int* pVirtual, int* pSoftware, float cpu[4]);	// CoopSoundMeter.cpp
 int CoopFmodChannelList(void* pSystem, int maxChannels, const char* filter, int maxLines, void (*pLine)(const char*));	// CoopSoundMeter.cpp
 struct SCoopFmodWatch
@@ -22,14 +23,36 @@ struct SCoopFmodWatch
 	char gunNames[192];
 };
 void CoopFmodWatch(void* pSystem, int maxChannels, bool stop, float now, SCoopFmodWatch* pOut);	// CoopSoundMeter.cpp
+struct SCoopFmodSnapshot
+{
+	float mixPeak;
+	int mixNaN;
+	bool mixSame;
+	float masterVolume;
+	bool masterPaused, masterMute;
+	float masterPeak;
+	int groups;
+	char groupsOff[192];
+	int playing, heard, audible, pausedAudible;
+	int moving, frozen;
+	char top[200];
+};
+bool CoopFmodSnapshot(void* pSystem, int maxChannels, SCoopFmodSnapshot* pOut);	// CoopSoundMeter.cpp
+int CoopFmodRepairGroups(void* pSystem, int fault, char* what, size_t size);	// CoopSoundMeter.cpp
+float CoopFmodMixPeak(void* pSystem);	// CoopSoundMeter.cpp
+bool CoopWindowFocused(void* hwnd);	// CoopSoundMeter.cpp
 
 namespace CoopSound
 {
 	namespace
 	{
 		const float CHECK_EVERY = 1.0f;		// s between looks at the output
-		const int SILENT_LOOKS = 15;		// so many silent looks in a row: no sound comes out
+		// so many silent looks in a row: no sound comes out (15 when one 10 ms
+		// meter reading a second could miss sparse sounds; now the loudest of
+		// four a second, and FMOD's own picture catches its faults in 1-3 s)
+		const int SILENT_LOOKS = 10;
 		const float RESTART_EVERY = 120.0f;	// s at least between two restarts
+		const float DEFINITE_EVERY = 30.0f;	// s at least between two restarts for a fault FMOD itself shows
 		const float LOUD = 0.0005f;			// a peak above this is sound
 
 		float s_nextLook = 0.0f, s_lastLook = -100.0f;
@@ -37,6 +60,52 @@ namespace CoopSound
 		bool s_heard = false;
 		float s_restartAt = -1000.0f, s_onAgainAt = -1.0f, s_checkAt = -1.0f;
 		bool s_anyFocus = false;	// testing: the test windows never have the focus
+		bool s_fmodMeter = false;	// testing: no Windows session (sound to a file): FMOD's own mix is the meter
+		// the Windows meter 4 times a second, the loudest kept for the second's look
+		float s_peekNext = 0.0f, s_peakMax = -1.0f;
+		bool s_peakActive = false;
+		// FMOD's own picture (CoopFmodSnapshot): looks in a row with a fault
+		int s_nanLooks = 0, s_frozenLooks = 0, s_emptyLooks = 0, s_noWindowsLooks = 0, s_masterLooks = 0, s_heardSilentLooks = 0;
+		float s_testBlackoutUntil = -1.0f;	// testing: till then the meter reads a session playing silence
+		float s_masterFixAt = -1000.0f, s_definiteRestartAt = -1000.0f;
+		float s_testUnfocusedUntil = -1.0f;	// testing: the window counts as not focused till then
+		float s_mixSinceRestart = 0.0f;	// FMOD's loudest mix seen since the last restart
+
+		void ResetLooks()
+		{
+			s_nanLooks = s_frozenLooks = s_emptyLooks = s_noWindowsLooks = s_masterLooks = s_heardSilentLooks = 0;
+		}
+
+		// the game's window has the focus (CGame::Update's haveFocus is always
+		// true: CGameStartup passes 1. CrySound pauses FMOD's master group
+		// itself while the window is not focused, unless in devmode: that is
+		// no fault)
+		bool WindowFocused(float now)
+		{
+			if (now < s_testUnfocusedUntil)
+				return false;
+			return s_anyFocus || CoopWindowFocused(gEnv->pRenderer ? (void*)gEnv->pRenderer->GetHWND() : 0);
+		}
+
+		string SnapshotLine(const SCoopFmodSnapshot& s)
+		{
+			string nan;
+			if (s.mixNaN)
+				nan.Format(" (%d not a number)", s.mixNaN);
+			return string().Format("mix peak %.4f%s%s; master volume %.2f%s%s, peak %.4f; %d groups%s%s; channels %d playing, %d heard, %d audible (%d moving on, %d standing, %d more paused); loudest:%s",
+				s.mixPeak, nan.c_str(), s.mixSame ? " (the same samples as a second ago)" : "", s.masterVolume, s.masterPaused ? " PAUSED" : "", s.masterMute ? " MUTED" : "",
+				s.masterPeak, s.groups, s.groupsOff[0] ? ", off:" : "", s.groupsOff, s.playing, s.heard, s.audible, s.moving, s.frozen, s.pausedAudible, s.top[0] ? s.top : " -");
+		}
+
+		// the sound system off and on again (0.3 s)
+		void Restart(float now)
+		{
+			s_mixSinceRestart = 0.0f;
+			s_restartAt = now;
+			s_silent = 0;
+			gEnv->pConsole->ExecuteString("s_SoundEnable 0");
+			s_onAgainAt = now + 0.3f;
+		}
 
 		// testing: a sound played at the player and followed every frame for up to
 		// 15 s: when it was heard, how often FMOD took its voice away (virtual: only
@@ -241,14 +310,55 @@ namespace CoopSound
 					pArgs->GetArgCount() > 4 ? (float)atof(pArgs->GetArg(4)) : 0.0f);
 				return;
 			}
+			if (!stricmp(what, "snapshot") || !stricmp(what, "fmodpause") || !stricmp(what, "fmodmute"))
+			{
+				// snapshot: FMOD's own picture of the output now; fmodpause /
+				// fmodmute [unfocused]: FMOD's master group paused / muted behind
+				// the game's back, as a fault would (the watch has to set it
+				// right); unfocused: the window counts as not focused for 8 s, as
+				// when CrySound pauses it on a focus loss (the watch leaves it)
+				int maxChannels = 0;
+				void* pSystem = FmodSystem(&maxChannels);
+				SCoopFmodSnapshot snap;
+				if (!pSystem || !CoopFmodSnapshot(pSystem, maxChannels, &snap))
+				{
+					CryLogAlways("[CoopTest] coop_test_sound %s: FMOD gives no picture (%s)", what, FmodLine().c_str());
+					return;
+				}
+				if (stricmp(what, "snapshot"))
+				{
+					// (fmodpause unfocused: as CrySound does when the window
+					// loses the focus; the watch must leave it alone)
+					if (pArgs->GetArgCount() > 2 && !stricmp(pArgs->GetArg(2), "unfocused"))
+						s_testUnfocusedUntil = gEnv->pTimer->GetAsyncCurTime() + 8.0f;
+					char text[160];
+					const int n = CoopFmodRepairGroups(pSystem, !stricmp(what, "fmodpause") ? 1 : 2, text, sizeof(text));
+					CryLogAlways("[CoopTest] coop_test_sound %s: the master group %s", what, n ? "set as by a fault" : "NOT set");
+					return;
+				}
+				CryLogAlways("[CoopTest] coop_test_sound snapshot: %s; %s", SnapshotLine(snap).c_str(), FmodLine().c_str());
+				return;
+			}
 			if (!stricmp(what, "pause"))
 				gEnv->pSoundSystem->Pause(true);
 			else if (!stricmp(what, "mute"))
 				gEnv->pSoundSystem->Mute(true);
 			else if (!stricmp(what, "unmute"))
 				gEnv->pSoundSystem->Mute(false);
+			else if (!stricmp(what, "blackout"))
+			{
+				// blackout [s]: for so long nothing comes out as Windows sees it
+				// (a session playing silence) while FMOD goes on: the watch's
+				// "heard in FMOD, silent in Windows" rule must restart the sound
+				s_testBlackoutUntil = gEnv->pTimer->GetAsyncCurTime() + (pArgs->GetArgCount() > 2 ? (float)atof(pArgs->GetArg(2)) : 8.0f);
+			}
 			else if (!stricmp(what, "watch"))
+			{
 				s_anyFocus = true;
+				// (watch fmod: the meter is FMOD's own mix where Windows has no
+				// session to ask, sound to a WAV file)
+				s_fmodMeter = pArgs->GetArgCount() > 2 && !stricmp(pArgs->GetArg(2), "fmod");
+			}
 			else if (IListener* pListener = gEnv->pSoundSystem->GetListener(LISTENERID_STANDARD))
 			{
 				// one frame of a broken listener (the game sets it again every frame)
@@ -318,7 +428,7 @@ namespace CoopSound
 			logic.c_str());
 	}
 
-	void Update(bool haveFocus)
+	void Update(bool /*haveFocus: always true, see WindowFocused*/)
 	{
 		if (!gEnv || !gEnv->pTimer || !gEnv->pConsole || gEnv->pSystem->IsDedicated())
 			return;
@@ -328,7 +438,7 @@ namespace CoopSound
 		{
 			s_registered = true;
 			gEnv->pConsole->RegisterInt("coop_sound_unstick", 1, 0, "Crysis Coop: stop the parts of sounds stuck virtual at their start for 0.4 s (they kept their sound playing and came seconds late); 0 = leave them");
-			gEnv->pConsole->AddCommand("coop_test_sound", CmdTestSound, 0, "Crysis Coop testing: coop_test_sound <pause|mute|unmute|watch|nanpos|nanvel|nanwater|bigvel|underwater>: the sound system paused (muted), or its listener broken for a frame, as if by a fault; watch: the sound watch also without the window's focus; probe <sound> [foley|shot] [metres]: a sound at the player (or so far away), when it is heard and how often its voice is taken away");
+			gEnv->pConsole->AddCommand("coop_test_sound", CmdTestSound, 0, "Crysis Coop testing: coop_test_sound <pause|mute|unmute|fmodpause|fmodmute [unfocused]|watch|snapshot|nanpos|nanvel|nanwater|bigvel|underwater>: the sound system paused (muted), FMOD's master group paused (muted) behind the game's back, or its listener broken for a frame, as if by a fault; watch: the sound watch also without the window's focus; snapshot: FMOD's picture of the output; probe <sound> [foley|shot] [metres]: a sound at the player (or so far away), when it is heard and how often its voice is taken away");
 		}
 		const float now = gEnv->pTimer->GetAsyncCurTime();
 		if (gEnv->pSoundSystem)
@@ -345,25 +455,146 @@ namespace CoopSound
 			s_checkAt = now + 5.0f;
 		}
 
+		ICVar* pEnable = gEnv->pConsole->GetCVar("s_SoundEnable");
+		IGameFramework* pFramework = g_pGame ? g_pGame->GetIGameFramework() : 0;
+		const bool watching = gEnv->pSoundSystem && pEnable && pEnable->GetIVal() != 0 && WindowFocused(now) && s_onAgainAt <= 0.0f
+			&& pFramework && pFramework->GetClientActor() && !pFramework->IsGamePaused() && CoopAI::IsCoopSession();
+		// the Windows meter 4 times a second (a 10 ms window once a second
+		// missed sparse sounds), the loudest kept for the second's look
+		if (watching && now >= s_peekNext)
+		{
+			s_peekNext = now + 0.25f;
+			bool active = false;
+			float peek = CoopSoundOutputPeak(&active);
+			if (peek < 0.0f && s_fmodMeter)
+			{
+				int maxChannels = 0;
+				if (void* pSystem = FmodSystem(&maxChannels))
+				{
+					peek = CoopFmodMixPeak(pSystem);
+					active = true;
+				}
+			}
+			if (now < s_testBlackoutUntil)
+			{
+				peek = 0.0f;
+				active = true;
+			}
+			if (peek > s_peakMax)
+				s_peakMax = peek;
+			s_peakActive = s_peakActive || active;
+		}
+
 		if (now < s_nextLook)
 			return;
 		s_nextLook = now + CHECK_EVERY;
-		// looks far apart (a level loading) do not follow each other
+		// looks far apart (a level loading, a load) do not follow each other
 		if (now - s_lastLook > 3.0f * CHECK_EVERY)
-			s_silent = 0;
-		s_lastLook = now;
-
-		ICVar* pEnable = gEnv->pConsole->GetCVar("s_SoundEnable");
-		IGameFramework* pFramework = g_pGame ? g_pGame->GetIGameFramework() : 0;
-		if (!gEnv->pSoundSystem || !pEnable || pEnable->GetIVal() == 0 || !(haveFocus || s_anyFocus) || s_onAgainAt > 0.0f
-			|| !pFramework || !pFramework->GetClientActor() || pFramework->IsGamePaused() || !CoopAI::IsCoopSession())
 		{
 			s_silent = 0;
+			ResetLooks();
+		}
+		s_lastLook = now;
+		const float peak = s_peakMax;
+		const bool active = s_peakActive;
+		s_peakMax = -1.0f;
+		s_peakActive = false;
+		if (!watching)
+		{
+			s_silent = 0;
+			ResetLooks();
 			return;
 		}
 
-		bool active = false;
-		const float peak = CoopSoundOutputPeak(&active);
+		// FMOD's own picture: a fault that cannot be right (the master group
+		// paused or muted behind the game's back, a mix that is not a number,
+		// heard sounds that stand still, heard sounds and an empty mix) is set
+		// right or restarted after 1-3 s, and never when nothing is expected
+		ISoundSystem* pSound = gEnv->pSoundSystem;
+		int maxChannels = 0;
+		void* pSystem = FmodSystem(&maxChannels);
+		SCoopFmodSnapshot snap;
+		const bool haveSnap = pSystem && CoopFmodSnapshot(pSystem, maxChannels, &snap);
+		if (haveSnap && s_checkAt > 0.0f && snap.mixPeak > s_mixSinceRestart)
+			s_mixSinceRestart = snap.mixPeak;
+		// (Windows hears nothing from this game this second, or there is no
+		// audio session to ask: a WAV file. The rules below need it)
+		const bool windowsQuiet = peak <= LOUD;
+		if (haveSnap && !pSound->IsPaused())
+		{
+			// (two looks in a row: CrySound's own unpause on the focus coming
+			// back may come a frame late)
+			s_masterLooks = snap.masterPaused || snap.masterMute ? s_masterLooks + 1 : 0;
+			if (s_masterLooks >= 2)
+			{
+				s_masterLooks = 0;
+				// CrySound's own way back first (it unpauses the master group and
+				// the event system's master category on the focus coming back;
+				// not in devmode), then the master group itself
+				if (ISystemEventDispatcher* pDispatcher = gEnv->pSystem->GetISystemEventDispatcher())
+					pDispatcher->OnSystemEvent(ESYSTEM_EVENT_CHANGE_FOCUS, 1, 0);
+				char text[160];
+				const int changed = CoopFmodRepairGroups(pSystem, 0, text, sizeof(text));
+				CryLogAlways("[CoopSound] the sound's master group was%s%s behind the game's back: %s (%s)", snap.masterPaused ? " paused" : "",
+					snap.masterMute ? " muted" : "", changed ? "set right:" : "set right by the focus event", changed ? text + 1 : SnapshotLine(snap).c_str());
+				if (now - s_masterFixAt < 20.0f && now - s_definiteRestartAt > DEFINITE_EVERY)
+				{
+					CryLogAlways("[CoopSound] the master group was set wrong again within 20 s: the sound system starts again");
+					s_definiteRestartAt = now;
+					Restart(now);
+					return;
+				}
+				s_masterFixAt = now;
+			}
+			s_nanLooks = snap.mixNaN > 0 ? s_nanLooks + 1 : 0;
+			s_frozenLooks = windowsQuiet && snap.audible > 0 && snap.moving == 0 && snap.frozen > 0 ? s_frozenLooks + 1 : 0;
+			s_emptyLooks = windowsQuiet && snap.audible >= 2 && snap.mixPeak >= 0.0f && snap.mixPeak < 1e-5f && !snap.masterPaused && !snap.masterMute
+				&& snap.masterVolume > 0.01f ? s_emptyLooks + 1 : 0;
+			const char* why = s_nanLooks >= 2 ? "the sound's mix is not a number" : s_frozenLooks >= 3 ? "the heard sounds stand still for 3 s"
+				: s_emptyLooks >= 3 ? "sounds are heard and the mix is empty for 3 s" : 0;
+			if (why && now - s_definiteRestartAt > DEFINITE_EVERY)
+			{
+				CryLogAlways("[CoopSound] %s: the sound system starts again (%s)", why, SnapshotLine(snap).c_str());
+				s_definiteRestartAt = now;
+				s_nanLooks = s_frozenLooks = s_emptyLooks = 0;
+				Restart(now);
+				return;
+			}
+			// sounds FMOD hears (two or more, audibility 0.02 and over: -34 dB,
+			// the meter's limit is -66) while this game's Windows session plays
+			// silence, 4 looks of 4 readings each: the user's 15 s of silence
+			// in a fight with 81 channels playing (2026-10-18), ended by a
+			// restart. Not when the player turned the game down in Windows
+			s_heardSilentLooks = peak >= 0.0f && peak <= LOUD && active && snap.audible >= 2 && !snap.masterPaused && !snap.masterMute
+				&& snap.masterVolume > 0.01f ? s_heardSilentLooks + 1 : 0;
+			if (s_heardSilentLooks >= 4 && now - s_definiteRestartAt > DEFINITE_EVERY)
+			{
+				if (now >= s_testBlackoutUntil && CoopSoundOutputMuted())
+					s_heardSilentLooks = 0;
+				else
+				{
+					CryLogAlways("[CoopSound] FMOD plays %d audible sounds and nothing comes out of this game for 4 s: the sound system starts again (%s)",
+						snap.audible, SnapshotLine(snap).c_str());
+					s_definiteRestartAt = now;
+					s_heardSilentLooks = 0;
+					Restart(now);
+					return;
+				}
+			}
+			// FMOD mixes sound, Windows gets none from this game: the fault is
+			// after FMOD (the device or the session)
+			if (snap.mixPeak > 0.01f && peak >= 0.0f && peak <= LOUD)
+			{
+				if (++s_noWindowsLooks == 3)
+					CryLogAlways("[CoopSound] FMOD mixes sound (peak %.3f) but Windows gets none from this game for 3 s: the fault is after FMOD (%s)",
+						snap.mixPeak, active ? "the session plays silence" : "the session is stopped");
+			}
+			else
+				s_noWindowsLooks = 0;
+		}
+		else
+			ResetLooks();
+
 		if (peak > LOUD)
 		{
 			s_heard = true;
@@ -377,14 +608,25 @@ namespace CoopSound
 		}
 		if (s_checkAt > 0.0f && now > s_checkAt)
 		{
-			CryLogAlways("[CoopSound] still no sound 5 s after the restart (%s)", peak < 0.0f ? "no audio session" : active ? "session playing silence" : "session stopped");
+			// (no Windows session to ask, sound to a file: FMOD's own mix tells)
+			if (peak < 0.0f && s_mixSinceRestart > 0.001f)
+				CryLogAlways("[CoopSound] the sound comes out again after the restart (FMOD's mix peak %.3f; no audio session to ask)", s_mixSinceRestart);
+			else
+				CryLogAlways("[CoopSound] still no sound 5 s after the restart (%s; FMOD's loudest mix since %.4f)", peak < 0.0f ? "no audio session" : active ? "session playing silence" : "session stopped",
+					s_mixSinceRestart);
 			s_checkAt = -1.0f;
 		}
 
+		++s_silent;
+		// (nothing heard in FMOD either, a quiet place: the old 15 s)
+		const int silentLooks = haveSnap && snap.audible == 0 ? 15 : SILENT_LOOKS;
+		// (what FMOD shows at 3 s of silence and just before the restart)
+		if ((s_silent == 3 || s_silent == silentLooks - 1) && s_heard && haveSnap)
+			CryLogAlways("[CoopSound] %d s without sound from this game (%s): %s", s_silent,
+				peak < 0.0f ? "no audio session" : active ? "session playing silence" : "session stopped", SnapshotLine(snap).c_str());
 		// only a game that was heard before (no sound device, the volume mixer's mute...)
-		if (++s_silent >= SILENT_LOOKS && s_heard && now - s_restartAt > RESTART_EVERY)
+		if (s_silent >= silentLooks && s_heard && now - s_restartAt > RESTART_EVERY)
 		{
-			ISoundSystem* pSound = gEnv->pSoundSystem;
 			int memory = 0, memoryMax = 0;
 			pSound->GetSoundMemoryUsageInfo(&memory, &memoryMax);
 			const bool paused = pSound->IsPaused();
@@ -392,16 +634,16 @@ namespace CoopSound
 				s_silent, peak < 0.0f ? "no audio session" : active ? "session playing silence" : "session stopped",
 				paused ? "PAUSED" : "running", pSound->GetUsedVoices(), pSound->GetCPUUsage(), memory, memoryMax,
 				paused ? "it goes on" : "the sound system starts again");
-			s_restartAt = now;
-			s_silent = 0;
 			if (paused)
 			{
+				s_restartAt = now;
+				s_silent = 0;
 				pSound->Pause(false);
 				s_checkAt = now + 5.0f;
+				s_mixSinceRestart = 0.0f;
 				return;
 			}
-			gEnv->pConsole->ExecuteString("s_SoundEnable 0");
-			s_onAgainAt = now + 0.3f;
+			Restart(now);
 		}
 	}
 }

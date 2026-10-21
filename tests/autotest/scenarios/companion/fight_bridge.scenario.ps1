@@ -11,7 +11,7 @@
     Tags = @("companion", "combat", "tactics")
     SummaryRu = "Бой пешком с подкреплением у моста (как в играх 16-17.10): компаньон знает, кто в него стреляет, уходит в укрытие, стреляет из-за него, при серии попаданий маскируется, живёт и убивает"
     Session = @{ Fixture = "new:rescue"; Companion = $true }
-    Params = @{ Fight = 120; Truck = "Bridge_reinforcement_Truck_1" }
+    Params = @{ Fight = 120; Truck = "Bridge_reinforcement_Truck_1"; HostCvars = @(); LookNet = 1 }
     Body = {
         param($P)
         Step "the host at the bridge calls the truck" {
@@ -31,6 +31,11 @@
             # syncs to its clients: set on the host, the companion's own set
             # was ignored)
             Send-Game host "coop_test_shottrace 1"
+            # (its turns sent at once as a mouse turn is, or only with its key
+            # presses as before, coop_agent_look_net 0: the host's copy kept
+            # looking the old way, its body did not turn to its fire)
+            Send-Game host "coop_agent_look_net $($P.LookNet)"
+            foreach ($c in $P.HostCvars) { Send-Game host $c }
             Start-Watch @("Bridge_Reinforcement_1", "Bridge_Reinforcement_2", "Bridge_Reinforcement_3", "Bridge_Reinforcement_4", "Bridge_Reinforcement_5")
         }
         Step "the fight" {
@@ -54,6 +59,8 @@
             # was nearly all the truck)
             $onSoldiers = Count-Log host '\] HIT Bridge_Reinforcement_\d by Companion ' $m
             $onTruck = Count-Log host '\] HIT vehicle \S+ by Companion ' $m
+            # (a head hit: thousands of damage, a body hit 52-60 of 180)
+            $heads = @(Find-Log host '\] HIT Bridge_Reinforcement_\d by Companion .* dmg=([\d.]+)' $m -All | Where-Object { $_.Text -match 'dmg=([\d.]+)' -and [double]$Matches[1] -ge 1000 }).Count
             $downs = Count-Log host '^\[Coop\] Companion is down' $m
             $asks = @(Find-Log host '^\[CoopAgent\] cover for Companion from (.*)' $m -All | ForEach-Object { $_.Text -replace '^.*cover for Companion from ', '' })
             $exposed = if ($alive.Count) { @($alive | Where-Object { $_.Seen -gt 0 }).Count / $alive.Count } else { 1 }
@@ -94,7 +101,8 @@
             Check ($dmg.Count -eq 0 -or $shotBy -ge 0.8 * $dmg.Count) "it knew of at least 80 % of the hits on it ($shotBy of $($dmg.Count))"
             Check ($downs -eq 0) "never down"
             # (the soldiers themselves, not their truck's armor)
-            Check ($onSoldiers -ge 3) "it hit the soldiers $onSoldiers times (and their truck $onTruck times)"
+            # (a head hit kills: fewer hits, more kills; either counts)
+            Check ($onSoldiers -ge 3 -or $kills -ge 1) "it hit the soldiers $onSoldiers times, $heads of them in the head, killed $kills (and hit their truck $onTruck times)"
             $bursts = @(Find-Log companion '^\[CoopAgent\] burst at ' $m -All | ForEach-Object { $_.Text })
             $atGunner = @($bursts | Where-Object { $_ -match '\(\d+ m, in ' }).Count
             $intoVehicle = @($bursts | Where-Object { $_ -match 'the aim meets \S*[Tt]ruck' }).Count
@@ -103,6 +111,19 @@
             # 27-52 degrees off)
             $gunOff = @($bursts | Where-Object { $_ -match 'the gun ([\d.]+) deg off' -and [double]$Matches[1] -gt 5.0 }).Count
             Check ($bursts.Count -eq 0 -or $gunOff -le [Math]::Floor($bursts.Count / 10)) "its gun pointed at whom it shot ($gunOff of $($bursts.Count) bursts more than 5 degrees off)"
+            # (where the host's copy of it aimed against where its shots went)
+            $dirs = @(Find-Log host '^\[CoopShotDir\] Companion hit \S+: the shot (\d+) deg off the server copy''s aim' $m -All | ForEach-Object { if ($_.Text -match 'the shot (\d+) deg off') { [int]$Matches[1] } })
+            $sorted = @($dirs | Sort-Object)
+            $median = if ($sorted.Count) { $sorted[[Math]::Floor($sorted.Count / 2)] } else { -1 }
+            $near = @($dirs | Where-Object { $_ -le 10 }).Count
+            Check $true ("its shots against its aim as the host sees it: " + $(if ($dirs.Count) { "median $median deg, $near of $($dirs.Count) within 10 deg: " + (($dirs | Select-Object -First 15) -join ' ') } else { 'no line' }))
+            if ($P.LookNet -eq 1) { Check ($dirs.Count -eq 0 -or $near -ge [Math]::Ceiling(0.8 * $dirs.Count)) "on the host it looks where it shoots ($near of $($dirs.Count) hits within 10 deg of its aim)" }
+            # (the sound watch: no fault and no restart of the sound system in a
+            # fight, when the game has sound: the -sound variant writes it to a
+            # WAV file)
+            $soundFaults = @(Find-Log host '^\[CoopSound\] (the sound.s master group was|the sound.s mix is not|the heard sounds stand|sounds are heard and the mix is empty|the master group was set wrong|no sound came out)' $m -All | ForEach-Object { $_.Text -replace '^\[CoopSound\] ', '' })
+            $soundLooks = @(Find-Log host '^\[CoopSound\] \d+ s without sound' $m -All).Count
+            Check ($soundFaults.Count -eq 0) ("no sound fault or restart in the fight" + $(if ($soundFaults.Count) { ": " + (($soundFaults | Select-Object -First 3) -join ' | ') } else { "" }) + "; silent stretches logged: $soundLooks")
             Check $true ("its bursts: $($bursts.Count), $atGunner of them at one in a vehicle, $intoVehicle with the aim on a truck first" + $(if ($bursts.Count) { "; e.g. " + ((($bursts | Select-Object -First 2) -replace '^\[CoopAgent\] ', '') -join ' | ') } else { "" }))
         }
         Stop-Watch

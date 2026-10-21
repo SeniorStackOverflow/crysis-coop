@@ -312,6 +312,8 @@ public:
 	void CoopSendSyncToServer(int kind, int op, EntityId entity, const char* name, const char* text, int type, float f);
 	struct CoopVehicleParams;
 	void CoopSendVehicle(const CoopVehicleParams& params, int channelId);
+	struct CoopTurretParams;
+	void CoopSendTurret(const CoopTurretParams& params, int exceptChannel);
 	void CoopSendAIMove(EntityId id, uint8 stance, const Vec3& move, const Vec3& look, bool sprint);
 	virtual void SetObjectiveEntity(int teamId, const char *objective, EntityId entityId);
 	virtual void RemoveObjective(int teamId, const char *objective);
@@ -931,6 +933,29 @@ public:
 		}
 	};
 
+	// Crysis Coop: the turn of a vehicle's gun (its yaw and pitch parts), the
+	// gunner's machine -> the server -> the other machines. CryAction carries
+	// it only through a seat serializer entity that a level loaded in single
+	// player mode (the coop server) never gets: the host saw a friend's or the
+	// companion's turret fixed to the car while its bullets went out sideways
+	struct CoopTurretParams
+	{
+		CoopTurretParams(): id(0), part1(255), part2(255) { rot1.SetIdentity(); rot2.SetIdentity(); }
+		uint32 id;       // the level's own entity id of the vehicle
+		uint8 part1;     // indices of the parts (IVehicle::GetPart), 255 = none
+		uint8 part2;
+		Quat rot1;       // their local rotation (relative to the parent part)
+		Quat rot2;
+		void SerializeWith(TSerialize ser)
+		{
+			ser.Value("id", id);
+			ser.Value("p1", part1);
+			ser.Value("p2", part2);
+			ser.Value("r1", rot1);
+			ser.Value("r2", rot2);
+		}
+	};
+
 	struct SetObjectiveParams
 	{
 		SetObjectiveParams(): status(0), entityId(0), rawEntityId(0) {};
@@ -1095,6 +1120,8 @@ public:
 	DECLARE_CLIENT_RMI_NOATTACH(ClCoopShot, CoopShotParams, eNRT_UnreliableUnordered);
 	DECLARE_CLIENT_RMI_NOATTACH(ClCoopVehicle, CoopVehicleParams, eNRT_ReliableUnordered);
 	DECLARE_SERVER_RMI_NOATTACH(SvCoopSync, CoopSyncParams, eNRT_ReliableOrdered);
+	DECLARE_CLIENT_RMI_NOATTACH(ClCoopTurret, CoopTurretParams, eNRT_ReliableOrdered);
+	DECLARE_SERVER_RMI_NOATTACH(SvCoopTurret, CoopTurretParams, eNRT_ReliableOrdered);
 	DECLARE_CLIENT_RMI_NOATTACH_FAST(ClSetGameStartTimer, SetGameTimeParams, eNRT_ReliableUnordered);
 
 	DECLARE_SERVER_RMI_NOATTACH(SvVote, NoParams, eNRT_ReliableUnordered);

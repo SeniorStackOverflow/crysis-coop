@@ -148,6 +148,78 @@ namespace
 		return pActor->GetEntity()->GetWorldPos() + Vec3(0, 0, 1.6f);
 	}
 
+	// the mounted gun (a ShiTen on the ground, a level's machine gun nest)
+	// one stands behind; 0 for anyone else
+	// (the gun he holds; or one right at him: in a joined game a soldier's
+	// use of a level's mounted gun is the server's, his current item here
+	// may say nothing of it. Looked up once a second per soldier)
+	IEntity* MountedGunOf(IActor* pActor)
+	{
+		if (!pActor)
+			return 0;
+		IItem* pItem = pActor->GetCurrentItem();
+		if (pItem && static_cast<CItem*>(pItem)->IsMounted())
+			return pItem->GetEntity();
+		struct SNear { EntityId gun; float at; };
+		static std::map<EntityId, SNear> s_near;
+		const float now = gEnv->pTimer->GetCurrTime();
+		SNear& n = s_near[pActor->GetEntityId()];
+		if (now - n.at > 1.0f || now < n.at)
+		{
+			n.at = now;
+			n.gun = 0;
+			const Vec3 at = pActor->GetEntity()->GetWorldPos();
+			IPhysicalEntity** pList = 0;
+			const int count = gEnv->pPhysicalWorld->GetEntitiesInBox(at - Vec3(1.6f, 1.6f, 0.5f), at + Vec3(1.6f, 1.6f, 2.2f), pList,
+				ent_static | ent_rigid | ent_sleeping_rigid);
+			IItemSystem* pItems = g_pGame->GetIGameFramework()->GetIItemSystem();
+			for (int i = 0; i < count && !n.gun; ++i)
+				if (IEntity* pEntity = gEnv->pEntitySystem->GetEntityFromPhysics(pList[i]))
+					if (IItem* pNear = pItems->GetItem(pEntity->GetId()))
+					{
+						// (his: a gun on the ground, not a vehicle's (those have a
+						// parent), not another one's, and he behind it, where its
+						// user stands: CItem::CanUse's test)
+						CItem* pGun = static_cast<CItem*>(pNear);
+						if (!pGun->IsMounted() || pEntity->GetParent())
+							continue;
+						const EntityId owner = pGun->GetOwnerId();
+						if (owner && owner != pActor->GetEntityId())
+							continue;
+						Vec3 back = at - pEntity->GetWorldPos();
+						back.z = 0.0f;
+						if (owner == pActor->GetEntityId() || (back.GetLength() < 1.4f && back.Dot(pGun->GetMountedDir()) < 0.0f))
+							n.gun = pEntity->GetId();
+					}
+		}
+		return n.gun ? gEnv->pEntitySystem->GetEntity(n.gun) : 0;
+	}
+
+	// the head: its bone when it has one inside its box (a soldier's box
+	// reaches forward with his arms: the top of the box's middle column was
+	// beside his face, the shots passed it), else the top of the box
+	Vec3 HeadPoint(IEntity* pEntity)
+	{
+		AABB box;
+		pEntity->GetWorldBounds(box);
+		const Vec3 c = box.GetCenter();
+		Vec3 head(c.x, c.y, box.max.z - 0.15f);
+		ICharacterInstance* pChar = pEntity->GetCharacter(0);
+		if (ISkeletonPose* pPose = pChar && !box.IsEmpty() ? pChar->GetISkeletonPose() : 0)
+		{
+			const int16 h = pPose->GetJointIDByName("Bip01 Head");
+			if (h >= 0)
+			{
+				const Vec3 bone = pEntity->GetSlotWorldTM(0) * pPose->GetAbsJointByID(h).t;
+				AABB grown = box;
+				grown.Expand(Vec3(0.3f, 0.3f, 0.3f));
+				if (grown.IsContainPoint(bone))
+					head = bone;
+			}
+		}
+		return head;
+	}
+
 	// where to aim at a body: a little above the middle of its box
 	Vec3 AimPoint(IEntity* pEntity)
 	{
@@ -157,26 +229,11 @@ namespace
 		c.z += (box.max.z - box.min.z) * 0.18f;
 		// one at a vehicle's gun: the head, over the side (at his chest the
 		// shots went into the truck: 10 of 12 hits, its armor took them, no
-		// soldier killed in 20 fights at the bridge)
+		// soldier killed in 20 fights at the bridge); one behind a mounted gun
+		// the same (the gun's shield and body stand before his chest)
 		IActor* pActor = g_pGame ? g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(pEntity->GetId()) : 0;
-		if (pActor && pActor->GetLinkedVehicle() && !box.IsEmpty())
-		{
-			Vec3 head(c.x, c.y, box.max.z - 0.15f);
-			ICharacterInstance* pChar = pEntity->GetCharacter(0);
-			if (ISkeletonPose* pPose = pChar ? pChar->GetISkeletonPose() : 0)
-			{
-				const int16 h = pPose->GetJointIDByName("Bip01 Head");
-				if (h >= 0)
-				{
-					const Vec3 bone = pEntity->GetSlotWorldTM(0) * pPose->GetAbsJointByID(h).t;
-					AABB grown = box;
-					grown.Expand(Vec3(0.3f, 0.3f, 0.3f));
-					if (grown.IsContainPoint(bone))
-						head = bone;
-				}
-			}
-			return head;
-		}
+		if (pActor && (pActor->GetLinkedVehicle() || MountedGunOf(pActor)) && !box.IsEmpty())
+			return HeadPoint(pEntity);
 		return c;
 	}
 
@@ -233,6 +290,17 @@ namespace
 		return found;
 	}
 
+	bool ShotPoint(IActor* pFrom, const Vec3& eye, IActor* pTarget, Vec3& out, const Vec3* pMuzzle = 0);
+
+	// a ray's hit is on this entity: its own physics, or another physical
+	// entity of it (a soldier's skeleton, what bullets and rays meet, is not
+	// his living entity: the line that met the gunner's head was taken for
+	// something else, 2026-10-21)
+	bool HitIs(const ray_hit& hit, IEntity* pEntity)
+	{
+		return hit.pCollider && pEntity && (hit.pCollider == pEntity->GetPhysics() || gEnv->pEntitySystem->GetEntityFromPhysics(hit.pCollider) == pEntity);
+	}
+
 	// nothing in the way between the eye and the target
 	bool Visible(IActor* pFrom, const Vec3& eye, IEntity* pTarget, const Vec3& to)
 	{
@@ -249,14 +317,67 @@ namespace
 		if (!FirstBlock(eye, dir, ent_all, skip, n, hit))
 			return true;
 		IPhysicalEntity* pTargetPhys = pTarget->GetPhysics();
-		if (hit.pCollider && hit.pCollider == pTargetPhys)
+		if (HitIs(hit, pTarget))
 			return true;
-		// the target's vehicle counts as the target (a gunner behind his gun)
+		// the target's vehicle counts as the target (a gunner behind his gun),
+		// so does the mounted gun he stands behind (the ray to his chest ends
+		// in its body; AimPoint sends the shots at his head)
 		if (IActor* pActor = ActorOf(pTarget->GetId()))
+		{
 			if (IVehicle* pVehicle = pActor->GetLinkedVehicle())
 				if (hit.pCollider && hit.pCollider == pVehicle->GetEntity()->GetPhysics())
 					return true;
+			// (only when a line reaches some part of him: one wholly behind
+			// the gun was picked and never shot at, its fire held for good)
+			if (IEntity* pGun = MountedGunOf(pActor))
+				if (hit.pCollider && hit.pCollider == pGun->GetPhysics())
+				{
+					Vec3 reach;
+					return ShotPoint(pFrom, eye, pActor, reach);
+				}
+		}
 		return hit.dist > dir.GetLength() - 0.5f;
+	}
+
+	// a point of him a ray from the eye reaches first (him, not his gun's
+	// shield or body): his head, neck, shoulders, chest, in that order. A
+	// gunner behind a mounted gun: the ray to his head met the gun's body,
+	// no shot came, he shot it down (the user's game of 2026-10-18)
+	bool ShotPoint(IActor* pFrom, const Vec3& eye, IActor* pTarget, Vec3& out, const Vec3* pMuzzle)
+	{
+		IEntity* pEntity = pTarget->GetEntity();
+		IPhysicalEntity* pTargetPhys = pEntity->GetPhysics();
+		ICharacterInstance* pChar = pEntity->GetCharacter(0);
+		ISkeletonPose* pPose = pChar ? pChar->GetISkeletonPose() : 0;
+		if (!pPose || !pTargetPhys)
+			return false;
+		IPhysicalEntity* skip[2];
+		int n = 0;
+		if (IPhysicalEntity* p = pFrom->GetEntity()->GetPhysics())
+			skip[n++] = p;
+		if (IVehicle* pVehicle = pFrom->GetLinkedVehicle())
+			if (IPhysicalEntity* p = pVehicle->GetEntity()->GetPhysics())
+				skip[n++] = p;
+		static const char* const bones[] = { "Bip01 Head", "Bip01 Neck", "Bip01 R Clavicle", "Bip01 L Clavicle", "Bip01 Spine3", "Bip01 R UpperArm", "Bip01 L UpperArm", "Bip01 Spine2" };
+		const Matrix34& slot = pEntity->GetSlotWorldTM(0);
+		for (int i = 0; i < sizeof(bones) / sizeof(bones[0]); ++i)
+		{
+			const int16 id = pPose->GetJointIDByName(bones[i]);
+			if (id < 0)
+				continue;
+			const Vec3 at = slot * pPose->GetAbsJointByID(id).t;
+			ray_hit hit;
+			if (!FirstBlock(eye, (at - eye) * 1.05f, ent_all, skip, n, hit) || !HitIs(hit, pEntity))
+				continue;
+			// (and from where the bullet leaves: the gun a little lower than
+			// the eyes saw his head over the mounted gun's body, its line ran
+			// into the body)
+			if (pMuzzle && (!FirstBlock(*pMuzzle, (at - *pMuzzle) * 1.05f, ent_all, skip, n, hit) || !HitIs(hit, pEntity)))
+				continue;
+			out = at;
+			return true;
+		}
+		return false;
 	}
 
 	// ------------------------------------------------------------------
@@ -416,6 +537,8 @@ namespace
 		Vec3 cover;
 		bool haveCover;
 		float coverAskAt, retreatSince, recoveredAt;
+		float spreadHeldAt;     // FightStep held a burst back for the spread then
+		float smallFarAt;       // FightStep aimed at a small target far off then (a gunner behind his gun's shield)
 		float coverAt;          // when the host's game named that cover
 		float peekUntil;        // fighting from cover: up shooting / down
 		bool peekUp;
@@ -462,7 +585,7 @@ namespace
 			weaponAt(0), loot(0), lootSince(0), useAt(0), useBlocked(0), pathGoal(ZERO), pathAt(-100), pathAskAt(0), pathNoneAt(-100), pathNoneGoal(ZERO),
 			localFound(false), doorMode(false), doorFor(ZERO), arriveBlockedSince(-1), jumpAt(-100), waitWayUntil(0), reviveSince(-1), reachFailSince(-1), bodyToldFor(0),
 			dodgeUntil(0), dodgeSide(1), retreating(false), hitAt(-100), lastFought(0), bursts(0), heldFire(0), stuckTimes(0), unseen(0), turning(0), statsAt(0), dropAt(0), downedFor(0), downedSince(0), enemySeenAt(-100),
-			cover(ZERO), haveCover(false), coverAskAt(0), retreatSince(-100), recoveredAt(-100),
+			cover(ZERO), haveCover(false), coverAskAt(0), retreatSince(-100), recoveredAt(-100), spreadHeldAt(-100), smallFarAt(-100),
 			coverAt(-100), peekUntil(0), peekUp(true), coverPeek(0), peekSince(0), peekSeenAt(-100), peekSide(1), openSince(-1), peeks(0), leanPeeks(0), hitsConfirmed(0), leanHoldUntil(0), leanHoldSide(0),
 			peekHits(0), hiddenReloads(0), zoomAt(0), zoomWant(false), cloakEscape(false), strengthJumpAt(-1), strengthJumpDir(ZERO), sjPlace(ZERO), sjPlaceAt(-100), sjTries(0), heavyHitAt(-100), retreatNowAt(-100), ownNoneFor(ZERO), ownNoneAt(-100), longWayFor(ZERO), longWayAt(-100), circleAt(ZERO), circleSince(-1), circleLast(-100), circleBest(0), meleeAt(0), meleeWantUntil(0),
 			suitSwitches(0), suitHoldUntil(0), coverOpenAsk(false), pathAskGoal(ZERO), waitedFor(ZERO), waitedAt(-100), fineGridAt(-100), fightOpen(0), fightHidden(0), fightPeek(0), fightBack(0) {}
@@ -615,7 +738,30 @@ namespace
 		return it != s_myHits.end() && Now() - it->second.last < within ? it->second.n : 0;
 	}
 
-	EntityId PickEnemy(CPlayer* pMe, const Vec3& eye, float range)
+	// in its cover: in sight from where it peeks (standing up, leaning out
+	// to either side), one who shot it in the last 20 s
+	bool SeenFromPeek(CPlayer* pMe, const Vec3& eye, IActor* pActor, const Vec3& aim)
+	{
+		if (!s_bot.haveCover || Dist2D(s_bot.cover, pMe->GetEntity()->GetWorldPos()) > 1.5f)
+			return false;
+		std::map<EntityId, SThreat>::const_iterator threat = s_threats.find(pActor->GetEntityId());
+		if (threat == s_threats.end() || Now() - threat->second.last > 20.0f)
+			return false;
+		// (from where it will be: standing up, from its stance's eye height,
+		// not this frame's input, cleared at the top of each think; leaning
+		// only the way its cover's peek goes, the way FightFromCover leans)
+		const SStanceInfo* pStand = pMe->GetStanceInfo(STANCE_STAND);
+		const float standZ = pMe->GetEntity()->GetWorldPos().z + (pStand && pStand->viewOffset.z > 1.0f ? pStand->viewOffset.z : 1.6f);
+		const Vec3 upEye(eye.x, eye.y, max(eye.z + 0.15f, standZ));
+		const Vec3 right = pMe->GetViewRotation().GetColumn0().GetNormalizedSafe(Vec3(1, 0, 0));
+		if (s_bot.coverPeek == 1)
+			return Visible(pMe, upEye - right * 0.6f, pActor->GetEntity(), aim);
+		if (s_bot.coverPeek == 2)
+			return Visible(pMe, upEye + right * 0.6f, pActor->GetEntity(), aim);
+		return Visible(pMe, upEye, pActor->GetEntity(), aim);
+	}
+
+	EntityId PickEnemy(CPlayer* pMe, const Vec3& eye, float range, float shooterRange = 150.0f)
 	{
 		if (s_bot.order == eO_Attack && !s_bot.target.empty())
 		{
@@ -636,9 +782,11 @@ namespace
 		if (IActor* pCurrent = s_bot.enemy && !currentNoLine ? ActorOf(s_bot.enemy) : 0)
 		{
 			const Vec3 aim = AimPoint(pCurrent->GetEntity());
-			if (Hostile(pCurrent) && aim.GetDistance(eye) < range)
+			std::map<EntityId, SThreat>::const_iterator curThreat = s_threats.find(s_bot.enemy);
+			const bool curShotMe = curThreat != s_threats.end() && Now() - curThreat->second.last < 10.0f;
+			if (Hostile(pCurrent) && aim.GetDistance(eye) < (curShotMe ? max(range, shooterRange) : range))
 			{
-				if (Visible(pMe, eye, pCurrent->GetEntity(), aim))
+				if (Visible(pMe, eye, pCurrent->GetEntity(), aim) || SeenFromPeek(pMe, eye, pCurrent, aim))
 					s_bot.enemySeenAt = Now();
 				const EntityId shooter = LastShooter(1.5f);
 				IActor* pShooter = shooter && shooter != s_bot.enemy ? ActorOf(shooter) : 0;
@@ -664,13 +812,40 @@ namespace
 				continue;
 			const Vec3 aim = AimPoint(pActor->GetEntity());
 			const float d = aim.GetDistance(eye);
-			if (d > range || !Visible(pMe, eye, pActor->GetEntity(), aim))
-				continue;
 			// the one it fights already a little preferred; one who shot it a
 			// moment ago much more (it shot at the nearest while another one
-			// shot it down)
+			// shot it down), and up to 150 m (a mounted gun's nest fires from
+			// beyond the 80 m it looks on foot)
 			std::map<EntityId, SThreat>::const_iterator threat = s_threats.find(pActor->GetEntityId());
 			const bool shotMe = threat != s_threats.end() && Now() - threat->second.last < 4.0f;
+			if (d > (shotMe ? max(range, shooterRange) : range))
+				continue;
+			if (!Visible(pMe, eye, pActor->GetEntity(), aim) && !SeenFromPeek(pMe, eye, pActor, aim))
+			{
+				// testing (coop_test_shottrace 1): why one in reach is not
+				// taken, every 3 s per enemy (what the view meets, what he holds)
+				static ICVar* pPickTrace = gEnv->pConsole->GetCVar("coop_test_shottrace");
+				static std::map<EntityId, float> s_pickToldAt;
+				if (pPickTrace && pPickTrace->GetIVal() && Now() - s_pickToldAt[pActor->GetEntityId()] > 3.0f)
+				{
+					s_pickToldAt[pActor->GetEntityId()] = Now();
+					IPhysicalEntity* skip[2] = { pMe->GetEntity()->GetPhysics(), 0 };
+					int ns = 1;
+					if (IVehicle* pOwn = pMe->GetLinkedVehicle())
+						if ((skip[1] = pOwn->GetEntity()->GetPhysics()) != 0)
+							ns = 2;
+					ray_hit hit;
+					const bool blocked = FirstBlock(eye, aim - eye, ent_all, skip, ns, hit);
+					IEntity* pHit = blocked && hit.pCollider ? gEnv->pEntitySystem->GetEntityFromPhysics(hit.pCollider) : 0;
+					IItem* pHeld = pActor->GetCurrentItem();
+					const bool headSeen = Visible(pMe, eye, pActor->GetEntity(), HeadPoint(pActor->GetEntity()));
+					CryLogAlways("[CoopAgent] not picked %s (%.0f m): the view to him blocked at %.1f m by %s; he holds %s%s; his head in sight %d",
+						pActor->GetEntity()->GetName(), d, blocked ? hit.dist : -1.0f,
+						pHit ? pHit->GetName() : blocked ? (hit.pCollider && hit.pCollider->GetType() == PE_STATIC ? "something static" : "terrain") : "nothing",
+						pHeld ? pHeld->GetEntity()->GetClass()->GetName() : "nothing", pHeld && static_cast<CItem*>(pHeld)->IsMounted() ? " (mounted)" : "", (int)headSeen);
+				}
+				continue;
+			}
 			// (one at a vehicle's gun, behind its shield and the cab, after
 			// the others on foot it can hit; one it hit lately first: 4 m nearer
 			// as it were a hit, up to 16, the hits on one, not spread over all)
@@ -1352,6 +1527,14 @@ namespace
 	float LedgeAhead(CPlayer* pMe, const Vec3& pos, const Vec3& dir);
 
 	// walk toward a point; true when there
+	// on the way to an item it wants (no strength jumps at it: it jumped at
+	// a window for a box); any other way, to a downed teammate say, may
+	bool GoingToLoot(const Vec3& goal)
+	{
+		IEntity* pLoot = s_bot.loot ? gEnv->pEntitySystem->GetEntity(s_bot.loot) : 0;
+		return pLoot && Dist2D(goal, pLoot->GetWorldPos()) < 1.5f;
+	}
+
 	bool MoveTo(CPlayer* pMe, const Vec3& to, float stopAt, bool mayRun, bool mayCatchUp, const char* toName)
 	{
 		const Vec3 pos = pMe->GetEntity()->GetWorldPos();
@@ -1616,8 +1799,9 @@ namespace
 				s_ctl.jump = true;
 			// too high to jump onto as it is (a container's floor, a crate):
 			// a strength jump (the suit's mode first: SuitStep)
+			// (not for an item on the ground: it jumped at a window for a box)
 			else if (s_bot.strengthJumpAt < 0.0f && pMe->GetNanoSuit() && pMe->GetNanoSuit()->GetSuitEnergy() >= 90.0f && now - s_bot.hitAt > 6.0f
-				&& !s_bot.retreating && !(s_bot.enemy && now - s_bot.enemySeenAt < 8.0f))
+				&& !s_bot.retreating && !(s_bot.enemy && now - s_bot.enemySeenAt < 8.0f) && !GoingToLoot(to))
 			{
 				const float ledge = LedgeAhead(pMe, pos, dir);
 				// (twice at the same place and still there: not again. It jumped
@@ -1927,6 +2111,19 @@ namespace
 			const float d = Dist2D(pEntity->GetWorldPos(), pos);
 			if (d < foundDist && fabsf(pEntity->GetWorldPos().z - pos.z) < 3.0f)
 			{
+				// (one it sees from where it stands, not behind a wall: a box
+				// inside the hut 4 m off through its wall, it strength-jumped at
+				// the window 20 s, pressed against the wall)
+				AABB box;
+				pEntity->GetWorldBounds(box);
+				const Vec3 at = box.IsEmpty() ? pEntity->GetWorldPos() : box.GetCenter();
+				const Vec3 from = pos + Vec3(0, 0, 1.4f);
+				IPhysicalEntity* skip[2] = { pMe->GetEntity()->GetPhysics(), pEntity->GetPhysics() };
+				ray_hit wall;
+				// (walls only: the ray to an item lying on rolling ground
+				// grazed the ground and hid it)
+				if (FirstBlock(from, at - from, ent_static, skip, 2, wall, eT_See) && wall.dist < at.GetDistance(from) - 0.5f)
+					continue;
 				foundDist = d;
 				pFound = pEntity;
 			}
@@ -1995,7 +2192,8 @@ namespace
 		}
 		// (in reach, use pressed again and again, not taken: the hand gets
 		// something else there)
-		if (Now() - s_bot.lootSince > 20.0f || (s_bot.lootUses >= 5 && s_bot.lootNear < 2.2f))
+		// (or no nearer to it for 7 s: the way there is not the straight one)
+		if (Now() - s_bot.lootSince > 20.0f || (s_bot.lootUses >= 5 && s_bot.lootNear < 2.2f) || (s_bot.stuck >= 2 && Now() - s_bot.lootSince > 3.0f))
 		{
 			// out of reach: something else
 			string why;
@@ -2084,6 +2282,22 @@ namespace
 					best = pActor->GetEntity()->GetWorldPos().GetDistance(pos);
 					pEnemy = pActor;
 				}
+			// (one who shot it a moment ago from afar, a machine gun's nest
+			// 110 m off: still the danger when the cover hides him; the
+			// retreat ended at once, and it walked back into his fire)
+			if (!pEnemy)
+			{
+				float bestFar = 150.0f;
+				for (std::map<EntityId, SThreat>::const_iterator t = s_threats.begin(); t != s_threats.end(); ++t)
+				{
+					IActor* pShooter = Now() - t->second.last < (s_bot.retreating ? 30.0f : 10.0f) ? ActorOf(t->first) : 0;
+					if (pShooter && Hostile(pShooter) && pShooter->GetEntity()->GetWorldPos().GetDistance(pos) < bestFar)
+					{
+						bestFar = pShooter->GetEntity()->GetWorldPos().GetDistance(pos);
+						pEnemy = pShooter;
+					}
+				}
+			}
 		}
 		if (!pEnemy)
 		{
@@ -2149,12 +2363,30 @@ namespace
 			return false;
 		const Vec3 enemyAim = AimPoint(pEnemy->GetEntity());
 		const bool seen = Visible(pMe, eye, pEnemy->GetEntity(), enemyAim);
-		// one right in its way or close behind: shot at, not run past with
-		// its back to him (it fell back past a shotgunner without a shot)
-		const bool engage = seen && enemyAim.GetDistance(eye) < 10.0f && !pEnemy->GetLinkedVehicle();
+		// one in sight within 30 m: shot at while it falls back, not run from
+		// with its back to him (it fell back past a shotgunner without a shot;
+		// riflemen 12-27 m off hit it 8 times in a row with no shot back, the
+		// user's game of 2026-10-18). Cloaked, only one right in its way (a
+		// shot gives it away)
+		// (a cloak on its way counts too: SuitStep switches to it only at the
+		// end of this think, and a shot at 20 m took the cloak back at once)
+		const bool cloakedNow = pSuit && pSuit->GetMode() == NANOMODE_CLOAK;
+		// (a cloak wanted that did not come in 3 s: the suit refused it or
+		// its energy went; no reason to hold its fire for it)
+		if (s_bot.cloakEscape && !cloakedNow && Now() - s_bot.retreatSince > 3.0f)
+			s_bot.cloakEscape = false;
+		const float enemyDist = enemyAim.GetDistance(eye);
+		const bool engage = seen && enemyDist < (cloakedNow || s_bot.cloakEscape ? 10.0f : 30.0f) && !pEnemy->GetLinkedVehicle();
+		// (over 10 m a moving rifle's spread holds every burst: it stops for
+		// 0.7 s of every 2 to shoot, then goes on; it moves first, out of the
+		// fire that started the retreat, and stops only while the spread
+		// holds a burst back)
+		const bool standToShoot = engage && enemyDist > 10.0f && Now() - s_bot.spreadHeldAt < 0.3f
+			&& fmodf(Now() - s_bot.retreatSince, 2.0f) >= 1.3f;
 		if (engage)
 		{
-			s_bot.cloakEscape = false;
+			if (enemyDist < 10.0f)
+				s_bot.cloakEscape = false;
 			FightStep(pMe, eye, pEnemy);
 		}
 		else
@@ -2168,6 +2400,11 @@ namespace
 			const bool cloaked = pSuit && pSuit->GetMode() == NANOMODE_CLOAK;
 			if (!MoveTo(pMe, s_bot.cover, 0.8f, !cloaked, false, ""))
 			{
+				if (standToShoot)
+				{
+					s_ctl.moveDir.zero();
+					s_ctl.sprint = false;
+				}
 				// (shooting one close by: its aim stays on him, it strafes)
 				if (!engage)
 				{
@@ -2187,10 +2424,12 @@ namespace
 				if (Now() - s_bot.hitAt > 2.0f)
 					s_bot.cloakEscape = false;
 				s_bot.doing.Format("in cover, recovering (health %d)", pMe->GetHealth());
-				// (a soldier on foot in sight, itself well enough: shot at from
-				// down there, not a heavy gun's vehicle; it sat out most of the
-				// fight recovering, two hits in two minutes)
-				if (seen && !pEnemy->GetLinkedVehicle() && health > 0.7f && Now() - s_bot.hitAt > 1.0f
+				// (a soldier on foot in sight, itself not nearly dead: shot at
+				// from down there, not a heavy gun's vehicle; it sat out most of
+				// the fight recovering, two hits in two minutes. Not only when
+				// nobody hit it for a second: one hitting it once a second kept
+				// that gate shut for good)
+				if (seen && !pEnemy->GetLinkedVehicle() && health > 0.4f
 					&& !(pSuit && pSuit->GetMode() == NANOMODE_CLOAK))
 				{
 					FightStep(pMe, eye, pEnemy);
@@ -2232,7 +2471,7 @@ namespace
 					&& Dist2D(pLeader->GetEntity()->GetWorldPos(), danger) > Dist2D(pos, danger))
 					away = (away + toLeader.GetNormalized() * 0.6f).GetNormalizedSafe(away);
 			}
-			s_ctl.moveDir = Steer(pMe, pos, away);
+			s_ctl.moveDir = standToShoot ? Vec3(ZERO) : Steer(pMe, pos, away);
 			// (shooting one close by: it backs off with its aim on him, not
 			// running off with its back to him, uncloaked for that shot)
 			if (engage)
@@ -2428,6 +2667,20 @@ namespace
 		return h;
 	}
 
+	// down low it would lose sight of him (a low wall before it: crouched
+	// behind it the nest's gunner was out of sight, no shot for a minute;
+	// 2026-10-21)
+	bool CrouchHidesHim(CPlayer* pMe, IActor* pEnemy)
+	{
+		const Vec3 eye = EyePos(pMe);
+		const float above = eye.z - pMe->GetEntity()->GetWorldPos().z;
+		const bool crouched = above < 1.3f;
+		const Vec3 standing = crouched ? eye + Vec3(0, 0, 1.6f - above) : eye;
+		const Vec3 low = crouched ? eye : eye - Vec3(0, 0, max(0.0f, above - 1.0f));
+		const Vec3 aim = AimPoint(pEnemy->GetEntity());
+		return Visible(pMe, standing, pEnemy->GetEntity(), aim) && !Visible(pMe, low, pEnemy->GetEntity(), aim);
+	}
+
 	// standing its ground in a fight: side steps now and then, crouched in
 	// between (a harder target than one standing still)
 	void Dodge(const Vec3& pos, IActor* pEnemy)
@@ -2435,6 +2688,15 @@ namespace
 		if (s_ctl.moveDir.GetLengthSquared() > 0.01f)
 			return;    // on its way somewhere anyway
 		const float now = Now();
+		// (a small target far off: still for the sights, a side step put
+		// them down every time; crouched unless that hides him)
+		CPlayer* pSelf = LocalPlayer();
+		const bool crouchHides = pSelf && CrouchHidesHim(pSelf, pEnemy);
+		if (now - s_bot.smallFarAt < 0.5f)
+		{
+			s_ctl.crouch = !crouchHides;
+			return;
+		}
 		if (now >= s_bot.dodgeUntil)
 		{
 			if (s_bot.dodgeSide != 0.0f)
@@ -2463,19 +2725,21 @@ namespace
 				if (!ClearWay(pMe, pos, pos + side * 2.0f))
 				{
 					s_bot.dodgeSide = 0.0f;
-					s_ctl.crouch = true;
+					s_ctl.crouch = !crouchHides;
 					return;
 				}
 			}
 			s_ctl.moveDir = side;
 		}
 		else
-			s_ctl.crouch = true;
+			s_ctl.crouch = !crouchHides;
 	}
 
 	// where it aims now, the first thing hit is the enemy (or his vehicle):
 	// no shots into a wall, a crate, a fence, a teammate
-	bool LineOfFire(CPlayer* pMe, const Vec3& eye, IActor* pEnemy)
+	// (aim: the point FightStep shoots at, his head when it sees it; the line
+	// to his chest ran into a mounted gun's body while the head was free)
+	bool LineOfFire(CPlayer* pMe, const Vec3& eye, IActor* pEnemy, const Vec3& aim)
 	{
 		IPhysicalEntity* skip[2];
 		int n = 0;
@@ -2484,7 +2748,6 @@ namespace
 		if (IItem* pItem = pMe->GetCurrentItem())
 			if (IPhysicalEntity* p = pItem->GetEntity()->GetPhysics())
 				skip[n++] = p;
-		const Vec3 aim = AimPoint(pEnemy->GetEntity());
 		const Vec3 look = pMe->GetViewRotation().GetColumn1();
 		const float range = aim.GetDistance(eye) + 2.0f;
 		ray_hit hit;
@@ -2505,7 +2768,7 @@ namespace
 				const Vec3 toAim = aim - muzzle;
 				ray_hit gunHit;
 				if (muzzle.GetDistance(eye) < 2.0f && toAim.GetLengthSquared() > 1.0f
-					&& FirstBlock(muzzle, toAim, ent_all, skip, n, gunHit) && gunHit.pCollider != pEnemyPhys
+					&& FirstBlock(muzzle, toAim, ent_all, skip, n, gunHit) && !HitIs(gunHit, pEnemy->GetEntity())
 					&& gunHit.dist < toAim.GetLength() - 0.8f)
 				{
 					IEntity* pGunHit = gunHit.pCollider ? gEnv->pEntitySystem->GetEntityFromPhysics(gunHit.pCollider) : 0;
@@ -2525,14 +2788,26 @@ namespace
 				}
 			}
 		}
-		if (hit.pCollider == pEnemyPhys)
+		if (HitIs(hit, pEnemy->GetEntity()))
 			return true;
 		// (his vehicle is no shot at him: at the truck's gunner 10 of 12 hits
 		// went into the truck, its armor took them all. One at a vehicle's
 		// gun only when the line reaches him himself: 0.8 m from his head is
-		// the gun's shield and the cab)
-		if (pEnemy->GetLinkedVehicle())
+		// the gun's shield and the cab; the same behind a mounted gun)
+		if (pEnemy->GetLinkedVehicle() || MountedGunOf(pEnemy))
+		{
+			// testing (coop_test_shottrace 1): what the line meets before him
+			static float s_gunnerBlockAt = 0.0f;
+			static ICVar* pGunnerTrace = gEnv->pConsole->GetCVar("coop_test_shottrace");
+			if (pGunnerTrace && pGunnerTrace->GetIVal() && Now() >= s_gunnerBlockAt)
+			{
+				s_gunnerBlockAt = Now() + 1.0f;
+				IEntity* pMet = hit.pCollider ? gEnv->pEntitySystem->GetEntityFromPhysics(hit.pCollider) : 0;
+				CryLogAlways("[CoopAgent] at %s behind his gun: the line meets %s at %.1f m, %.2f m from the aim point", pEnemy->GetEntity()->GetName(),
+					pMet ? pMet->GetName() : "something static", hit.dist, hit.pt.GetDistance(aim));
+			}
 			return false;
+		}
 		// the hit is right at him (his weapon, a part of him)
 		if (hit.pt.GetDistance(aim) < 0.8f)
 			return true;
@@ -2832,12 +3107,21 @@ namespace
 							pNear = pActor;
 						}
 					}
+				// (once, and again when the car moved 20 m or 30 s passed: a
+				// copy of the car that stayed behind showed in nothing else)
+				static Vec3 s_noneCarAt(ZERO);
+				static float s_noneSaidAt = -100.0f;
+				const Vec3 carAt = pVehicle->GetEntity()->GetWorldPos();
 				if (pNear)
 					s_noneFar = false;
-				else if (!s_noneFar && (s_noneFar = true))
+				else if (!s_noneFar || carAt.GetDistance(s_noneCarAt) > 20.0f || Now() - s_noneSaidAt > 30.0f)
+				{
+					s_noneFar = true;
+					s_noneCarAt = carAt;
+					s_noneSaidAt = Now();
 					CryLogAlways("[CoopAgent] at the gun of %s, no enemy: %d hostile, the nearest %.0f m off; eye (%.1f %.1f %.1f), car (%.1f %.1f %.1f)",
-						pVehicle->GetEntity()->GetName(), hostile, nearestAny, eye.x, eye.y, eye.z,
-						pVehicle->GetEntity()->GetWorldPos().x, pVehicle->GetEntity()->GetWorldPos().y, pVehicle->GetEntity()->GetWorldPos().z);
+						pVehicle->GetEntity()->GetName(), hostile, nearestAny, eye.x, eye.y, eye.z, carAt.x, carAt.y, carAt.z);
+				}
 				if (pNear)
 				{
 					const Vec3 to = AimPoint(pNear->GetEntity());
@@ -2861,7 +3145,13 @@ namespace
 			}
 			return;
 		}
-		const Vec3 aim = AimPoint(pEnemy->GetEntity());
+		Vec3 aim = AimPoint(pEnemy->GetEntity());
+		if (pEnemy->GetLinkedVehicle() || MountedGunOf(pEnemy))
+		{
+			Vec3 reach;
+			if (ShotPoint(pMe, eye, pEnemy, reach))
+				aim = reach;
+		}
 		const Vec3 want = (aim - eye).GetNormalizedSafe(look);
 		const float yawErr = Wrap(Yaw(want) - Yaw(look));
 		const float pitchErr = Pitch(want) - Pitch(look);
@@ -2945,7 +3235,9 @@ namespace
 			clear = true;
 			if (FirstBlock(eye, (aim - eye).GetNormalizedSafe(look) * (aim.GetDistance(eye) + 2.0f), ent_all, skip, n, hit))
 			{
-				clear = hit.pCollider == pEnemy->GetEntity()->GetPhysics() || hit.pt.GetDistance(aim) < 1.0f;
+				// (one behind a mounted gun: only a ray that reaches him, the
+				// gun's body is within a metre of his head)
+				clear = HitIs(hit, pEnemy->GetEntity()) || (hit.pt.GetDistance(aim) < 1.0f && !MountedGunOf(pEnemy));
 				if (IVehicle* pTheirs = pEnemy->GetLinkedVehicle())
 					clear = clear || hit.pCollider == pTheirs->GetEntity()->GetPhysics();
 				// testing (coop_test_shottrace 1): what is in the line of fire
@@ -3016,7 +3308,31 @@ namespace
 		// bursts
 		const float now = Now();
 		if (clear && now >= s_bot.pauseUntil && now < s_bot.burstUntil)
+		{
+			// testing (coop_test_shottrace 1): at each burst, where its own
+			// gun's barrel points against the line to whom it shoots (the
+			// server compares its copy of the gun with the shots)
+			static float s_gunTraceAt = 0.0f;
+			static ICVar* pGunShotTrace = gEnv->pConsole->GetCVar("coop_test_shottrace");
+			if (pGunShotTrace && pGunShotTrace->GetIVal() && now >= s_gunTraceAt)
+			{
+				s_gunTraceAt = now + 1.0f;
+				Vec3 barrel(ZERO);
+				for (int i = 0, n = pVehicle->GetPartCount(); i < n; ++i)
+					if (IVehiclePart* pPart = pVehicle->GetPart((unsigned int)i))
+						if (pPart->GetType() == IVehiclePart::eVPT_AnimatedJoint
+							&& (*(const float*)((const char*)pPart + 0x88) != 0.0f || *(const float*)((const char*)pPart + 0x98) != 0.0f))
+							if (IVehicleSeat* pSeat = *(IVehicleSeat**)((char*)pPart + 0x6c))
+								if (pSeat->GetPassenger(true) == pMe->GetEntityId())
+									barrel = pPart->GetWorldTM().GetColumn1();
+				const Vec3 line = (aim - eye).GetNormalizedSafe(look);
+				if (barrel.GetLengthSquared() > 0.5f)
+					CryLogAlways("[CoopAgent] gun burst at %s: its barrel %.0f deg off the line to him (barrel yaw %.0f pitch %.0f, line yaw %.0f pitch %.0f, view yaw %.0f pitch %.0f)",
+						pEnemy->GetEntity()->GetName(), RAD2DEG(acosf(clamp_tpl(barrel.GetNormalized().Dot(line), -1.0f, 1.0f))),
+						RAD2DEG(Yaw(barrel)), RAD2DEG(Pitch(barrel)), RAD2DEG(Yaw(line)), RAD2DEG(Pitch(line)), RAD2DEG(Yaw(look)), RAD2DEG(Pitch(look)));
+			}
 			VehicleFire(pMe, pVehicle, true);
+		}
 		else
 		{
 			VehicleFire(pMe, pVehicle, false);
@@ -3033,8 +3349,56 @@ namespace
 	// in bursts when on target, seen, and nothing else in the line of fire
 	void FightStep(CPlayer* pMe, const Vec3& eye, IActor* pEnemy)
 	{
-		const Vec3 aim = AimPoint(pEnemy->GetEntity());
+		Vec3 aim = AimPoint(pEnemy->GetEntity());
+		// the head, when it sees it, within 35 m or in the sights (no spread
+		// there): a body hit takes 52-60 of a soldier's 180, a head hit kills
+		// (3900), and a round that goes low still finds the chest. At the
+		// chest it hit 5 times a fight and killed one in two fights
+		{
+			IItem* pSightItem = pMe->GetCurrentItem();
+			IWeapon* pSights = pSightItem ? pSightItem->GetIWeapon() : 0;
+			const bool inSights = pSights && pSights->IsZoomed() && !pSights->IsZooming();
+			if ((inSights || aim.GetDistance(eye) < 35.0f) && !pEnemy->GetLinkedVehicle())
+			{
+				const Vec3 head = HeadPoint(pEnemy->GetEntity());
+				if (head.z > aim.z && Visible(pMe, eye, pEnemy->GetEntity(), head))
+					aim = head;
+			}
+		}
+		// (one behind a mounted gun or at a vehicle's gun: the part of him a
+		// ray reaches, his head often behind the gun's body)
+		if (pEnemy->GetLinkedVehicle() || MountedGunOf(pEnemy))
+		{
+			Vec3 reach, muzzle(ZERO);
+			IItem* pGunItem = pMe->GetCurrentItem();
+			IWeapon* pGun = pGunItem ? pGunItem->GetIWeapon() : 0;
+			IFireMode* pGunMode = pGun ? pGun->GetFireMode(pGun->GetCurrentFireMode()) : 0;
+			if (pGunMode)
+				muzzle = pGunMode->GetFiringPos(aim);
+			const bool haveMuzzle = pGunMode && muzzle.GetDistance(eye) < 2.0f;
+			if (ShotPoint(pMe, eye, pEnemy, reach, haveMuzzle ? &muzzle : 0))
+				aim = reach;
+			else
+			{
+				static ICVar* pReachTrace = gEnv->pConsole->GetCVar("coop_test_shottrace");
+				static float s_reachToldAt = 0.0f;
+				if (pReachTrace && pReachTrace->GetIVal() && Now() >= s_reachToldAt)
+				{
+					s_reachToldAt = Now() + 1.0f;
+					CryLogAlways("[CoopAgent] at %s behind his gun: no part of him a line from the eyes%s reaches", pEnemy->GetEntity()->GetName(),
+						haveMuzzle ? " and the gun" : "");
+				}
+			}
+		}
 		const bool seen = Visible(pMe, eye, pEnemy->GetEntity(), aim);
+		// a small target far off (a gunner behind his mounted gun's shield,
+		// one at a vehicle's gun: a head and shoulders): crouched still, in
+		// the sights, a shot only with the spread small. At 44 m a rifle's
+		// 2 degrees of spread is more than a metre: 3 bursts at the nest's
+		// gunner, no hit (2026-10-21)
+		const bool smallFar = (pEnemy->GetLinkedVehicle() || MountedGunOf(pEnemy)) && aim.GetDistance(eye) > 20.0f;
+		if (smallFar)
+			s_bot.smallFarAt = Now();
 		LookAt(eye, aim, 5.0f);
 		float yaw, pitch;
 		ViewAngles(pMe, yaw, pitch);
@@ -3089,7 +3453,7 @@ namespace
 			Fire(pMe, false);
 			++s_bot.turning;
 		}
-		else if (seen && off < 0.06f && clip != 0 && !LineOfFire(pMe, eye, pEnemy))
+		else if (seen && off < 0.06f && clip != 0 && !LineOfFire(pMe, eye, pEnemy, aim))
 		{
 			// something else in the way (a wall, a crate, a fence): no shot;
 			// for 2 s: another enemy (or none: then it does what it would
@@ -3134,12 +3498,13 @@ namespace
 			// (not a burst while the spread is wide, moving or just landed:
 			// 7-9 degrees at 30-60 m, every round wide of him; a moment later)
 			IFireMode* pSpreadMode = pWeapon->GetFireMode(pWeapon->GetCurrentFireMode());
-			const bool wide = !s_bot.attackHeld && range > 10.0f && pSpreadMode && pSpreadMode->GetSpread() > 3.0f;
+			const bool wide = !s_bot.attackHeld && range > 10.0f && pSpreadMode && pSpreadMode->GetSpread() > (smallFar ? 0.8f : 3.0f);
 			if (wide && now >= s_bot.pauseUntil && now < s_bot.burstUntil)
 			{
 				const float len = s_bot.burstUntil - s_bot.pauseUntil;
 				s_bot.pauseUntil = now + 0.1f;
 				s_bot.burstUntil = s_bot.pauseUntil + len;
+				s_bot.spreadHeldAt = now;
 				Fire(pMe, false);
 			}
 			else if (now >= s_bot.pauseUntil && now < s_bot.burstUntil)
@@ -3203,8 +3568,8 @@ namespace
 		// known whether it moves this frame; in the open it toggled with each
 		// side step and never fired, the autotester's companion-fight-bridge)
 		const Vec3 myPos = pMe->GetEntity()->GetWorldPos();
-		s_bot.zoomWant = fightsWithIt && seen && aim.GetDistance(eye) > 10.0f && clip != 0 && s_bot.peekUp && s_bot.haveCover
-			&& Dist2D(s_bot.cover, myPos) < 1.5f;
+		s_bot.zoomWant = fightsWithIt && seen && aim.GetDistance(eye) > 10.0f && clip != 0
+			&& ((s_bot.peekUp && s_bot.haveCover && Dist2D(s_bot.cover, myPos) < 1.5f) || smallFar);
 		s_bot.doing.Format("fighting %s (%.0f m%s)", pEnemy->GetEntity()->GetName(), aim.GetDistance(eye), seen ? "" : ", out of sight");
 	}
 
@@ -3845,7 +4210,7 @@ namespace
 			// back at a rifleman 25 m off instead of keeping down at the body
 			// while he hits it, the review, 2026-10-16)
 			const bool hitLately = Now() - s_bot.hitAt < 3.0f;
-			EntityId enemy = s_bot.fireAtWill ? PickEnemy(pMe, eye, hitLately ? 80.0f : d > 3.0f ? 60.0f : 18.0f) : 0;
+			EntityId enemy = s_bot.fireAtWill ? PickEnemy(pMe, eye, hitLately ? 80.0f : d > 3.0f ? 60.0f : 18.0f, 0.0f) : 0;
 			IActor* pEnemy = ActorOf(enemy);
 			if (enemy != s_bot.enemy)
 			{
@@ -6914,6 +7279,12 @@ void CoopAgent::SteerInput(CPlayer* pPlayer, Ang3& deltaRotation, Vec3& deltaMov
 		const float step = s_ctl.turnRate * (frameTime > 0.001f ? frameTime : 0.001f);
 		deltaRotation.z = clamp_tpl(Wrap(s_ctl.yaw - yaw), -step, step);
 		deltaRotation.x = clamp_tpl(clamp_tpl(s_ctl.pitch, -1.2f, 1.2f) - pitch, -step, step);
+		// (a turn goes to the server as a mouse turn does, CPlayerInput::OnAction
+		// marks the input changed: without it the host's copy kept the old look
+		// until a key press and its body did not turn to what it shot at)
+		static ICVar* pLookNet = gEnv->pConsole->GetCVar("coop_agent_look_net");
+		if (fabsf(deltaRotation.z) + fabsf(deltaRotation.x) > 0.0005f && (!pLookNet || pLookNet->GetIVal()))
+			pPlayer->GetGameObject()->ChangedNetworkState(IPlayerInput::INPUT_ASPECT);
 	}
 	else
 		deltaRotation.Set(0, 0, 0);
@@ -7209,7 +7580,9 @@ void CoopAgent::OnDamaged(EntityId shooterId, EntityId weaponId)
 		// drop says nothing, one rifle hit takes 49 of it; the helicopter's,
 		// the tank's and the APC's guns have names of their own)
 		IActor* pShooterActor = ActorOf(shooterId);
-		if ((pShooterActor && pShooterActor->GetLinkedVehicle()) || !strnicmp(cls, "Vehicle", 7) || strstr(cls, "ShiTen") || strstr(cls, "Cannon")
+		// (a mounted gun on the ground, "ShiTen", is not: fleeing its nest
+		// gave up every such fight, it fights it from cover instead)
+		if ((pShooterActor && pShooterActor->GetLinkedVehicle()) || !strnicmp(cls, "Vehicle", 7) || strstr(cls, "Cannon")
 			|| strstr(cls, "TACGun") || strstr(cls, "AlienMount") || strstr(cls, "Coaxial") || strstr(cls, "50Cal") || strstr(cls, "Hellfire")
 			|| strstr(cls, "RocketLauncher") || !stricmp(cls, "Hurricane") || !stricmp(cls, "LAW") || !stricmp(cls, "GaussRifle"))
 			s_bot.heavyHitAt = now;

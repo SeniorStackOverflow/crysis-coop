@@ -55,6 +55,7 @@
 namespace
 {
 	void CmdTestVehMirror(IConsoleCmdArgs* pArgs);
+	void CmdTestParts(IConsoleCmdArgs* pArgs);
 }
 
 namespace
@@ -68,6 +69,7 @@ namespace
 	void UpdateIdleGunners(float frameTime);
 	int s_totalAIShots = 0;
 	void ResetSync();
+	void ResetTurretSync();
 	void CaptureHideBase();
 	void UpdateVehicleMirror(float frameTime);
 	void SendVehicleStates(int channelId);
@@ -807,6 +809,10 @@ namespace
 			"Crysis Coop: while more voices than this play, the less important new sounds (priority over 45, as in single player) do not start: FMOD mixes 64 at most, the others are not heard (0 = every sound starts)");
 		gEnv->pConsole->AddCommand("coop_sound_census", CmdSoundCensus, 0, "Crysis Coop: log the sounds the entities play now (playing, virtual, waiting for their data) and the most frequent ones");
 		gEnv->pConsole->AddCommand("coop_test_vehmirror", CmdTestVehMirror, 0, "Crysis Coop testing: coop_test_vehmirror <vehicle name>: this client moves its copy of that vehicle by the server's states from now on (as when the copy got stuck)");
+		gEnv->pConsole->AddCommand("coop_test_parts", CmdTestParts, 0, "Crysis Coop testing: coop_test_parts <vehicle name>: the vehicle's parts, which of them a gun's seat turns and where they point");
+		gEnv->pConsole->RegisterInt("coop_turret_apply", 3, 0, "Crysis Coop: how a vehicle gun's turn received from the one at it is put on this machine's copy: 3 = SetLocalBaseTM (relative to its parent part; CryAction's own rotation starts from it), 2 = SetLocalTM only, 1 = the engine's network slot of the part, 0 = not at all");
+		gEnv->pConsole->RegisterInt("coop_agent_look_net", 1, 0, "Crysis Coop: 1 = the AI companion's turns are sent to the server at once, as a mouse turn is (0: only with its key presses, as before; testing)");
+		gEnv->pConsole->RegisterInt("coop_test_vehseq_skip", 0, 0, "Crysis Coop testing (host): the next state of every vehicle is numbered this much higher (the old shared counter after a long rest)");
 		gEnv->pConsole->AddCommand("coop_test_stealth", CmdTestStealth, 0, "Crysis Coop testing: coop_test_stealth logs the AI system's detection levels of every player (server)");
 		gEnv->pConsole->AddCommand("coop_test_save", CmdTestSave, 0, "Crysis Coop testing: coop_test_save [name] saves as the single player menu does");
 		gEnv->pConsole->AddCommand("coop_test_ai_clear", CmdTestAIClear, 0, "Crysis Coop testing: coop_test_ai_clear <name> [proxy]: AIEVENT_CLEAR to that AI (proxy: its proxy reset too)");
@@ -2671,6 +2677,8 @@ void CoopAI::OnGameLoaded(bool clientsKept)
 	DisableScriptPhysicsSync();
 	// the snapshots describe the players before the load
 	s_invSnapshots.clear();
+	// (the guns' turns received before it: the loaded vehicles have their own)
+	ResetTurretSync();
 	CryLogAlways("[CoopAI] saved game loaded: dynamic network aspects switched off for %d AI actors", ai);
 	// The load replaces every vehicle's weapons. A friend who joins later
 	// never bound those vehicles then (the level's own objects, "static"):
@@ -5081,12 +5089,32 @@ namespace
 	// second, reliably: unreliable ones were lost while soldiers fired, and
 	// the copy stopped half way; and at a join); a client moves its copy
 	// only when the engine does not (it is far off and does not follow)
-	struct SVehSent { Vec3 pos; bool moving; float at; SVehSent(): pos(ZERO), moving(false), at(-100.0f) {} };
-	uint16 s_vehSeq = 0;
+	// (each vehicle numbers its own states, and only those sent: one counter
+	// for all of them went up for every parked vehicle every tick, wrapped
+	// its 16 bits in a minute or two, and a client took every state of a car
+	// that had rested a while for "older": the companion's copy of the jeep
+	// stayed at the start for the whole ride and its gun saw nobody within
+	// 150 m; the user's game of 2026-10-18)
+	struct SVehSent { Vec3 pos; Quat rot; bool moving; float at; uint16 seq; SVehSent(): pos(ZERO), moving(false), at(-100.0f), seq(0) { rot.SetIdentity(); } };
 	std::map<EntityId, SVehSent> s_vehSent;          // server
 	float s_vehMirrorTimer = 0.0f;
-	struct SVehMirror { Vec3 server, local; int stuck; bool active, have; uint16 seq; SVehMirror(): server(ZERO), local(ZERO), stuck(0), active(false), have(false), seq(0) {} };
+	unsigned s_vehSentTotal = 0;
+	struct SVehMirror { Vec3 server, local; int stuck; bool active, have; uint16 seq; float at, refusedAt; int refused;
+		SVehMirror(): server(ZERO), local(ZERO), stuck(0), active(false), have(false), seq(0), at(-100.0f), refusedAt(-100.0f), refused(0) {} };
 	std::map<EntityId, SVehMirror> s_vehMirror;      // client
+
+	// testing: coop_test_vehseq_skip N (host): every vehicle's next state is
+	// numbered N higher (as after a long rest with the old shared counter)
+	void TestVehSeqSkip()
+	{
+		static ICVar* pSkip = gEnv->pConsole->GetCVar("coop_test_vehseq_skip");
+		if (!pSkip || !pSkip->GetIVal())
+			return;
+		for (std::map<EntityId, SVehSent>::iterator it = s_vehSent.begin(); it != s_vehSent.end(); ++it)
+			it->second.seq = (uint16)(it->second.seq + pSkip->GetIVal());
+		CryLogAlways("[CoopTest] coop_test_vehseq_skip: the next vehicle states are numbered %d higher (%d vehicles)", pSkip->GetIVal(), (int)s_vehSent.size());
+		pSkip->Set(0);
+	}
 
 	// testing: coop_test_vehmirror <vehicle>: as if this client's copy of it
 	// had got stuck (the copy moved by the server's states from now on)
@@ -5118,7 +5146,7 @@ namespace
 		if (!pPhys || !pPhys->GetStatus(&dyn))
 			return false;
 		params.id = pEntity->GetId();
-		params.seq = ++s_vehSeq;
+		params.seq = 0;    // numbered by the sender when it really goes out
 		params.pos = pEntity->GetWorldPos();
 		params.rot = pEntity->GetWorldRotation();
 		params.vel = dyn.v;
@@ -5154,6 +5182,7 @@ namespace
 			friends = friends || (pActor->IsPlayer() && pActor != pHost);
 		if (!pRules || !friends)
 			return;
+		TestVehSeqSkip();
 		IVehicleIteratorPtr pVehicles = g_pGame->GetIGameFramework()->GetIVehicleSystem()->CreateVehicleIterator();
 		while (IVehicle* pVehicle = pVehicles->Next())
 		{
@@ -5175,12 +5204,14 @@ namespace
 			// at rest, and the last state sent said so too
 			if (!moving && !sent.moving)
 				continue;
+			params.seq = ++sent.seq;
 			pRules->CoopSendVehicle(params, 0);
 			sent.pos = params.pos;
+			sent.rot = params.rot;
 			sent.moving = moving;
 			sent.at = now;
-			if (params.seq % 500 == 0)
-				CryLogAlways("[CoopAI] vehicle states sent: %u", (unsigned)params.seq);
+			if (++s_vehSentTotal % 500 == 0)
+				CryLogAlways("[CoopAI] vehicle states sent: %u (%s at %u)", s_vehSentTotal, pVehicle->GetEntity()->GetName(), (unsigned)params.seq);
 			if (VehicleTraced(pVehicle->GetEntity()))
 				CryLogAlways("[CoopVeh>] %s seq=%u pos=(%.1f,%.1f,%.1f) v=%.1f", pVehicle->GetEntity()->GetName(), (unsigned)params.seq,
 					params.pos.x, params.pos.y, params.pos.z, params.vel.len());
@@ -5201,11 +5232,230 @@ namespace
 			bool moving = false;
 			if (!DrivenByFriend(pVehicle) && FillVehicleState(pVehicle, params, moving))
 			{
+				params.seq = ++s_vehSent[pVehicle->GetEntityId()].seq;
 				pRules->CoopSendVehicle(params, channelId);
 				++n;
 			}
 		}
 		CryLogAlways("[CoopSync] sent %d vehicle states to channel %d", n, channelId);
+	}
+
+	// ---- the turn of a vehicle's gun, between the machines (see
+	// CGameRules::CoopTurretParams). The one at the gun sends the local
+	// rotation of the parts his seat turns (CryAction turns them in his game
+	// only); every other machine puts them on its copy's parts with
+	// SetLocalBaseTM (coop_turret_apply 3: CryAction's own rotation starts
+	// from the base TM; SetLocalTM alone, 2, left it behind and the gun
+	// jumped back when the next one took it), or into the slot
+	// CVehiclePartBase::Serialize fills from the network (1: the quaternion at
+	// +0x120 and the flag at +0x140 of the part, build 6156)
+	struct STurretRx { Quat rot; float at; EntityId from; STurretRx(): at(-100.0f), from(0) { rot.SetIdentity(); } };
+	std::map<uint64, STurretRx> s_turretRx;    // (vehicle id << 8 | part) -> the last turn received
+	struct STurretTx { Quat rot; float at; STurretTx(): at(-100.0f) { rot.SetIdentity(); } };
+	STurretTx s_turretTx[64];                  // the last turn sent, per part of the local player's vehicle
+	EntityId s_turretTxVehicle = 0;
+	float s_turretTxAt = 0.0f, s_turretLogAt = 0.0f;
+
+	// a part a seat's rotate action turns: a joint with a yaw or a pitch speed
+	// (CVehiclePartBase +0x88 yawSpeed / +0x98 pitchSpeed, build 6156: the
+	// rotation init reads them there; +0x8c is yawAccel)
+	bool TurretPart(IVehiclePart* pPart)
+	{
+		return pPart && pPart->GetType() == IVehiclePart::eVPT_AnimatedJoint
+			&& (*(const float*)((const char*)pPart + 0x88) != 0.0f || *(const float*)((const char*)pPart + 0x98) != 0.0f);
+	}
+
+	// who turns this part: the passenger of the seat whose rotate action
+	// took it (CVehicleSeatActionRotateTurret::StartUsing puts that seat at
+	// +0x6c of its yaw and pitch parts, the part's constructor sets 0; build
+	// 6156). Per part, not per vehicle: in a tank the driver turns the
+	// cannon and a gunner the machine gun
+	EntityId TurretUser(IVehiclePart* pPart)
+	{
+		IVehicleSeat* pSeat = pPart ? *(IVehicleSeat**)((char*)pPart + 0x6c) : 0;
+		return pSeat ? pSeat->GetPassenger(true) : 0;
+	}
+
+	EntityId LocalPlayerId()
+	{
+		IActor* pLocal = g_pGame ? g_pGame->GetIGameFramework()->GetClientActor() : 0;
+		return pLocal ? pLocal->GetEntityId() : 0;
+	}
+
+	// which way a part's own frame points: yaw and pitch of its forward, degrees
+	void PartAngles(const Matrix34& tm, float& yaw, float& pitch)
+	{
+		const Vec3 f = tm.GetColumn1().GetNormalizedSafe(Vec3(0, 1, 0));
+		yaw = RAD2DEG(atan2f(-f.x, f.y));
+		pitch = RAD2DEG(asinf(clamp_tpl(f.z, -1.0f, 1.0f)));
+	}
+
+	void ResetTurretSync()
+	{
+		s_turretRx.clear();
+		s_turretTxVehicle = 0;
+		for (int i = 0; i < 64; ++i)
+			s_turretTx[i].at = -100.0f;
+	}
+
+	void ApplyTurret(IVehicle* pVehicle, int part, const Quat& rot)
+	{
+		static ICVar* pMode = gEnv->pConsole->GetCVar("coop_turret_apply");
+		const int mode = pMode ? pMode->GetIVal() : 3;
+		IVehiclePart* pPart = part >= 0 && part < pVehicle->GetPartCount() ? pVehicle->GetPart((unsigned int)part) : 0;
+		if (!pPart || !TurretPart(pPart) || mode <= 0 || !rot.IsValid())
+			return;
+		// (the local player turns it here himself)
+		const EntityId user = TurretUser(pPart);
+		if (user && user == LocalPlayerId())
+			return;
+		if (mode == 1)
+		{
+			*(Quat*)((char*)pPart + 0x120) = rot;
+			*((char*)pPart + 0x140) = 1;
+			return;
+		}
+		Matrix34 tm = mode == 3 ? pPart->GetLocalBaseTM() : pPart->GetLocalTM(true);
+		const Vec3 t = tm.GetTranslation();
+		tm = Matrix34(Matrix33(rot));
+		tm.SetTranslation(t);
+		if (mode == 2)
+			pPart->SetLocalTM(tm);
+		else
+			pPart->SetLocalBaseTM(tm);
+	}
+
+	void UpdateTurretSync(float frameTime)
+	{
+		if (!g_pGame || !gEnv->bMultiplayer || !CoopAI::IsCoopSession())
+			return;
+		CGameRules* pRules = g_pGame->GetGameRules();
+		if (!pRules)
+			return;
+		const float now = gEnv->pTimer->GetCurrTime();
+		IVehicleSystem* pVehicles = g_pGame->GetIGameFramework()->GetIVehicleSystem();
+		const EntityId localId = LocalPlayerId();
+		// the turns received stay on the copy's parts (a part's own update may
+		// put them back) while messages come, and 3 s after the last (a clock
+		// put back by a load: gone too)
+		const bool logNow = gEnv->bServer && now - s_turretLogAt > 5.0f;
+		for (std::map<uint64, STurretRx>::iterator it = s_turretRx.begin(); it != s_turretRx.end(); )
+		{
+			if (now - it->second.at > 3.0f || now < it->second.at - 1.0f)
+			{
+				s_turretRx.erase(it++);
+				continue;
+			}
+			IVehicle* pVehicle = pVehicles->GetVehicle((EntityId)(it->first >> 8));
+			const int part = (int)(it->first & 0xff);
+			if (pVehicle)
+			{
+				ApplyTurret(pVehicle, part, it->second.rot);
+				// (the server, every 5 s: where its copy of the gun points
+				// against what the gunner sent; the tests read it)
+				IVehiclePart* pPart = part < pVehicle->GetPartCount() ? pVehicle->GetPart((unsigned int)part) : 0;
+				if (logNow && pPart)
+				{
+					IEntity* pGunner = gEnv->pEntitySystem->GetEntity(it->second.from);
+					float yaw = 0.0f, pitch = 0.0f, rxYaw = 0.0f, rxPitch = 0.0f;
+					PartAngles(pPart->GetLocalTM(true), yaw, pitch);
+					PartAngles(Matrix34(Matrix33(it->second.rot)), rxYaw, rxPitch);
+					CryLogAlways("[CoopTurret] %s (gunner %s): part %s on the server yaw %.0f pitch %.0f, the gunner sent yaw %.0f pitch %.0f (%.2f s ago)",
+						pVehicle->GetEntity()->GetName(), pGunner ? pGunner->GetName() : "-", pPart->GetName().c_str(), yaw, pitch, rxYaw, rxPitch,
+						now - it->second.at);
+				}
+			}
+			++it;
+		}
+		if (logNow)
+			s_turretLogAt = now;
+		// the local player at a gun: the parts he turns that turned since the
+		// last message (or a second ago: one who joined gets them too), 20 a
+		// second
+		IActor* pLocal = g_pGame->GetIGameFramework()->GetClientActor();
+		IVehicle* pVehicle = pLocal ? pLocal->GetLinkedVehicle() : 0;
+		if (!pVehicle)
+		{
+			s_turretTxVehicle = 0;
+			return;
+		}
+		if (pVehicle->GetEntityId() != s_turretTxVehicle)
+		{
+			s_turretTxVehicle = pVehicle->GetEntityId();
+			for (int i = 0; i < 64; ++i)
+				s_turretTx[i].at = -100.0f;
+		}
+		if (now - s_turretTxAt < 0.05f)
+			return;
+		s_turretTxAt = now;
+		CGameRules::CoopTurretParams params;
+		params.id = pVehicle->GetEntityId();
+		int filled = 0;
+		const int n = min(pVehicle->GetPartCount(), 64);
+		for (int i = 0; i < n; ++i)
+		{
+			IVehiclePart* pPart = pVehicle->GetPart((unsigned int)i);
+			if (!TurretPart(pPart) || TurretUser(pPart) != localId)
+				continue;
+			const Quat q = Quat(Matrix33(pPart->GetLocalTM(true))).GetNormalized();
+			if (!q.IsValid())
+				continue;
+			STurretTx& tx = s_turretTx[i];
+			const float dot = fabsf(q.v.Dot(tx.rot.v) + q.w * tx.rot.w);
+			if (dot > 0.999996f && now - tx.at < 1.0f)    // within 0.3 degree of the last sent
+				continue;
+			tx.rot = q;
+			tx.at = now;
+			if (filled == 0)
+			{
+				params.part1 = (uint8)i;
+				params.rot1 = q;
+			}
+			else
+			{
+				params.part2 = (uint8)i;
+				params.rot2 = q;
+			}
+			if (++filled == 2)
+			{
+				pRules->CoopSendTurret(params, 0);
+				params = CGameRules::CoopTurretParams();
+				params.id = pVehicle->GetEntityId();
+				filled = 0;
+			}
+		}
+		if (filled)
+			pRules->CoopSendTurret(params, 0);
+	}
+
+	// testing: coop_test_parts <vehicle>
+	void CmdTestParts(IConsoleCmdArgs* pArgs)
+	{
+		IEntity* pEntity = pArgs->GetArgCount() > 1 ? gEnv->pEntitySystem->FindEntityByName(pArgs->GetArg(1)) : 0;
+		IVehicle* pVehicle = pEntity && g_pGame ? g_pGame->GetIGameFramework()->GetIVehicleSystem()->GetVehicle(pEntity->GetId()) : 0;
+		if (!pVehicle)
+		{
+			CryLogAlways("[CoopTest] coop_test_parts: no such vehicle here");
+			return;
+		}
+		for (int i = 0, n = pVehicle->GetPartCount(); i < n; ++i)
+		{
+			IVehiclePart* pPart = pVehicle->GetPart((unsigned int)i);
+			if (!pPart)
+				continue;
+			const bool joint = pPart->GetType() == IVehiclePart::eVPT_AnimatedJoint;
+			float yaw = 0.0f, pitch = 0.0f, baseYaw = 0.0f, basePitch = 0.0f, worldYaw = 0.0f, worldPitch = 0.0f;
+			PartAngles(pPart->GetLocalTM(true), yaw, pitch);
+			PartAngles(pPart->GetLocalBaseTM(), baseYaw, basePitch);
+			PartAngles(pPart->GetWorldTM(), worldYaw, worldPitch);
+			const Vec3 t = pPart->GetLocalTM(true).GetTranslation();
+			IVehiclePart* pParent = pPart->GetParent();
+			CryLogAlways("[CoopTest] part %d %s: type %d, parent %s, yawSpeed %.0f, pitchSpeed %.0f, worldSpace %.0f, local yaw %.1f pitch %.1f, base yaw %.1f pitch %.1f, world yaw %.1f pitch %.1f, at (%.2f %.2f %.2f)%s",
+				i, pPart->GetName().c_str(), pPart->GetType(), pParent ? pParent->GetName().c_str() : "-",
+				joint ? *(const float*)((const char*)pPart + 0x88) : 0.0f, joint ? *(const float*)((const char*)pPart + 0x98) : 0.0f,
+				joint ? *(const float*)((const char*)pPart + 0xB0) : 0.0f, yaw, pitch, baseYaw, basePitch, worldYaw, worldPitch, t.x, t.y, t.z,
+				TurretPart(pPart) ? " (a gun's part)" : "");
+		}
 	}
 
 	void CaptureHideBase()
@@ -6077,6 +6327,7 @@ namespace
 		s_hideBase.clear();
 		s_vehSent.clear();
 		s_vehMirror.clear();
+		ResetTurretSync();
 		s_radarHistory.clear();
 		s_radarTempSent.clear();
 		s_seqServer.clear();
@@ -6645,6 +6896,7 @@ namespace
 	void UpdateKillWatch(float frameTime)
 	{
 		UpdateVehicleMirror(frameTime);
+		UpdateTurretSync(frameTime);
 		UpdateDebugVisit(frameTime);
 		UpdateDebugFlow(frameTime);
 		UpdateDebugPhysQuery(frameTime);
@@ -7669,10 +7921,29 @@ void CoopAI::OnVehicleState(uint32 id, uint16 seq, const Vec3& pos, const Quat& 
 	if (VehicleTraced(pEntity))
 		CryLogAlways("[CoopVeh<] %s seq=%u (last %u) pos=(%.1f,%.1f,%.1f) here=(%.1f,%.1f,%.1f) active=%d stuck=%d", pEntity->GetName(), (unsigned)seq,
 			(unsigned)m.seq, pos.x, pos.y, pos.z, pEntity->GetWorldPos().x, pEntity->GetWorldPos().y, pEntity->GetWorldPos().z, (int)m.active, m.stuck);
-	// an older state that came late
-	if (m.have && (int16)(seq - m.seq) <= 0)
+	// an older state that came late (one for a vehicle nothing came for in a
+	// second is taken whatever its number: no wrap of the counter, no host
+	// that started counting afresh, locks a vehicle out)
+	// (only a big jump back: a few numbers back is a state that came late
+	// and stays refused, it moved a stopped copy back)
+	const float now = gEnv->pTimer->GetCurrTime();
+	const bool older = m.have && (int16)(seq - m.seq) <= 0;
+	const uint16 back = (uint16)(m.seq - seq);
+	if (older && (back <= 64 || now - m.at < 1.0f))
+	{
+		++m.refused;
+		if (back > 64 && now - m.refusedAt > 1.0f)
+		{
+			m.refusedAt = now;
+			CryLogAlways("[CoopAI] vehicle %s: state seq %u refused as older than %u (gap %u, %d refused so far)", pEntity->GetName(), (unsigned)seq,
+				(unsigned)m.seq, (unsigned)back, m.refused);
+		}
 		return;
+	}
+	if (older)
+		CryLogAlways("[CoopAI] vehicle %s: state seq %u taken although older than %u (nothing came for %.1f s)", pEntity->GetName(), (unsigned)seq, (unsigned)m.seq, now - m.at);
 	m.seq = seq;
+	m.at = now;
 	const Vec3 here = pEntity->GetWorldPos();
 	const float off = here.GetDistance(pos);
 	IPhysicalEntity* pPhys = pEntity->GetPhysics();
@@ -7702,6 +7973,9 @@ void CoopAI::OnVehicleState(uint32 id, uint16 seq, const Vec3& pos, const Quat& 
 	}
 	if (m.active)
 	{
+		// (not for a turn alone: placed so 20 times a second, a car a script
+		// turned on the spot, the companion's gun fired 54 bursts without a
+		// hit, 6 hits without it; the autotester's companion-gunner-turret-seen)
 		if (off > 0.3f)
 			PlaceVehicle(pEntity, pPhys, pos, rot);
 		if (pPhys)
@@ -7718,6 +7992,62 @@ void CoopAI::OnVehicleState(uint32 id, uint16 seq, const Vec3& pos, const Quat& 
 	static int s_received = 0;
 	if (++s_received % 500 == 0)
 		CryLogAlways("[CoopAI] vehicle states received: %d (last %u, %s)", s_received, (unsigned)seq, pEntity->GetName());
+}
+
+void CoopAI::OnTurretState(uint32 id, int part1, const Quat& rot1, int part2, const Quat& rot2, EntityId fromId, int fromChannel)
+{
+	if (!g_pGame || !gEnv->bMultiplayer)
+		return;
+	IVehicle* pVehicle = g_pGame->GetIGameFramework()->GetIVehicleSystem()->GetVehicle(id);
+	if (!pVehicle)
+		return;
+	if (gEnv->bServer)
+	{
+		// from a client: he must sit in that vehicle
+		IActor* pFrom = fromId ? g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(fromId) : 0;
+		if (!pFrom || pFrom->GetLinkedVehicle() != pVehicle)
+			return;
+	}
+	else if (fromId)
+		return;
+	const float now = gEnv->pTimer->GetCurrTime();
+	int parts[2] = { part1, part2 };
+	const Quat* rots[2] = { &rot1, &rot2 };
+	int taken = 0;
+	for (int k = 0; k < 2; ++k)
+	{
+		IVehiclePart* pPart = parts[k] >= 0 && parts[k] < 255 && parts[k] < pVehicle->GetPartCount() ? pVehicle->GetPart((unsigned int)parts[k]) : 0;
+		// (on the server only the parts the sender's own seat turns: no one
+		// in the back turns another one's gun)
+		if (!pPart || !TurretPart(pPart) || !rots[k]->IsValid() || (gEnv->bServer && TurretUser(pPart) != fromId))
+		{
+			parts[k] = 255;
+			continue;
+		}
+		STurretRx& rx = s_turretRx[((uint64)id << 8) | (uint64)parts[k]];
+		rx.rot = *rots[k];
+		rx.at = now;
+		rx.from = gEnv->bServer ? fromId : TurretUser(pPart);
+		ApplyTurret(pVehicle, parts[k], rx.rot);
+		++taken;
+	}
+	if (gEnv->bServer && taken)
+	{
+		// on to the other clients (not back to the gunner)
+		CGameRules::CoopTurretParams params;
+		params.id = id;
+		params.part1 = (uint8)parts[0];
+		params.rot1 = rot1;
+		params.part2 = (uint8)parts[1];
+		params.rot2 = rot2;
+		if (CGameRules* pRules = g_pGame->GetGameRules())
+			pRules->CoopSendTurret(params, fromChannel);
+	}
+	static int s_received = 0, s_refused = 0;
+	if (!taken && ++s_refused % 200 == 1)
+		CryLogAlways("[CoopAI] gun turns refused: %d (%s, from %s: not the parts of his seat)", s_refused, pVehicle->GetEntity()->GetName(), fromId ? "a client" : "the server");
+	if (taken && ++s_received % 1000 == 1)
+		CryLogAlways("[CoopAI] gun turns received: %d (%s, from %s)", s_received, pVehicle->GetEntity()->GetName(), fromId ? "a client" : "the server");
 }
 
 void CoopAI::OnSyncMirror(int kind, int op, uint32 entity, const char* name, const char* text, int type, float f, bool fromClient)

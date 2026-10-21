@@ -1753,6 +1753,18 @@ void CGameRules::CoopSendVehicle(const CoopVehicleParams& params, int channelId)
 		GetGameObject()->InvokeRMI(ClCoopVehicle(), params, eRMI_ToRemoteClients);
 }
 
+// a gun's turn: a client sends it to the server, the server to every other
+// client (not back to the one at the gun, nor to itself)
+void CGameRules::CoopSendTurret(const CoopTurretParams& params, int exceptChannel)
+{
+	if (!gEnv->bServer)
+		GetGameObject()->InvokeRMI(SvCoopTurret(), params, eRMI_ToServer);
+	else if (exceptChannel)
+		GetGameObject()->InvokeRMI(ClCoopTurret(), params, eRMI_ToOtherClients | eRMI_NoLocalCalls, exceptChannel);
+	else
+		GetGameObject()->InvokeRMI(ClCoopTurret(), params, eRMI_ToRemoteClients);
+}
+
 void CGameRules::CoopSendSyncToServer(int kind, int op, EntityId entity, const char* name, const char* text, int type, float f)
 {
 	CoopSyncParams params;

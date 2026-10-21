@@ -21,7 +21,9 @@ namespace
 }
 
 // the loudest of this process's sessions (0..1), -1 when it has none (or
-// Core Audio does not answer); *pActive: one of them plays
+// Core Audio does not answer); *pActive: one of them plays. The sessions are
+// looked up every 5 s (or when a read fails), their meters read in between:
+// it is read 4 times a second now
 float CoopSoundOutputPeak(bool* pActive)
 {
 	static bool s_com = false;
@@ -33,8 +35,41 @@ float CoopSoundOutputPeak(bool* pActive)
 	}
 	if (pActive)
 		*pActive = false;
-
+	struct SSession { IAudioMeterInformation* pMeter; IAudioSessionControl2* pControl; };
+	static SSession s_sessions[4];
+	static int s_count = 0;
+	static DWORD s_lookedAt = 0;
+	static bool s_lookedOnce = false;
+	const DWORD tick = GetTickCount();
+	bool failed = false;
 	float best = -1.0f;
+	for (int i = 0; i < s_count; ++i)
+	{
+		AudioSessionState state = AudioSessionStateInactive;
+		float peak = 0.0f;
+		if (FAILED(s_sessions[i].pMeter->GetPeakValue(&peak)) || FAILED(s_sessions[i].pControl->GetState(&state)))
+		{
+			failed = true;
+			break;
+		}
+		if (state == AudioSessionStateActive && pActive)
+			*pActive = true;
+		best = best > peak ? best : peak;
+	}
+	if (!failed && s_lookedOnce && tick - s_lookedAt < 5000)
+		return best;
+	// look the sessions up again
+	for (int i = 0; i < s_count; ++i)
+	{
+		Release(s_sessions[i].pMeter);
+		Release(s_sessions[i].pControl);
+	}
+	s_count = 0;
+	s_lookedAt = tick;
+	s_lookedOnce = true;
+	if (pActive)
+		*pActive = false;
+	best = -1.0f;
 	IMMDeviceEnumerator* pEnum = 0;
 	IMMDevice* pDevice = 0;
 	IAudioSessionManager2* pManager = 0;
@@ -62,7 +97,17 @@ float CoopSoundOutputPeak(bool* pActive)
 					*pActive = true;
 				float peak = 0.0f;
 				if (SUCCEEDED(pControl->QueryInterface(__uuidof(IAudioMeterInformation), (void**)&pMeter)) && SUCCEEDED(pMeter->GetPeakValue(&peak)))
+				{
 					best = best > peak ? best : peak;
+					if (s_count < 4)
+					{
+						s_sessions[s_count].pMeter = pMeter;
+						s_sessions[s_count].pControl = pControl2;
+						++s_count;
+						pMeter = 0;
+						pControl2 = 0;
+					}
+				}
 				else if (best < 0.0f)
 					best = 0.0f;
 			}
@@ -76,6 +121,63 @@ float CoopSoundOutputPeak(bool* pActive)
 	Release(pDevice);
 	Release(pEnum);
 	return best;
+}
+
+// the player turned this game's sound off in Windows: the device muted or at
+// volume 0, or this process's session muted or at 0 in the volume mixer (no
+// sound coming out is then no fault). Asked once a second at most
+bool CoopSoundOutputMuted()
+{
+	bool muted = false;
+	IMMDeviceEnumerator* pEnum = 0;
+	IMMDevice* pDevice = 0;
+	IAudioEndpointVolume* pEndpoint = 0;
+	IAudioSessionManager2* pManager = 0;
+	IAudioSessionEnumerator* pSessions = 0;
+	if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), 0, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void**)&pEnum))
+		&& SUCCEEDED(pEnum->GetDefaultAudioEndpoint(eRender, eConsole, &pDevice)))
+	{
+		if (SUCCEEDED(pDevice->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, 0, (void**)&pEndpoint)))
+		{
+			BOOL mute = FALSE;
+			float level = 1.0f;
+			if ((SUCCEEDED(pEndpoint->GetMute(&mute)) && mute) || (SUCCEEDED(pEndpoint->GetMasterVolumeLevelScalar(&level)) && level < 0.01f))
+				muted = true;
+		}
+		if (!muted && SUCCEEDED(pDevice->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, 0, (void**)&pManager))
+			&& SUCCEEDED(pManager->GetSessionEnumerator(&pSessions)))
+		{
+			const DWORD me = GetCurrentProcessId();
+			int count = 0;
+			pSessions->GetCount(&count);
+			for (int i = 0; i < count && !muted; ++i)
+			{
+				IAudioSessionControl* pControl = 0;
+				IAudioSessionControl2* pControl2 = 0;
+				ISimpleAudioVolume* pVolume = 0;
+				DWORD pid = 0;
+				if (SUCCEEDED(pSessions->GetSession(i, &pControl))
+					&& SUCCEEDED(pControl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&pControl2))
+					&& SUCCEEDED(pControl2->GetProcessId(&pid)) && pid == me
+					&& SUCCEEDED(pControl->QueryInterface(__uuidof(ISimpleAudioVolume), (void**)&pVolume)))
+				{
+					BOOL mute = FALSE;
+					float level = 1.0f;
+					if ((SUCCEEDED(pVolume->GetMute(&mute)) && mute) || (SUCCEEDED(pVolume->GetMasterVolume(&level)) && level < 0.01f))
+						muted = true;
+				}
+				Release(pVolume);
+				Release(pControl2);
+				Release(pControl);
+			}
+		}
+	}
+	Release(pSessions);
+	Release(pManager);
+	Release(pEndpoint);
+	Release(pDevice);
+	Release(pEnum);
+	return muted;
 }
 
 // FMOD's own view of its channels (CrySoundSystem lets FMOD mix only 64 at
@@ -220,6 +322,346 @@ int CoopFmodChannelList(void* pSystem, int maxChannels, const char* filter, int 
 		++lines;
 	}
 	return matched;
+}
+
+// the game's window is the one in front (CryGame tells the systems so with
+// ESYSTEM_EVENT_CHANGE_FOCUS; CGame::Update's haveFocus is always true)
+bool CoopWindowFocused(void* hwnd)
+{
+	// (exactly CryGame's test before it tells the systems of a focus change)
+	return hwnd && GetForegroundWindow() == (HWND)hwnd && GetFocus() == (HWND)hwnd;
+}
+
+// FMOD's own picture of the output for the sound watch (CoopSound.cpp): the
+// final mix (System::getWaveData), the master channel group and the groups
+// under it (the event system's categories: paused, muted or at volume 0
+// behind the game's back), the heard channels and whether they move on since
+// the last look. The user's game went silent for 15 s in a firefight with 81
+// channels playing (2026-10-18); the Windows meter alone could not say why
+struct SCoopFmodSnapshot
+{
+	float mixPeak;          // the loudest sample of the final mix, -1: no answer
+	int mixNaN;             // samples that are not numbers
+	bool mixSame;           // the very same samples as at the last look (a mixer that stands)
+	float masterVolume;
+	bool masterPaused, masterMute;
+	float masterPeak;
+	int groups;             // channel groups under the master
+	char groupsOff[192];    // those paused, muted or at volume 0
+	int playing, heard, audible;   // channels playing; of them not virtual; not paused and heard with audibility 0.02 or more
+	int pausedAudible;      // paused ones that would be (the event system pauses a category channel by channel)
+	int moving, frozen;     // audible channels whose position moved on / stood since the last look
+	char top[200];          // the loudest heard channels
+};
+
+namespace
+{
+	typedef int(__stdcall* FnGroupGetFloat)(void*, float*);
+	typedef int(__stdcall* FnGroupGetBool)(void*, bool*);
+	typedef int(__stdcall* FnGroupSetBool)(void*, bool);
+	typedef int(__stdcall* FnGroupGetInt)(void*, int*);
+	typedef int(__stdcall* FnGroupGetGroup)(void*, int, void**);
+	typedef int(__stdcall* FnGroupGetName)(void*, char*, int);
+	typedef int(__stdcall* FnWaveData)(void*, float*, int, int);
+	typedef int(__stdcall* FnGetMaster)(void*, void**);
+	struct SFmodGroupApi
+	{
+		FnGetMaster master;
+		FnWaveData systemWave, groupWave;
+		FnGroupGetFloat volume;
+		FnGroupGetBool paused, mute;
+		FnGroupSetBool setPaused, setMute;
+		FnGroupGetInt numGroups;
+		FnGroupGetGroup group;
+		FnGroupGetName name;
+		bool ok;
+	};
+	const SFmodGroupApi& FmodGroupApi()
+	{
+		static SFmodGroupApi s_api;
+		static bool s_looked = false;
+		if (!s_looked)
+		{
+			s_looked = true;
+			memset(&s_api, 0, sizeof(s_api));
+			if (HMODULE h = GetModuleHandleA("fmodex.dll"))
+			{
+				s_api.master = (FnGetMaster)GetProcAddress(h, "?getMasterChannelGroup@System@FMOD@@QAG?AW4FMOD_RESULT@@PAPAVChannelGroup@2@@Z");
+				s_api.systemWave = (FnWaveData)GetProcAddress(h, "?getWaveData@System@FMOD@@QAG?AW4FMOD_RESULT@@PAMHH@Z");
+				s_api.groupWave = (FnWaveData)GetProcAddress(h, "?getWaveData@ChannelGroup@FMOD@@QAG?AW4FMOD_RESULT@@PAMHH@Z");
+				s_api.volume = (FnGroupGetFloat)GetProcAddress(h, "?getVolume@ChannelGroup@FMOD@@QAG?AW4FMOD_RESULT@@PAM@Z");
+				s_api.paused = (FnGroupGetBool)GetProcAddress(h, "?getPaused@ChannelGroup@FMOD@@QAG?AW4FMOD_RESULT@@PA_N@Z");
+				s_api.mute = (FnGroupGetBool)GetProcAddress(h, "?getMute@ChannelGroup@FMOD@@QAG?AW4FMOD_RESULT@@PA_N@Z");
+				s_api.setPaused = (FnGroupSetBool)GetProcAddress(h, "?setPaused@ChannelGroup@FMOD@@QAG?AW4FMOD_RESULT@@_N@Z");
+				s_api.setMute = (FnGroupSetBool)GetProcAddress(h, "?setMute@ChannelGroup@FMOD@@QAG?AW4FMOD_RESULT@@_N@Z");
+				s_api.numGroups = (FnGroupGetInt)GetProcAddress(h, "?getNumGroups@ChannelGroup@FMOD@@QAG?AW4FMOD_RESULT@@PAH@Z");
+				s_api.group = (FnGroupGetGroup)GetProcAddress(h, "?getGroup@ChannelGroup@FMOD@@QAG?AW4FMOD_RESULT@@HPAPAV12@@Z");
+				s_api.name = (FnGroupGetName)GetProcAddress(h, "?getName@ChannelGroup@FMOD@@QAG?AW4FMOD_RESULT@@PADH@Z");
+			}
+			s_api.ok = s_api.master && s_api.systemWave && s_api.groupWave && s_api.volume && s_api.paused && s_api.mute && s_api.setPaused
+				&& s_api.setMute && s_api.numGroups && s_api.group && s_api.name;
+		}
+		return s_api;
+	}
+
+	// the peak of 256 samples of a mix and how many of them are no numbers
+	float WavePeak(const float* wave, int n, int* pNaN)
+	{
+		float peak = 0.0f;
+		*pNaN = 0;
+		for (int i = 0; i < n; ++i)
+		{
+			const float x = wave[i];
+			if (x != x || x > 1e30f || x < -1e30f)
+				++*pNaN;
+			else if (x > peak)
+				peak = x;
+			else if (-x > peak)
+				peak = -x;
+		}
+		return peak;
+	}
+
+	void CleanName(char* name)
+	{
+		for (char* p = name; *p; ++p)
+			if ((unsigned char)*p < 32 || (unsigned char)*p > 126)
+				*p = '?';
+	}
+
+	// the groups under one: those paused, muted or at volume 0 go into the text
+	void WalkGroups(const SFmodGroupApi& api, void* pGroup, int depth, int& count, char* text, size_t size)
+	{
+		int n = 0;
+		if (depth > 4 || count > 64 || api.numGroups(pGroup, &n) != 0)
+			return;
+		for (int i = 0; i < n && count <= 64; ++i)
+		{
+			void* pChild = 0;
+			if (api.group(pGroup, i, &pChild) != 0 || !pChild)
+				continue;
+			++count;
+			float volume = 1.0f;
+			bool paused = false, mute = false;
+			api.volume(pChild, &volume);
+			api.paused(pChild, &paused);
+			api.mute(pChild, &mute);
+			if (paused || mute || volume < 0.001f)
+			{
+				char name[48] = "?";
+				api.name(pChild, name, sizeof(name) - 1);
+				name[sizeof(name) - 1] = 0;
+				CleanName(name);
+				const size_t used = strlen(text);
+				if (used < size - 60)
+				{
+					_snprintf(text + used, size - used - 1, " %s:%s%s%s", name, paused ? "paused" : "", mute ? "muted" : "", volume < 0.001f ? "vol0" : "");
+					text[size - 1] = 0;
+				}
+			}
+			WalkGroups(api, pChild, depth + 1, count, text, size);
+		}
+	}
+}
+
+// FMOD's final mix now: the loudest sample of every output channel (testing:
+// the meter of a game whose sound goes to a file, no Windows session to ask)
+float CoopFmodMixPeak(void* pSystem)
+{
+	const SFmodGroupApi& api = FmodGroupApi();
+	if (!pSystem || !api.ok || IsBadReadPtr(pSystem, 64))
+		return -1.0f;
+	static float wave[1024];
+	float best = -1.0f;
+	for (int ch = 0; ch < 8; ++ch)
+	{
+		if (api.systemWave(pSystem, wave, 1024, ch) != 0)
+			break;
+		int nan = 0;
+		const float peak = WavePeak(wave, 1024, &nan);
+		best = best > peak ? best : peak;
+	}
+	return best;
+}
+
+bool CoopFmodSnapshot(void* pSystem, int maxChannels, SCoopFmodSnapshot* pOut)
+{
+	typedef int(__stdcall* FnGetChannel)(void*, int, void**);
+	typedef int(__stdcall* FnGetBool)(void*, bool*);
+	typedef int(__stdcall* FnGetPtr)(void*, void**);
+	typedef int(__stdcall* FnGetName)(void*, char*, int);
+	typedef int(__stdcall* FnGetUIntUnit)(void*, unsigned int*, unsigned int);
+	typedef int(__stdcall* FnGetFloat)(void*, float*);
+	static FnGetChannel s_channel = 0;
+	static FnGetBool s_isPlaying = 0, s_isVirtual = 0, s_paused = 0;
+	static FnGetPtr s_sound = 0;
+	static FnGetName s_name = 0;
+	static FnGetUIntUnit s_position = 0;
+	static FnGetFloat s_audibility = 0;
+	static bool s_looked = false;
+	// per channel: its sound and position at the last look
+	struct SLast { void* pSound; unsigned int position; };
+	static SLast s_last[4096];
+	static float s_lastMix[1024];
+	static bool s_haveLastMix = false;
+	if (!s_looked)
+	{
+		s_looked = true;
+		memset(s_last, 0, sizeof(s_last));
+		if (HMODULE h = GetModuleHandleA("fmodex.dll"))
+		{
+			s_channel = (FnGetChannel)GetProcAddress(h, "?getChannel@System@FMOD@@QAG?AW4FMOD_RESULT@@HPAPAVChannel@2@@Z");
+			s_isPlaying = (FnGetBool)GetProcAddress(h, "?isPlaying@Channel@FMOD@@QAG?AW4FMOD_RESULT@@PA_N@Z");
+			s_isVirtual = (FnGetBool)GetProcAddress(h, "?isVirtual@Channel@FMOD@@QAG?AW4FMOD_RESULT@@PA_N@Z");
+			s_paused = (FnGetBool)GetProcAddress(h, "?getPaused@Channel@FMOD@@QAG?AW4FMOD_RESULT@@PA_N@Z");
+			s_sound = (FnGetPtr)GetProcAddress(h, "?getCurrentSound@Channel@FMOD@@QAG?AW4FMOD_RESULT@@PAPAVSound@2@@Z");
+			s_name = (FnGetName)GetProcAddress(h, "?getName@Sound@FMOD@@QAG?AW4FMOD_RESULT@@PADH@Z");
+			s_position = (FnGetUIntUnit)GetProcAddress(h, "?getPosition@Channel@FMOD@@QAG?AW4FMOD_RESULT@@PAII@Z");
+			s_audibility = (FnGetFloat)GetProcAddress(h, "?getAudibility@Channel@FMOD@@QAG?AW4FMOD_RESULT@@PAM@Z");
+		}
+	}
+	const SFmodGroupApi& api = FmodGroupApi();
+	memset(pOut, 0, sizeof(*pOut));
+	pOut->mixPeak = pOut->masterPeak = -1.0f;
+	pOut->masterVolume = -1.0f;
+	if (!pSystem || !api.ok || !s_channel || !s_isPlaying || !s_isVirtual || !s_paused || !s_sound || !s_name || !s_position || !s_audibility
+		|| maxChannels <= 0 || maxChannels > 4096 || IsBadReadPtr(pSystem, 64))
+		return false;
+	// the final mix: every output channel (a sound behind or to the right
+	// is not in the front left one), 1024 samples of each
+	static float wave[1024];
+	for (int ch = 0; ch < 8; ++ch)
+	{
+		if (api.systemWave(pSystem, wave, 1024, ch) != 0)
+			break;
+		int nan = 0;
+		const float peak = WavePeak(wave, 1024, &nan);
+		pOut->mixPeak = pOut->mixPeak > peak ? pOut->mixPeak : peak;
+		pOut->mixNaN += nan;
+		if (ch == 0)
+		{
+			pOut->mixSame = s_haveLastMix && peak > 1e-6f && memcmp(wave, s_lastMix, sizeof(s_lastMix)) == 0;
+			memcpy(s_lastMix, wave, sizeof(s_lastMix));
+			s_haveLastMix = true;
+		}
+	}
+	// the master group and the groups under it
+	void* pMaster = 0;
+	if (api.master(pSystem, &pMaster) == 0 && pMaster)
+	{
+		api.volume(pMaster, &pOut->masterVolume);
+		api.paused(pMaster, &pOut->masterPaused);
+		api.mute(pMaster, &pOut->masterMute);
+		int nan = 0;
+		if (api.groupWave(pMaster, wave, 256, 0) == 0)
+			pOut->masterPeak = WavePeak(wave, 256, &nan);
+		WalkGroups(api, pMaster, 0, pOut->groups, pOut->groupsOff, sizeof(pOut->groupsOff));
+	}
+	// the channels
+	int topN = 0;
+	for (int i = 0; i < maxChannels; ++i)
+	{
+		void* pChannel = 0;
+		void* pSound = 0;
+		bool playing = false, isVirtual = false, paused = false;
+		unsigned int position = 0;
+		float audibility = 0.0f;
+		if (s_channel(pSystem, i, &pChannel) != 0 || !pChannel || s_isPlaying(pChannel, &playing) != 0 || !playing)
+		{
+			s_last[i].pSound = 0;
+			continue;
+		}
+		++pOut->playing;
+		if (s_isVirtual(pChannel, &isVirtual) != 0 || isVirtual)
+		{
+			s_last[i].pSound = 0;
+			continue;
+		}
+		++pOut->heard;
+		s_sound(pChannel, &pSound);
+		s_position(pChannel, &position, 1);	// FMOD_TIMEUNIT_MS
+		s_paused(pChannel, &paused);
+		if (s_audibility(pChannel, &audibility) == 0 && audibility >= 0.02f && paused)
+			++pOut->pausedAudible;
+		else if (audibility >= 0.02f)
+		{
+			++pOut->audible;
+			if (s_last[i].pSound == pSound && pSound && !paused)
+			{
+				if (position == s_last[i].position)
+					++pOut->frozen;
+				else
+					++pOut->moving;
+			}
+			if (audibility >= 0.1f && topN < 4 && pSound)
+			{
+				char name[48] = "?";
+				s_name(pSound, name, sizeof(name) - 1);
+				name[sizeof(name) - 1] = 0;
+				CleanName(name);
+				const size_t used = strlen(pOut->top);
+				_snprintf(pOut->top + used, sizeof(pOut->top) - used - 1, " %s(%.2f,%u ms)", name, audibility, position);
+				pOut->top[sizeof(pOut->top) - 1] = 0;
+				++topN;
+			}
+		}
+		s_last[i].pSound = pSound;
+		s_last[i].position = position;
+	}
+	return true;
+}
+
+// the master channel group (and any group under it called master) unpaused
+// and unmuted; what was set right goes into the text. Returns how many
+// settings changed. With fault: as a fault would, the master paused (1) or
+// muted (2), for the tests
+int CoopFmodRepairGroups(void* pSystem, int fault, char* what, size_t size)
+{
+	const SFmodGroupApi& api = FmodGroupApi();
+	what[0] = 0;
+	void* pMaster = 0;
+	if (!pSystem || !api.ok || IsBadReadPtr(pSystem, 64) || api.master(pSystem, &pMaster) != 0 || !pMaster)
+		return 0;
+	if (fault == 1)
+		return api.setPaused(pMaster, true) == 0 ? 1 : 0;
+	if (fault == 2)
+		return api.setMute(pMaster, true) == 0 ? 1 : 0;
+	int changed = 0;
+	bool paused = false, mute = false;
+	if (api.paused(pMaster, &paused) == 0 && paused && api.setPaused(pMaster, false) == 0)
+	{
+		++changed;
+		strncat(what, " master unpaused", size - strlen(what) - 1);
+	}
+	if (api.mute(pMaster, &mute) == 0 && mute && api.setMute(pMaster, false) == 0)
+	{
+		++changed;
+		strncat(what, " master unmuted", size - strlen(what) - 1);
+	}
+	// (the event system's own master category one level down)
+	int n = 0;
+	if (api.numGroups(pMaster, &n) == 0)
+		for (int i = 0; i < n && i < 32; ++i)
+		{
+			void* pChild = 0;
+			char name[48] = "";
+			if (api.group(pMaster, i, &pChild) != 0 || !pChild || api.name(pChild, name, sizeof(name) - 1) != 0)
+				continue;
+			name[sizeof(name) - 1] = 0;
+			if (_stricmp(name, "master") != 0)
+				continue;
+			if (api.paused(pChild, &paused) == 0 && paused && api.setPaused(pChild, false) == 0)
+			{
+				++changed;
+				strncat(what, " category master unpaused", size - strlen(what) - 1);
+			}
+			if (api.mute(pChild, &mute) == 0 && mute && api.setMute(pChild, false) == 0)
+			{
+				++changed;
+				strncat(what, " category master unmuted", size - strlen(what) - 1);
+			}
+		}
+	return changed;
 }
 
 // In a busy fight a new sound's quiet parts (a shot's far or near layer,

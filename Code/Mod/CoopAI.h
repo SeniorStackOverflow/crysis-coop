@@ -112,6 +112,9 @@ namespace CoopAI
 	bool ServerSaysHidden(EntityId id);
 	// client: the server's state of a vehicle (see UpdateVehicleMirror)
 	void OnVehicleState(uint32 id, uint16 seq, const Vec3& pos, const Quat& rot, const Vec3& vel, const Vec3& w);
+	// the turn of a vehicle's gun from the machine of the one at it (on the
+	// server: fromId is that player, from his channel; on a client both 0)
+	void OnTurretState(uint32 id, int part1, const Quat& rot1, int part2, const Quat& rot2, EntityId fromId, int fromChannel);
 	int DebugFlags();
 
 	// is the entity bound to the network (known to clients)? logs once per

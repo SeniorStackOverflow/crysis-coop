@@ -218,6 +218,53 @@ void CGameRules::ServerHit(const HitInfo &hitInfo)
 		}
 	}
 
+	// Crysis Coop testing (coop_test_shottrace 1): a joined player's shot
+	// against where the server's copy of him points (at a vehicle's gun the
+	// gun's part, on foot his aim): the host saw a gun fixed to the car fire
+	// out sideways (2026-10-18)
+	static ICVar* pShotTrace = gEnv->pConsole->GetCVar("coop_test_shottrace");
+	if (pShotTrace && pShotTrace->GetIVal() && gEnv->bServer && info.shooterId && info.dir.GetLengthSquared() > 0.5f)
+	{
+		IActor* pShooter = m_pActorSystem->GetActor(info.shooterId);
+		if (pShooter && pShooter->IsPlayer() && pShooter != m_pGameFramework->GetClientActor())
+		{
+			Vec3 points(ZERO);
+			string what;
+			if (IVehicle* pVehicle = pShooter->GetLinkedVehicle())
+			{
+				// the last turning joint of the gun he turns (the one the
+				// barrel sits on; the seat that turns a part is at +0x6c of
+				// it, build 6156): not another seat's gun in a tank
+				for (int i = 0, n = pVehicle->GetPartCount(); i < n; ++i)
+					if (IVehiclePart* pPart = pVehicle->GetPart((unsigned int)i))
+						if (pPart->GetType() == IVehiclePart::eVPT_AnimatedJoint
+							&& (*(const float*)((const char*)pPart + 0x88) != 0.0f || *(const float*)((const char*)pPart + 0x98) != 0.0f))
+							if (IVehicleSeat* pSeat = *(IVehicleSeat**)((char*)pPart + 0x6c))
+								if (pSeat->GetPassenger(true) == info.shooterId)
+								{
+									points = pPart->GetWorldTM().GetColumn1();
+									what.Format("gun part %s", pPart->GetName().c_str());
+								}
+			}
+			else if (IMovementController* pMC = pShooter->GetMovementController())
+			{
+				SMovementState state;
+				pMC->GetMovementState(state);
+				points = state.aimDirection;
+				what = "aim";
+			}
+			if (points.GetLengthSquared() > 0.5f)
+			{
+				IEntity* pTarget = gEnv->pEntitySystem->GetEntity(info.targetId);
+				const Vec3 a = points.GetNormalized(), b = info.dir.GetNormalized();
+				const float deg = RAD2DEG(acosf(clamp_tpl(a.Dot(b), -1.0f, 1.0f)));
+				CryLogAlways("[CoopShotDir] %s hit %s: the shot %.0f deg off the server copy's %s (it yaw %.0f pitch %.0f, the shot yaw %.0f pitch %.0f)", pShooter->GetEntity()->GetName(),
+					pTarget ? pTarget->GetName() : "-", deg, what.c_str(), RAD2DEG(atan2f(-a.x, a.y)), RAD2DEG(asinf(clamp_tpl(a.z, -1.0f, 1.0f))),
+					RAD2DEG(atan2f(-b.x, b.y)), RAD2DEG(asinf(clamp_tpl(b.z, -1.0f, 1.0f))));
+			}
+		}
+	}
+
 	if (m_processingHit)
 	{
 		m_queuedHits.push(info);
@@ -1252,6 +1299,24 @@ IMPLEMENT_RMI(CGameRules, ClCoopShot)
 IMPLEMENT_RMI(CGameRules, ClCoopVehicle)
 {
 	CoopAI::OnVehicleState(params.id, params.seq, params.pos, params.rot, params.vel, params.w);
+	return true;
+}
+
+//------------------------------------------------------------------------
+IMPLEMENT_RMI(CGameRules, ClCoopTurret)
+{
+	CoopAI::OnTurretState(params.id, params.part1, params.rot1, params.part2, params.rot2, 0, 0);
+	return true;
+}
+
+//------------------------------------------------------------------------
+IMPLEMENT_RMI(CGameRules, SvCoopTurret)
+{
+	// Crysis Coop: a client at a vehicle's gun turned it (the sender is the
+	// channel's player; it must sit in that vehicle)
+	const int channelId = m_pGameFramework->GetGameChannelId(pNetChannel);
+	if (CActor* pActor = GetActorByChannelId(channelId))
+		CoopAI::OnTurretState(params.id, params.part1, params.rot1, params.part2, params.rot2, pActor->GetEntityId(), channelId);
 	return true;
 }
 
