@@ -153,6 +153,9 @@ namespace CoopAI
 	void SetInventoryCarry(const char* level, const std::map<string, SInventory>& inventories);
 	// server: a saved game was loaded into the running level
 	void OnGameLoaded(bool clientsKept = false);
+	// the voice-chat listeners AI soldiers have (each one's stream holds an
+	// FMOD voice with silence): released; how many
+	int ReleaseAIVoiceListeners();
 	// for that long after a load: physics events of deleted entities go no further
 	void GuardPhysicsEvents(float seconds);
 	// "rigid (type 2), 3 parts, 200 kg, at x y z, size ..., speed ..." for the log

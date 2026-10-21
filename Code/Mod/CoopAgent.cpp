@@ -578,6 +578,26 @@ namespace
 		float waitedAt;
 		float fineGridAt;       // the quarter-metre squares looked at last then
 		float fightOpen, fightHidden, fightPeek, fightBack;   // seconds this minute
+		// (the user's game of 2026-10-21: it ran 12-28 m off under fire with a
+		// cover 4-11 m away, never cloaked, went back to a cover from before a
+		// load) where a fall back started, how its cover hides it, since when
+		// it is there, when its fight state was last renewed, lying down till
+		// when, where it goes cloaked, when a teammate was seen go down
+		Vec3 retreatFrom;
+		bool coverProne;        // the cover hides it lying down only
+		float coverReachedAt;   // in the cover since (-1: not there)
+		float freshAt;          // its fight state renewed then (down, up, put elsewhere)
+		float proneUntil;       // lying down till then
+		Vec3 cloakGoal;         // moving cloaked to there (zero: the cover not known yet)
+		float cloakSince;       // cloakEscape set then
+		float cloakSeconds, proneSeconds;   // this minute (for the log)
+		int cloaks;             // cloaked moves begun this minute
+		bool cloakForRevive;    // the cloaked move goes to a downed teammate
+		float coverBest, coverBestAt;   // the nearest it came to its cover, when
+		float uncloakAt;        // out of the cloak then (no shot for a moment: the server may still have it cloaked)
+		float tetherRadiusFor;  // the tether round the downed teammate it goes to (set once for him)
+		float cloakBest, cloakBestAt;   // the nearest it came to the cloaked move's goal, when
+		std::map<EntityId, float> downAt;   // a teammate seen go down then
 		SBrain(): order(eO_Free), spot(ZERO), haveSpot(false), fireAtWill(true), enemy(0), burstUntil(0), pauseUntil(0), reloadAt(0),
 			switchAt(0), attackHeld(false), progGoal(ZERO), progBest(1e9f), progAt(0), progSeen(-100), progPath(-100), stuck(0),
 			slideDir(ZERO), slideUntil(0), localFor(ZERO), localAt(-100), localStage(0), localPlans(0), nextCheckFor(ZERO), toCheckFor(ZERO),
@@ -588,7 +608,9 @@ namespace
 			cover(ZERO), haveCover(false), coverAskAt(0), retreatSince(-100), recoveredAt(-100), spreadHeldAt(-100), smallFarAt(-100),
 			coverAt(-100), peekUntil(0), peekUp(true), coverPeek(0), peekSince(0), peekSeenAt(-100), peekSide(1), openSince(-1), peeks(0), leanPeeks(0), hitsConfirmed(0), leanHoldUntil(0), leanHoldSide(0),
 			peekHits(0), hiddenReloads(0), zoomAt(0), zoomWant(false), cloakEscape(false), strengthJumpAt(-1), strengthJumpDir(ZERO), sjPlace(ZERO), sjPlaceAt(-100), sjTries(0), heavyHitAt(-100), retreatNowAt(-100), ownNoneFor(ZERO), ownNoneAt(-100), longWayFor(ZERO), longWayAt(-100), circleAt(ZERO), circleSince(-1), circleLast(-100), circleBest(0), meleeAt(0), meleeWantUntil(0),
-			suitSwitches(0), suitHoldUntil(0), coverOpenAsk(false), pathAskGoal(ZERO), waitedFor(ZERO), waitedAt(-100), fineGridAt(-100), fightOpen(0), fightHidden(0), fightPeek(0), fightBack(0) {}
+			suitSwitches(0), suitHoldUntil(0), coverOpenAsk(false), pathAskGoal(ZERO), waitedFor(ZERO), waitedAt(-100), fineGridAt(-100), fightOpen(0), fightHidden(0), fightPeek(0), fightBack(0),
+			retreatFrom(ZERO), coverProne(false), coverReachedAt(-1), freshAt(-100), proneUntil(0), cloakGoal(ZERO), cloakSince(-100),
+			cloakSeconds(0), proneSeconds(0), cloaks(0), cloakForRevive(false), coverBest(1e9f), coverBestAt(-100), uncloakAt(-100), tetherRadiusFor(12), cloakBest(1e9f), cloakBestAt(-100) {}
 	} s_bot;
 
 	// where the downed teammates lie in the host's game, and when it said so
@@ -621,6 +643,40 @@ namespace
 		return n;
 	}
 
+	// what it was doing in a fight is over: it went down or got up, or it is
+	// somewhere else at once (a checkpoint load, the host's game moved it).
+	// The cover, the way, the fall back and who shot it were of another place
+	// and moment: after a load it walked 35 m back to the cover it had died
+	// by, the fall back went on after its death (the user's game of
+	// 2026-10-21)
+	void ResetFight(const char* why)
+	{
+		const bool had = s_bot.retreating || s_bot.haveCover || !s_threats.empty() || s_bot.cloakEscape;
+		s_bot.retreating = false;
+		s_bot.retreatNowAt = -100.0f;
+		s_bot.cloakEscape = false;
+		s_bot.haveCover = false;
+		s_bot.coverAskAt = 0.0f;
+		s_bot.coverReachedAt = -1.0f;
+		s_bot.coverProne = false;
+		s_bot.path.clear();
+		s_bot.pathAt = -100.0f;
+		s_bot.loot = 0;
+		s_bot.openSince = -1.0f;
+		s_bot.peekUp = false;
+		s_bot.heavyHitAt = -100.0f;
+		s_bot.recoveredAt = -100.0f;
+		s_bot.hitAt = -100.0f;
+		s_bot.proneUntil = 0.0f;
+		s_bot.enemy = 0;
+		s_bot.cloakForRevive = false;
+		s_bot.freshAt = Now();
+		s_threats.clear();
+		s_hitTimes.clear();
+		if (had)
+			CryLogAlways("[CoopAgent] the fight so far is over (%s): no cover, fall back or shooters kept", why);
+	}
+
 	// the one who shot it last within that long (0: nobody)
 	EntityId LastShooter(float within)
 	{
@@ -646,7 +702,8 @@ namespace
 		bool jump;
 		bool crouch;
 		int lean;               // -1 left, 1 right (out round a corner of its cover)
-		SControl(): moveDir(ZERO), look(false), yaw(0), pitch(0), turnRate(6.0f), sprint(false), jump(false), crouch(false), lean(0) {}
+		bool prone;             // lying down (crouch wins over it)
+		SControl(): moveDir(ZERO), look(false), yaw(0), pitch(0), turnRate(6.0f), sprint(false), jump(false), crouch(false), lean(0), prone(false) {}
 	} s_ctl;
 
 	void Press(CPlayer* pPlayer, const ActionId& action, bool press)
@@ -1317,6 +1374,15 @@ namespace
 			pRules->CoopSendSyncToServer(15, 5, 0, where.c_str(), "", 0, 0.0f);
 	}
 
+	// where a downed teammate lies that it fights for: no cover farther from
+	// him than that, no fall back away from him (it fell back 22-26 m from
+	// the host it was about to revive and died, everybody down; the user's
+	// game of 2026-10-21). Set by the revive each frame
+	Vec3 s_tether(ZERO);
+	float s_tetherRadius = 0.0f;
+
+	void RecentShooters(float within, std::vector<IActor*>& out);
+
 	// asks the host's game for cover from an enemy: a place close by out of
 	// its sight that it can walk to (the answer comes as OnPath, op 1)
 	// (targetFirst: a place with a shot at him above all, the host's search
@@ -1327,22 +1393,33 @@ namespace
 			return;
 		s_bot.coverAskAt = Now() + 4.0f;
 		s_bot.coverOpenAsk = open;
-		// who shot it lately first (the newest), then the one it fights: it
-		// hid from the one it aimed at while others shot it
-		std::vector<std::pair<float, EntityId> > shooters;
-		for (std::map<EntityId, SThreat>::const_iterator it = s_threats.begin(); it != s_threats.end(); ++it)
-			if (Now() - it->second.last < 6.0f && it->first != pThreat->GetEntityId())
-				if (IActor* p = ActorOf(it->first))
-					if (p->GetHealth() > 0 && Hostile(p))
-						shooters.push_back(std::make_pair(-it->second.last, it->first));
-		std::sort(shooters.begin(), shooters.end());
-		string names;
+		// "A,B|C,D": the cover must hide it from A and B - those who hit it
+		// in the last 3 s, the newest first (or the target first: a place
+		// with a shot at him) - C and D only count: who hit it before, the
+		// one it fights. It hid from one while the one it fought hit it 7
+		// times from 25 m, the user's game of 2026-10-21. "@x,y,z,r": none
+		// farther from a downed teammate it fights for
+		std::vector<IActor*> recent, older, hard, soft;
+		RecentShooters(3.0f, recent);
+		RecentShooters(6.0f, older);
 		if (targetFirst)
-			names = pThreat->GetEntity()->GetName();
-		for (size_t i = 0; i < shooters.size() && i < 2; ++i)
-			names += (names.empty() ? string() : string(",")) + NameOf(shooters[i].second);
-		if (!targetFirst)
-			names += (names.empty() ? string() : string(",")) + pThreat->GetEntity()->GetName();
+			hard.push_back(pThreat);
+		for (size_t i = 0; i < recent.size() && hard.size() < 3; ++i)
+			if (std::find(hard.begin(), hard.end(), recent[i]) == hard.end())
+				hard.push_back(recent[i]);
+		for (size_t i = 0; i < older.size() && soft.size() < 2; ++i)
+			if (std::find(hard.begin(), hard.end(), older[i]) == hard.end())
+				soft.push_back(older[i]);
+		if (std::find(hard.begin(), hard.end(), pThreat) == hard.end() && std::find(soft.begin(), soft.end(), pThreat) == soft.end())
+			(hard.empty() ? hard : soft).push_back(pThreat);
+		string names;
+		for (size_t i = 0; i < hard.size(); ++i)
+			names += (i ? "," : "") + string(hard[i]->GetEntity()->GetName());
+		names += "|";
+		for (size_t i = 0; i < soft.size(); ++i)
+			names += (i ? "," : "") + string(soft[i]->GetEntity()->GetName());
+		if (s_tetherRadius > 0.0f)
+			names += string().Format("@%.1f,%.1f,%.1f,%.1f", s_tether.x, s_tether.y, s_tether.z, s_tetherRadius);
 		if (CGameRules* pRules = g_pGame->GetGameRules())
 			pRules->CoopSendSyncToServer(15, 6, 0, names.c_str(), "", 0, 0.0f);
 	}
@@ -2266,6 +2343,70 @@ namespace
 	// the suit has healed it (it would die standing there); true meanwhile
 	void FightStep(CPlayer* pMe, const Vec3& eye, IActor* pEnemy);
 
+	// those who hit it within that long, alive and hostile, the newest first
+	void RecentShooters(float within, std::vector<IActor*>& out)
+	{
+		std::vector<std::pair<float, EntityId> > list;
+		for (std::map<EntityId, SThreat>::const_iterator it = s_threats.begin(); it != s_threats.end(); ++it)
+			if (Now() - it->second.last < within)
+				if (IActor* p = ActorOf(it->first))
+					if (p->GetHealth() > 0 && Hostile(p))
+						list.push_back(std::make_pair(-it->second.last, it->first));
+		std::sort(list.begin(), list.end());
+		out.clear();
+		for (size_t i = 0; i < list.size(); ++i)
+			out.push_back(ActorOf(list[i].second));
+	}
+
+	// a head that high above its feet there: none of them sees it (something
+	// solid between it and their eyes)
+	bool HiddenFrom(CPlayer* pMe, const Vec3& feet, float head, const std::vector<IActor*>& from)
+	{
+		const Vec3 p = feet + Vec3(0, 0, head);
+		for (size_t i = 0; i < from.size(); ++i)
+			if (from[i] && Visible(pMe, p, from[i]->GetEntity(), EyePos(from[i])))
+				return false;
+		return true;
+	}
+
+	// the energy a cloaked walk of that long takes (the suit drains 5 a metre
+	// walking cloaked, nothing back while cloaked), with some to spare
+	float CloakNeed(float metres)
+	{
+		return 5.0f * metres + 25.0f;
+	}
+
+	// a mode the suit refused a moment ago (SuitStep), till then
+	int s_refusedMode = -1;
+	float s_refusedUntil = 0.0f;
+
+	// the suit can cloak now: the campaign gave it the mode, not refused
+	// lately (else every cloaked move began again each 3 s, unarmed: the
+	// way to a downed teammate without a shot back, the review)
+	bool CanCloak(CPlayer* pMe)
+	{
+		CNanoSuit* pSuit = pMe ? pMe->GetNanoSuit() : 0;
+		return pSuit && pSuit->IsModeActive(NANOMODE_CLOAK) && !(s_refusedMode == NANOMODE_CLOAK && Now() < s_refusedUntil);
+	}
+
+	// to there out of their sight (SuitStep cloaks, FightStep holds its fire,
+	// the cloak ends there or when one comes close)
+	void StartCloakedMove(CPlayer* pMe, const Vec3& goal, const char* why, float energy)
+	{
+		// (a burst still held: the next shot from the cloak takes all the
+		// energy on the server, the review)
+		if (pMe)
+			Fire(pMe, false);
+		s_bot.cloakBest = 1e9f;
+		s_bot.cloakBestAt = Now();
+		s_bot.cloakEscape = true;
+		s_bot.cloakForRevive = false;
+		s_bot.cloakGoal = goal;
+		s_bot.cloakSince = Now();
+		++s_bot.cloaks;
+		Event("cloaks: %s (energy %.0f)", why, energy);
+	}
+
 	bool Survive(CPlayer* pMe, const Vec3& pos, const Vec3& eye, IActor* pEnemy)
 	{
 		const float health = (float)pMe->GetHealth() / (float)max(1, pMe->GetMaxHealth());
@@ -2304,6 +2445,8 @@ namespace
 			if (s_bot.retreating)
 			{
 				s_bot.recoveredAt = Now();
+				s_bot.cloakEscape = false;
+				Event("the fall back is over: no enemy left about (health %d)", pMe->GetHealth());
 				if (CNanoSuit* pSuit = pMe->GetNanoSuit())
 					if (pSuit->GetMode() == NANOMODE_CLOAK)
 						pSuit->SetMode(NANOMODE_DEFENSE);
@@ -2334,20 +2477,74 @@ namespace
 		const bool pounded = (heavy && Now() - s_bot.recoveredAt > 2.0f)
 			|| (HitsWithin(3.0f) >= 2 && energy >= 50.0f && (energy < 150.0f || health < 0.75f) && Now() - s_bot.recoveredAt > 8.0f);
 		// (the armor gone, each hit on the health: away before it is half
-		// gone, not at 60 % with four soldiers round it)
-		const bool bare = HitsWithin(3.0f) >= 2 && energy < 20.0f && health < 0.95f && Now() - s_bot.recoveredAt > 8.0f;
+		// gone, not at 60 % with four soldiers round it; not at 92 % either:
+		// 4 of the user's 6 fall backs began there, 2026-10-21. 3 s after it
+		// came back, not 8: it stood in fire with no armor so)
+		const bool bare = HitsWithin(3.0f) >= 2 && energy < 20.0f && health < 0.8f && Now() - s_bot.recoveredAt > 3.0f;
 		const bool retreatNow = Now() - s_bot.retreatNowAt < 1.0f;
 		if (!s_bot.retreating && (health < limit || pounded || bare || retreatNow))
 		{
 			s_bot.retreatNowAt = -100.0f;
-			s_bot.cloakEscape = energy >= (heavy ? 40.0f : 50.0f);
-			if (s_bot.cloakEscape)
-				Event("cloaks to get away (health %d, energy %.0f, %d hits in 3 s)", pMe->GetHealth(), energy, HitsWithin(3.0f));
 			s_bot.retreating = true;
 			s_bot.retreatSince = Now();
-			s_bot.haveCover = false;
-			s_bot.coverAskAt = 0.0f;
-			Event("hurt (health %d): falls back to cover", pMe->GetHealth());
+			s_bot.retreatFrom = pos;
+			// the cover it is in, or the place it is at when that hides it from
+			// those shooting at it: it gets down there (each fall back was a run
+			// of 4 m and more in their fire, 6 hits on the way, the user's game
+			// of 2026-10-21); not from a heavy gun that shot it there
+			std::vector<IActor*> shooters;
+			RecentShooters(3.0f, shooters);
+			if (shooters.empty())
+				shooters.push_back(pEnemy);
+			const bool inCover = s_bot.haveCover && Dist2D(s_bot.cover, pos) < 1.5f;
+			const bool hiddenCrouching = HiddenFrom(pMe, pos, 1.0f, shooters);
+			const bool hiddenLying = hiddenCrouching || HiddenFrom(pMe, pos, 0.4f, shooters);
+			const char* how = "falls back to cover";
+			// (its cover only while it still hides it: one flanked is no cover;
+			// never where a heavy gun just hit it: its rounds go through planks;
+			// never by a vehicle shot half to pieces: the soldiers shoot it till
+			// it blows, as FindCover's wrecks, the review)
+			bool byWreck = false;
+			{
+				IVehicleIteratorPtr pVs = g_pGame->GetIGameFramework()->GetIVehicleSystem()->CreateVehicleIterator();
+				while (IVehicle* pV = pVs->Next())
+					if (!pV->IsDestroyed() && pV->GetDamageRatio() > 0.5f && Dist2D(pV->GetEntity()->GetWorldPos(), pos) < 8.0f)
+					{
+						byWreck = true;
+						break;
+					}
+			}
+			if (!retreatNow && Now() - s_bot.heavyHitAt > 1.5f && hiddenLying && !byWreck)
+			{
+				s_bot.coverBest = 0.0f;
+				s_bot.coverBestAt = Now();
+				s_bot.cover = pos;
+				s_bot.haveCover = true;
+				s_bot.coverAt = Now();
+				s_bot.coverPeek = 3;
+				s_bot.coverProne = !hiddenCrouching;
+				s_bot.coverReachedAt = Now();
+				how = inCover ? (s_bot.coverProne ? "lies down in its cover" : "stays down in its cover")
+					: s_bot.coverProne ? "lies down where it is (hidden so)" : "gets down where it is (hidden crouching)";
+			}
+			else
+			{
+				s_bot.haveCover = false;
+				s_bot.coverAskAt = 0.0f;
+				// (cloaked to the cover when the energy is enough for the way:
+				// the cover about 10 m off until the host's game names it; a
+				// heavy gun's next hits come at once, a short way cloaked then)
+				const bool closeOne = s_bot.enemy && ActorOf(s_bot.enemy) && Now() - s_bot.enemySeenAt < 1.0f
+					&& ActorOf(s_bot.enemy)->GetEntity()->GetWorldPos().GetDistance(pos) < 8.0f;
+				if (!s_bot.cloakEscape && !closeOne && energy >= (heavy ? 40.0f : CloakNeed(10.0f)) && CanCloak(pMe))
+				{
+					string why;
+					why.Format("to get away to cover (health %d, %d hits in 3 s)", pMe->GetHealth(), HitsWithin(3.0f));
+					StartCloakedMove(pMe, Vec3(ZERO), why.c_str(), energy);
+				}
+			}
+			Event("hurt (health %d, energy %.0f): %s%s", pMe->GetHealth(), energy, how,
+				s_bot.cloakEscape ? ", cloaked" : energy < CloakNeed(10.0f) ? " (no energy for the cloak)" : "");
 		}
 		// (a heavy gun about: back only with the suit charged again, not
 		// into its fire with the armor half gone, each hit on the health)
@@ -2355,6 +2552,7 @@ namespace
 			|| (health > 0.85f && energy > 80.0f && Now() - s_bot.retreatSince > 12.0f)) || Now() - s_bot.retreatSince > 40.0f))
 		{
 			s_bot.cloakEscape = false;
+			s_bot.proneUntil = 0.0f;
 			s_bot.retreating = false;
 			s_bot.recoveredAt = Now();
 			Event("recovered (health %d): back to it", pMe->GetHealth());
@@ -2371,12 +2569,9 @@ namespace
 		// (a cloak on its way counts too: SuitStep switches to it only at the
 		// end of this think, and a shot at 20 m took the cloak back at once)
 		const bool cloakedNow = pSuit && pSuit->GetMode() == NANOMODE_CLOAK;
-		// (a cloak wanted that did not come in 3 s: the suit refused it or
-		// its energy went; no reason to hold its fire for it)
-		if (s_bot.cloakEscape && !cloakedNow && Now() - s_bot.retreatSince > 3.0f)
-			s_bot.cloakEscape = false;
+		// (a cloak wanted that did not come: SuitStep gives it up after 3 s)
 		const float enemyDist = enemyAim.GetDistance(eye);
-		const bool engage = seen && enemyDist < (cloakedNow || s_bot.cloakEscape ? 10.0f : 30.0f) && !pEnemy->GetLinkedVehicle();
+		const bool engage = seen && enemyDist < (cloakedNow || s_bot.cloakEscape ? 8.0f : 30.0f) && !pEnemy->GetLinkedVehicle();
 		// (over 10 m a moving rifle's spread holds every burst: it stops for
 		// 0.7 s of every 2 to shoot, then goes on; it moves first, out of the
 		// fire that started the retreat, and stops only while the spread
@@ -2384,11 +2579,7 @@ namespace
 		const bool standToShoot = engage && enemyDist > 10.0f && Now() - s_bot.spreadHeldAt < 0.3f
 			&& fmodf(Now() - s_bot.retreatSince, 2.0f) >= 1.3f;
 		if (engage)
-		{
-			if (enemyDist < 10.0f)
-				s_bot.cloakEscape = false;
 			FightStep(pMe, eye, pEnemy);
-		}
 		else
 			Fire(pMe, false);
 		s_bot.fightBack += gEnv->pTimer->GetFrameTime();
@@ -2398,8 +2589,29 @@ namespace
 		{
 			// (cloaked it does not sprint: the energy went in two seconds so)
 			const bool cloaked = pSuit && pSuit->GetMode() == NANOMODE_CLOAK;
-			if (!MoveTo(pMe, s_bot.cover, 0.8f, !cloaked, false, ""))
+			if (s_bot.cloakEscape && s_bot.cloakGoal.IsZero())
+				s_bot.cloakGoal = s_bot.cover;
+			// (stuck short of its cover in their fire: down where it is. It
+			// stood 2 m before one, blocked at the knees, and took 13 hits of
+			// a machine gun; the autotester's companion-crossfire-camp)
+			// (along the way to it: round a rock the straight line grows first)
+			const float toCover = Dist2D(s_bot.cover, pos) <= 0.8f ? 0.0f : WayLeft(pos, s_bot.cover);
+			if (toCover < s_bot.coverBest - 0.3f || toCover <= 0.0f)
 			{
+				s_bot.coverBest = toCover;
+				s_bot.coverBestAt = Now();
+			}
+			else if (Now() - s_bot.coverBestAt > 2.0f && Now() - s_bot.hitAt < 2.0f)
+			{
+				Event("cannot get to its cover (%.0f m) under fire: down where it is", toCover);
+				s_bot.haveCover = false;
+				s_bot.coverAskAt = Now() + 3.0f;
+				s_bot.retreatSince = min(s_bot.retreatSince, Now() - 4.0f);
+				return true;
+			}
+			if (!MoveTo(pMe, s_bot.cover, 0.8f, !cloaked && !s_bot.cloakEscape, false, ""))
+			{
+				s_bot.coverReachedAt = -1.0f;
 				if (standToShoot)
 				{
 					s_ctl.moveDir.zero();
@@ -2417,13 +2629,16 @@ namespace
 			}
 			else
 			{
-				// in cover: down low, watching where the danger is (out of
-				// their sight the armor again: it heals faster in it)
-				s_ctl.crouch = true;
+				// in cover: down low (lying down where crouching does not hide
+				// it), watching where the danger is (out of their sight the
+				// armor again: it heals faster in it; SuitStep ends the cloak)
+				if (s_bot.coverReachedAt < 0.0f)
+					s_bot.coverReachedAt = Now();
+				const bool lying = s_bot.coverProne || Now() < s_bot.proneUntil;
+				s_ctl.crouch = !lying;
+				s_ctl.prone = lying;
 				LookAt(eye, enemyAim, 3.0f);
-				if (Now() - s_bot.hitAt > 2.0f)
-					s_bot.cloakEscape = false;
-				s_bot.doing.Format("in cover, recovering (health %d)", pMe->GetHealth());
+				s_bot.doing.Format("in cover, recovering (health %d%s)", pMe->GetHealth(), lying ? ", lying down" : "");
 				// (a soldier on foot in sight, itself not nearly dead: shot at
 				// from down there, not a heavy gun's vehicle; it sat out most of
 				// the fight recovering, two hits in two minutes. Not only when
@@ -2435,16 +2650,73 @@ namespace
 					FightStep(pMe, eye, pEnemy);
 					s_bot.doing.Format("in cover, recovering, shooting %s (health %d)", pEnemy->GetEntity()->GetName(), pMe->GetHealth());
 				}
-				if (underFire && seen)
+				// no cover from those shooting at it there: lying down, if that
+				// hides it, else another cover. Only once it is down there (on
+				// arrival it still stood, the cover was for a crouching head:
+				// it hopped from cover to cover 4 m at a time away from the
+				// fight), and only for one who hit it a moment ago and sees its
+				// head now, not for the one it aims at
+				const float eyeUp = eye.z - pos.z;
+				// (a heavy gun's rounds through what hid it: no cover here)
+				if (Now() - s_bot.heavyHitAt < 1.0f && Now() - s_bot.coverReachedAt > 0.5f)
 				{
-					// no cover at all from there: another one
 					s_bot.haveCover = false;
 					s_bot.coverAskAt = 0.0f;
+					Event("a heavy gun hits it in its cover: another one");
+					return true;
+				}
+				// (down there: a head still on its way down is not lying yet)
+				const bool settled = Now() - s_bot.coverReachedAt > 0.7f && eyeUp < (lying ? 0.7f : 1.3f);
+				if (settled && Now() - s_bot.hitAt < 1.5f)
+				{
+					std::vector<IActor*> shooters;
+					RecentShooters(1.5f, shooters);
+					if (!shooters.empty() && !HiddenFrom(pMe, pos, eyeUp, shooters))
+					{
+						if (!lying && HiddenFrom(pMe, pos, 0.4f, shooters))
+						{
+							s_bot.proneUntil = Now() + 6.0f;
+							s_bot.coverReachedAt = Now();
+							Event("shot in cover by %s: lies down there", shooters[0]->GetEntity()->GetName());
+						}
+						else if (Dist2D(pos, s_bot.retreatFrom) > 14.0f)
+						{
+							// (two moves in this fall back already: down where it is)
+							s_bot.proneUntil = Now() + 6.0f;
+							s_bot.coverReachedAt = Now();
+							Event("shot in cover by %s, %.0f m from where it fell back: stays down there", shooters[0]->GetEntity()->GetName(), Dist2D(pos, s_bot.retreatFrom));
+						}
+						else
+						{
+							s_bot.haveCover = false;
+							s_bot.coverAskAt = 0.0f;
+							Event("shot in cover by %s: another one", shooters[0]->GetEntity()->GetName());
+						}
+					}
 				}
 			}
 			return true;
 		}
-		if (underFire || seen)
+		// no cover known yet and far enough from where it fell back, or held
+		// to a downed teammate: down where it is, shooting back from there,
+		// asking again (it sprinted 18 m into a machine gun's fire toward the
+		// host 285 m off, the user's game of 2026-10-21)
+		const bool ranEnough = Dist2D(pos, s_bot.retreatFrom) > 8.0f || Now() - s_bot.retreatSince > 3.5f
+			|| (s_tetherRadius > 0.0f && Dist2D(pos, s_tether) > max(s_tetherRadius, Dist2D(s_bot.retreatFrom, s_tether) + 1.0f));
+		if ((underFire || seen) && ranEnough)
+		{
+			s_ctl.moveDir.zero();
+			s_ctl.sprint = false;
+			s_ctl.prone = true;
+			// (it stays down: lying it is out of their sight, and up again it
+			// was in it; down and up every second, the review)
+			s_bot.proneUntil = Now() + 4.0f;
+			s_bot.proneSeconds += gEnv->pTimer->GetFrameTime();
+			if (!engage)
+				LookAt(eye, enemyAim, 3.0f);
+			s_bot.doing.Format("no cover close by: lying down, shooting back (health %d)", pMe->GetHealth());
+		}
+		else if (underFire || seen)
 		{
 			// no cover known yet: away from all of them (not from one into
 			// the arms of the others), toward the one it follows
@@ -2462,14 +2734,23 @@ namespace
 			}
 			away.NormalizeSafe(Vec3(0, 1, 0));
 			// toward the one it follows, if he is not closer to the danger
+			// (not toward one far off: that was a run across the field)
 			if (IActor* pLeader = HostPlayer())
 			{
 				Vec3 toLeader = pLeader->GetEntity()->GetWorldPos() - pos;
 				toLeader.z = 0;
 				const Vec3 danger = pEnemy->GetEntity()->GetWorldPos();
-				if (pLeader->GetHealth() > 0 && toLeader.GetLength() > 6.0f
+				if (pLeader->GetHealth() > 0 && toLeader.GetLength() > 6.0f && toLeader.GetLength() < 40.0f
 					&& Dist2D(pLeader->GetEntity()->GetWorldPos(), danger) > Dist2D(pos, danger))
 					away = (away + toLeader.GetNormalized() * 0.6f).GetNormalizedSafe(away);
+			}
+			// (held to a downed teammate: sideways round him, not away)
+			if (s_tetherRadius > 0.0f)
+			{
+				Vec3 toBody = s_tether - pos;
+				toBody.z = 0;
+				if (toBody.GetLength() > s_tetherRadius * 0.6f)
+					away = (away + toBody.GetNormalizedSafe(away)).GetNormalizedSafe(away);
 			}
 			s_ctl.moveDir = standToShoot ? Vec3(ZERO) : Steer(pMe, pos, away);
 			// (shooting one close by: it backs off with its aim on him, not
@@ -2488,13 +2769,15 @@ namespace
 		}
 		else
 		{
-			s_ctl.crouch = true;
+			// (lying down where it lay down: out of sight only so)
+			s_ctl.prone = Now() < s_bot.proneUntil;
+			s_ctl.crouch = !s_ctl.prone;
 			LookAt(eye, enemyAim, 3.0f);
 			// (out of their sight: the armor again, it recharges and heals in
 			// it; cloaked the energy only went down)
-			if (Now() - s_bot.hitAt > 2.0f)
+			if (Now() - s_bot.hitAt > 2.0f && !s_bot.cloakForRevive)
 				s_bot.cloakEscape = false;
-			s_bot.doing.Format("out of sight, recovering (health %d)", pMe->GetHealth());
+			s_bot.doing.Format("out of sight, recovering (health %d%s)", pMe->GetHealth(), s_ctl.prone ? ", lying down" : "");
 		}
 		return true;
 	}
@@ -2563,9 +2846,73 @@ namespace
 		// (as MoveTo arms a strength jump: an enemy seen lately, not one it
 		// only remembers; else a jump it armed was never made)
 		const bool threatened = s_bot.retreating || now - s_bot.hitAt < 6.0f || (s_bot.enemy && now - s_bot.enemySeenAt < 8.0f);
+		// (no speed while a fight goes on round it: it left its cover in
+		// speed toward a downed teammate 17 m off, a rifleman 20 m away hit
+		// it at once, the armor's energy half gone; the user's game of
+		// 2026-10-21. One who shot it in the last 20 s and is still about
+		// within 80 m counts, so does an enemy seen in the last 15 s)
+		// (and the 5 s after its own revive or a load: hits while it cannot be
+		// hurt come with no damage indicator, it ran in speed into them)
+		bool inFight = threatened || now - s_bot.hitAt < 10.0f || (s_bot.enemy && now - s_bot.enemySeenAt < 15.0f) || now - s_bot.freshAt < 5.0f;
+		for (std::map<EntityId, SThreat>::const_iterator t = s_threats.begin(); t != s_threats.end() && !inFight; ++t)
+			if (now - t->second.last < 20.0f)
+				if (IActor* pShooter = ActorOf(t->first))
+					inFight = pShooter->GetHealth() > 0 && Hostile(pShooter) && pShooter->GetEntity()->GetWorldPos().GetDistance(pos) < 80.0f;
 		ENanoMode want = NANOMODE_DEFENSE;
 		const char* why = "the default";
 		IActor* pDowned = s_bot.order == eO_Hold || s_bot.order == eO_Goto ? 0 : DownedTeammate(pMe, pos, 200.0f);
+		// (a teammate down only a moment, or seen down right after its own
+		// load or revive, is the old state of his player: twice after an
+		// everybody-down load it switched to speed for the host who was up)
+		if (pDowned)
+		{
+			std::map<EntityId, float>::const_iterator d = s_bot.downAt.find(pDowned->GetEntityId());
+			if (now - s_bot.freshAt < 3.0f || (d != s_bot.downAt.end() && now - d->second < 1.0f))
+				pDowned = 0;
+		}
+		// the cloaked move: over at its end, or when one comes close it has
+		// to shoot (a shot from the cloak takes all the energy), or when the
+		// suit did not cloak, or after long
+		if (s_bot.cloakEscape)
+		{
+			const char* over = 0;
+			string overWhy;
+			IActor* pFoe = ActorOf(s_bot.enemy);
+			// (within 6 m a soldier sees through the cloak)
+			const bool foeClose = pFoe && pFoe->GetHealth() > 0 && now - s_bot.enemySeenAt < 0.5f
+				&& pFoe->GetEntity()->GetWorldPos().GetDistance(pos) < 6.0f;
+			// (in whatever cover it is now: the cover may have changed on the
+			// way; a revive's cloak ends when nobody is down any more, Think)
+			if (!s_bot.cloakForRevive && s_bot.haveCover && Dist2D(s_bot.cover, pos) < 1.5f)
+				over = "in its cover";
+			else if (!s_bot.cloakForRevive && !s_bot.cloakGoal.IsZero() && Dist2D(s_bot.cloakGoal, pos) < 1.5f)
+				over = "there";
+			else if (foeClose)
+			{
+				overWhy.Format("%s %.0f m off: shoots him", pFoe->GetEntity()->GetName(), pFoe->GetEntity()->GetWorldPos().GetDistance(pos));
+				over = overWhy.c_str();
+			}
+			else if (s_bot.cloakGoal.IsZero() && !s_bot.haveCover && now - s_bot.cloakSince > 3.0f)
+				over = "no cover named";
+			else if (mode != NANOMODE_CLOAK && now - s_bot.cloakSince > 3.0f)
+				over = "the suit did not cloak";
+			else if (!s_bot.cloakForRevive && !s_bot.cloakGoal.IsZero() && now - s_bot.cloakBestAt > 2.5f)
+				over = "it gets no closer to where it went";
+			else if (now - s_bot.cloakSince > 15.0f)
+				over = "15 s";
+			if (over)
+			{
+				s_bot.cloakEscape = false;
+				CryLogAlways("[CoopAgent] the cloaked move is over (%s; energy %.0f)", over, energy);
+			}
+		}
+		if (s_bot.cloakEscape && !s_bot.cloakGoal.IsZero() && Dist2D(s_bot.cloakGoal, pos) < s_bot.cloakBest - 0.3f)
+		{
+			s_bot.cloakBest = Dist2D(s_bot.cloakGoal, pos);
+			s_bot.cloakBestAt = now;
+		}
+		if (mode == NANOMODE_CLOAK)
+			s_bot.cloakSeconds += gEnv->pTimer->GetFrameTime();
 		if (pMe->GetLinkedVehicle())
 			why = "in a vehicle";
 		else if (s_bot.strengthJumpAt >= 0.0f && now - s_bot.strengthJumpAt < 2.5f && energy >= 50.0f && !threatened)
@@ -2578,25 +2925,23 @@ namespace
 			want = NANOMODE_STRENGTH;
 			why = "a blow at one right next to it";
 		}
-		else if (s_bot.retreating && s_bot.cloakEscape && energy > (mode == NANOMODE_CLOAK ? 21.0f : 25.0f))
+		else if (s_bot.cloakEscape && energy > (mode == NANOMODE_CLOAK ? 21.0f : 25.0f))
 		{
 			want = NANOMODE_CLOAK;
-			why = "getting away out of their sight";
+			why = s_bot.cloakForRevive ? "to a downed teammate out of their sight" : s_bot.retreating ? "getting away out of their sight" : "to cover out of their sight";
 		}
-		else if (!threatened && pDowned && Dist2D(pDowned->GetEntity()->GetWorldPos(), pos) > 15.0f && energy > (mode == NANOMODE_SPEED ? 40.0f : 100.0f))
+		else if (!inFight && pDowned && Dist2D(pDowned->GetEntity()->GetWorldPos(), pos) > 15.0f && energy > (mode == NANOMODE_SPEED ? 40.0f : 100.0f))
 		{
 			want = NANOMODE_SPEED;
 			why = "to a downed teammate";
 		}
-		else if (!threatened && pLeader && (s_bot.order == eO_Free || s_bot.order == eO_Follow) && pLeader->GetHealth() > 0
+		else if (!inFight && pLeader && (s_bot.order == eO_Free || s_bot.order == eO_Follow) && pLeader->GetHealth() > 0
 			&& Dist2D(pLeader->GetEntity()->GetWorldPos(), pos) > (mode == NANOMODE_SPEED ? 12.0f : 30.0f) && energy > (mode == NANOMODE_SPEED ? 50.0f : 120.0f))
 		{
 			want = NANOMODE_SPEED;
 			why = "catching up";
 		}
 		// (a mode the suit refused a moment ago: armor meanwhile)
-		static int s_refusedMode = -1;
-		static float s_refusedUntil = 0.0f;
 		if ((int)want == s_refusedMode && now < s_refusedUntil)
 		{
 			want = NANOMODE_DEFENSE;
@@ -2604,6 +2949,13 @@ namespace
 		}
 		if (want == mode)
 			return;
+		// (into the cloak with the trigger let go: a shot already due would
+		// be fired from the cloak, the review; next frame)
+		if (want == NANOMODE_CLOAK && s_bot.attackHeld)
+		{
+			Fire(pMe, false);
+			return;
+		}
 		// (not to and fro: a while between switches, but armor at once when
 		// shot at)
 		if (now < s_switchAt && !(want == NANOMODE_DEFENSE && threatened) && !(want == NANOMODE_STRENGTH && now < s_bot.meleeWantUntil))
@@ -2613,6 +2965,8 @@ namespace
 			s_bot.cloakEscape = false;
 		if (pSuit->SetMode(want))
 		{
+			if (mode == NANOMODE_CLOAK)
+				s_bot.uncloakAt = now;
 			s_seenMode = (int)want;
 			s_switchAt = now + 1.5f;
 			++s_bot.suitSwitches;
@@ -2788,6 +3142,16 @@ namespace
 				}
 			}
 		}
+		// (a vehicle shot to pieces close by in the line: never. It shot the
+		// burning jeep 4 m from it, the jeep blew up and took it down, the
+		// user's game of 2026-10-21)
+		{
+			IEntity* pFirst = hit.pCollider ? gEnv->pEntitySystem->GetEntityFromPhysics(hit.pCollider) : 0;
+			IVehicle* pWreck = pFirst ? g_pGame->GetIGameFramework()->GetIVehicleSystem()->GetVehicle(pFirst->GetId()) : 0;
+			if (pWreck && pWreck != pEnemy->GetLinkedVehicle() && !pWreck->IsDestroyed() && pWreck->GetDamageRatio() > 0.25f
+				&& pWreck->GetEntity()->GetWorldPos().GetDistance(eye) < 15.0f)
+				return false;
+		}
 		if (HitIs(hit, pEnemy->GetEntity()))
 			return true;
 		// (his vehicle is no shot at him: at the truck's gunner 10 of 12 hits
@@ -2835,11 +3199,15 @@ namespace
 	{
 		if (!s_bot.haveCover)
 			return false;
-		if (!MoveTo(pMe, s_bot.cover, 0.8f, Dist2D(s_bot.cover, pos) > 4.0f, false, ""))
+		// (cloaked it walks: a sprint took the energy in two seconds)
+		if (!MoveTo(pMe, s_bot.cover, 0.8f, Dist2D(s_bot.cover, pos) > 4.0f && !s_bot.cloakEscape, false, ""))
 		{
-			s_bot.doing.Format("to cover (%.0f m), fighting %s", Dist2D(s_bot.cover, pos), pEnemy->GetEntity()->GetName());
+			s_bot.coverReachedAt = -1.0f;
+			s_bot.doing.Format("to cover (%.0f m%s), fighting %s", Dist2D(s_bot.cover, pos), s_bot.cloakEscape ? ", cloaked" : "", pEnemy->GetEntity()->GetName());
 			return true;
 		}
+		if (s_bot.coverReachedAt < 0.0f)
+			s_bot.coverReachedAt = Now();
 		const float now = Now();
 		const Vec3 eye = EyePos(pMe);
 		const bool seen = Visible(pMe, eye, pEnemy->GetEntity(), AimPoint(pEnemy->GetEntity()));
@@ -2866,9 +3234,14 @@ namespace
 		}
 		else
 		{
-			// down: crouched out of their sight, a reload, then up again, a
-			// while after the last hit (not up into the same fire)
-			s_ctl.crouch = true;
+			// down: crouched out of their sight (lying down where only that
+			// hides it), a reload, then up again, a while after the last hit
+			// (not up into the same fire)
+			const bool lying = s_bot.coverProne || now < s_bot.proneUntil;
+			s_ctl.crouch = !lying;
+			s_ctl.prone = lying;
+			if (lying)
+				s_bot.proneSeconds += gEnv->pTimer->GetFrameTime();
 			Fire(pMe, false);
 			if (lowClip && reserve > 0 && now > s_bot.reloadAt)
 			{
@@ -2877,8 +3250,17 @@ namespace
 				s_bot.reloadAt = now + 2.5f;
 				++s_bot.hiddenReloads;
 			}
-			// shot even down there: no cover from it here
-			if (now - s_bot.hitAt < 0.3f && now - s_bot.peekSince > 0.5f)
+			// shot even down there: no cover from it here (lying down first,
+			// when that hides it from him)
+			std::vector<IActor*> hitBy;
+			if (now - s_bot.hitAt < 0.3f && now - s_bot.peekSince > 1.0f && !lying && now - s_bot.heavyHitAt > 1.0f
+				&& (RecentShooters(0.5f, hitBy), !hitBy.empty()) && HiddenFrom(pMe, pos, 0.4f, hitBy))
+			{
+				s_bot.proneUntil = now + 6.0f;
+				s_bot.peekSince = now;
+				Event("shot in cover by %s: lies down there", hitBy[0]->GetEntity()->GetName());
+			}
+			else if (now - s_bot.hitAt < 0.3f && now - s_bot.peekSince > 1.0f)
 			{
 				s_bot.haveCover = false;
 				s_bot.coverAskAt = 0.0f;
@@ -3412,6 +3794,19 @@ namespace
 			// fists, nothing, a tool: the best weapon it has
 			Fire(pMe, false);
 			ChooseWeapon(pMe, true);
+		}
+		else if (pMe->GetNanoSuit() && ((pMe->GetNanoSuit()->GetMode() == NANOMODE_CLOAK && s_bot.cloakEscape && aim.GetDistance(eye) > 2.2f)
+			|| Now() - s_bot.uncloakAt < 0.35f))
+		{
+			// cloaked: no shot (a shot from the cloak takes all the energy and
+			// shows it); one close enough to have to be shot ends the cloak
+			// first (SuitStep: armor, then the shots)
+			Fire(pMe, false);
+			if (seen && aim.GetDistance(eye) < 6.0f && s_bot.cloakEscape)
+			{
+				s_bot.cloakEscape = false;
+				CryLogAlways("[CoopAgent] the cloaked move is over (%s %.0f m off: shoots him)", pEnemy->GetEntity()->GetName(), aim.GetDistance(eye));
+			}
 		}
 		else if (seen && aim.GetDistance(eye) < 2.2f && Now() >= s_bot.meleeAt)
 		{
@@ -4031,11 +4426,22 @@ namespace
 		s_ctl.jump = false;
 		s_ctl.crouch = false;
 		s_ctl.lean = 0;
+		s_ctl.prone = false;
 		s_bot.zoomWant = false;
+		s_tetherRadius = 0.0f;
+		static bool s_wasInGame = false;
 		if (!pMe || !InGame(pMe))
 		{
+			s_wasInGame = false;
 			s_bot.doing = pMe ? "waiting to spawn" : "not in a game";
 			return;
+		}
+		// (back in the game: joined again after a load, say; what it did
+		// before was in another world)
+		if (!s_wasInGame)
+		{
+			s_wasInGame = true;
+			ResetFight("in the game again");
 		}
 		if (Now() >= s_bot.statsAt)
 		{
@@ -4044,10 +4450,11 @@ namespace
 					s_bot.bursts, s_bot.heldFire, s_bot.unseen, s_bot.turning, s_bot.stuckTimes, s_bot.localPlans);
 			s_bot.bursts = s_bot.heldFire = s_bot.stuckTimes = s_bot.unseen = s_bot.turning = s_bot.localPlans = 0;
 			if (s_bot.fightOpen + s_bot.fightHidden + s_bot.fightPeek + s_bot.fightBack > 1.0f || s_bot.suitSwitches)
-				CryLogAlways("[CoopAgent] the last minute in fights: open %.0f s, hidden %.0f s, up from cover %.0f s, falling back %.0f s; %d peeks (shot while up %d, %d leaning out), %d reloads in cover, %d suit switches; %d hits marked",
-					s_bot.fightOpen, s_bot.fightHidden, s_bot.fightPeek, s_bot.fightBack, s_bot.peeks, s_bot.peekHits, s_bot.leanPeeks, s_bot.hiddenReloads, s_bot.suitSwitches, s_bot.hitsConfirmed);
-			s_bot.fightOpen = s_bot.fightHidden = s_bot.fightPeek = s_bot.fightBack = 0.0f;
-			s_bot.peeks = s_bot.peekHits = s_bot.leanPeeks = s_bot.hiddenReloads = s_bot.suitSwitches = s_bot.hitsConfirmed = 0;
+				CryLogAlways("[CoopAgent] the last minute in fights: open %.0f s, hidden %.0f s, up from cover %.0f s, falling back %.0f s; %d peeks (shot while up %d, %d leaning out), %d reloads in cover, %d suit switches; %d hits marked; cloaked %.0f s (%d moves), lying down %.0f s",
+					s_bot.fightOpen, s_bot.fightHidden, s_bot.fightPeek, s_bot.fightBack, s_bot.peeks, s_bot.peekHits, s_bot.leanPeeks, s_bot.hiddenReloads, s_bot.suitSwitches, s_bot.hitsConfirmed,
+					s_bot.cloakSeconds, s_bot.cloaks, s_bot.proneSeconds);
+			s_bot.fightOpen = s_bot.fightHidden = s_bot.fightPeek = s_bot.fightBack = s_bot.cloakSeconds = s_bot.proneSeconds = 0.0f;
+			s_bot.peeks = s_bot.peekHits = s_bot.leanPeeks = s_bot.hiddenReloads = s_bot.suitSwitches = s_bot.hitsConfirmed = s_bot.cloaks = 0;
 			s_bot.statsAt = Now() + 60.0f;
 		}
 		IViewSystem* pView = g_pGame->GetIGameFramework()->GetIViewSystem();
@@ -4057,6 +4464,7 @@ namespace
 		{
 			Event(down ? "you are down: a teammate can revive you" : "you are up again");
 			s_bot.wasDown = down;
+			ResetFight(down ? "down" : "up again");
 		}
 		if (!down && s_bot.lastHealth > 0 && pMe->GetHealth() < s_bot.lastHealth - 5)
 		{
@@ -4083,7 +4491,11 @@ namespace
 				const bool isDown = IsDown(pActor);
 				bool& seen = s_bot.downSeen[pActor->GetEntityId()];
 				if (isDown != seen)
+				{
 					Event(isDown ? "%s is down" : "%s is up again", pActor->GetEntity()->GetName());
+					if (isDown)
+						s_bot.downAt[pActor->GetEntityId()] = Now();
+				}
 				seen = isDown;
 			}
 		}
@@ -4130,6 +4542,22 @@ namespace
 		const Vec3 pos = pMe->GetEntity()->GetWorldPos();
 		const Vec3 eye = EyePos(pMe);
 		IVehicle* pMyVehicle = pMe->GetLinkedVehicle();
+		// (somewhere else at once: a load, the host's game moved it)
+		{
+			static Vec3 s_thinkPos(ZERO);
+			static bool s_thinkPosSet = false;
+			static bool s_thinkInVehicle = false;
+			// (a car at 30 m/s in a long frame goes 20 m: not then)
+			if (s_thinkPosSet && !pMyVehicle && !s_thinkInVehicle && Dist2D(pos, s_thinkPos) > 20.0f)
+			{
+				string why;
+				why.Format("moved %.0f m at once", Dist2D(pos, s_thinkPos));
+				ResetFight(why.c_str());
+			}
+			s_thinkPos = pos;
+			s_thinkPosSet = true;
+			s_thinkInVehicle = pMyVehicle != 0;
+		}
 
 		// where it is in its own game, for the host's game: the answer is
 		// where the downed teammates lie there (a body falls its own way on
@@ -4204,6 +4632,10 @@ namespace
 			{
 				s_bot.downedFor = pDowned->GetEntityId();
 				s_bot.downedSince = Now();
+				// (the tether: 12 m round him, or as far as it is now - set once,
+				// not following it about: a cover asked for was dropped again
+				// with each step, the review)
+				s_bot.tetherRadiusFor = max(12.0f, d + 2.0f);
 			}
 			ChooseWeapon(pMe, false);
 			// (hit a moment ago: whoever it can see within 80 m, so it shoots
@@ -4242,13 +4674,114 @@ namespace
 			// under fire: hit a moment ago (it cannot tell a miss)
 			const bool underFire = Now() - s_bot.hitAt < 3.0f;
 			const bool atBody = reach || (d <= 1.6f && s_bot.reachFailSince >= 0 && Now() - s_bot.reachFailSince > 8.0f) || (reviving && d <= 2.6f);
-			if (pEnemy && !(reviving && atBody && !enemyClose))
+			// (the use key stays held under its cloak at the body with nobody
+			// within 6 m: let go every frame, the revive never ended, the review)
+			const bool foeVeryClose = pEnemy && Dist2D(pEnemy->GetEntity()->GetWorldPos(), pos) < 6.0f;
+			if (pEnemy && !(reviving && atBody && !enemyClose) && !(s_bot.cloakEscape && s_bot.cloakForRevive && atBody && !foeVeryClose))
 				HoldUse(pMe, false, 0);
+			// held to him: no cover, no fall back farther from him than 12 m
+			// (or than it is now: one not farther from him is fine)
+			s_tether = body;
+			s_tetherRadius = s_bot.tetherRadiusFor;
+			// (a cover from before far from him: none, the next ask is held to
+			// him; it fought from 30 m off, the user's game)
+			if (s_bot.haveCover && Dist2D(s_bot.cover, body) > s_tetherRadius + 2.0f)
+			{
+				s_bot.haveCover = false;
+				s_bot.coverAskAt = Now() + 1.0f;
+			}
+			// (one within 6 m sees through its cloak: the cloak ends, it fights
+			// him; else it crouched cloaked at the body, neither shooting nor
+			// reviving, the review)
+			if (foeVeryClose && s_bot.cloakEscape && s_bot.cloakForRevive)
+			{
+				s_bot.cloakEscape = false;
+				CryLogAlways("[CoopAgent] the cloaked move is over (%s %.0f m off: shoots him)", pEnemy->GetEntity()->GetName(), Dist2D(pEnemy->GetEntity()->GetWorldPos(), pos));
+			}
+			// (a cloak of the fight going on: over, the revive decides; it sat
+			// cloaked at the body neither shooting nor reviving, the review)
+			if (s_bot.cloakEscape && !s_bot.cloakForRevive && !s_bot.retreating)
+			{
+				s_bot.cloakEscape = false;
+				CryLogAlways("[CoopAgent] the cloaked move is over (%s is down: to him)", pDowned->GetEntity()->GetName());
+			}
 			// badly hurt: out of the fire first (dead it revives nobody)
 			if (Survive(pMe, pos, eye, pEnemy))
 				return;
+			// (a vehicle shot almost to pieces next to him, see below)
+			IVehicle* pBomb = 0;
+			{
+				IVehicleIteratorPtr pVs = g_pGame->GetIGameFramework()->GetIVehicleSystem()->CreateVehicleIterator();
+				while (IVehicle* pV = pVs->Next())
+					if (!pV->IsDestroyed() && pV->GetDamageRatio() > 0.9f && Dist2D(pV->GetEntity()->GetWorldPos(), body) < 7.0f)
+					{
+						pBomb = pV;
+						break;
+					}
+			}
+			const bool bombWait = pBomb && !reviving && (underFire || pEnemy || Now() - s_bot.hitAt < 8.0f);
+			// in danger on the way: to him cloaked when the energy is enough
+			// for the way (5 a metre) and a little more (holding the use key
+			// does not end the cloak); it lay "down until it stops" at energy
+			// 200 before, or fought its way there in the open
+			if (!bombWait)
+			{
+				CNanoSuit* pReviveSuit = pMe->GetNanoSuit();
+				const float reviveEnergy = pReviveSuit ? pReviveSuit->GetSuitEnergy() : 0.0f;
+				const bool danger = underFire || pEnemy || Now() - s_bot.hitAt < 8.0f;
+				// (one within 6 m sees through the cloak: fought first. At the
+				// body hit with energy 200, a soldier 8 m off, it did not cloak:
+				// two more hits and the energy was gone, then it was killed)
+				const bool enemyVeryClose = pEnemy && Dist2D(pEnemy->GetEntity()->GetWorldPos(), pos) < 6.0f;
+				if (danger && !s_bot.cloakEscape && !enemyVeryClose && d < 40.0f && CanCloak(pMe)
+					&& (atBody ? underFire && reviveEnergy >= 40.0f : d > 3.0f && reviveEnergy >= CloakNeed(d) + 5.0f))
+				{
+					string why;
+					why.Format("%s %s %.0f m off, %s", atBody ? "to revive" : "to", pDowned->GetEntity()->GetName(), d, underFire ? "under fire" : "enemies about");
+					StartCloakedMove(pMe, body, why.c_str(), reviveEnergy);
+					s_bot.cloakForRevive = true;
+				}
+			}
+			// a vehicle shot almost to pieces next to him: one more hit and it
+			// blows. Not into that while they shoot: the camp's jeep at 0.996
+			// blew up by the host's body and took the companion with it (the
+			// autotester's companion-crossfire-camp). It waits 10 m off, fights
+			{
+				if (bombWait)
+				{
+					const Vec3 bombAt = pBomb->GetEntity()->GetWorldPos();
+					static EntityId s_bombTold = 0;
+					if (s_bombTold != pBomb->GetEntityId())
+					{
+						s_bombTold = pBomb->GetEntityId();
+						Event("%s lies by %s, shot almost to pieces: keeps away from it while they shoot", pDowned->GetEntity()->GetName(), pBomb->GetEntity()->GetName());
+					}
+					if (s_bot.cloakEscape && s_bot.cloakForRevive)
+						s_bot.cloakEscape = false;
+					s_bot.reviveSince = -1;
+					HoldUse(pMe, false, 0);
+					if (Dist2D(pos, bombAt) < 10.0f)
+					{
+						Vec3 away = pos - bombAt;
+						away.z = 0;
+						s_ctl.moveDir = Steer(pMe, pos, away.GetNormalizedSafe(Vec3(0, 1, 0)));
+					}
+					else
+						s_ctl.crouch = true;
+					if (pEnemy)
+						FightStep(pMe, eye, pEnemy);
+					else
+						Fire(pMe, false);
+					s_bot.doing.Format("waiting 10 m from %s by %s", pBomb->GetEntity()->GetName(), pDowned->GetEntity()->GetName());
+					return;
+				}
+			}
+			// (cloaked, or the cloak asked for a moment ago: the suit takes it a
+			// frame later)
+			const bool cloakedWay = s_bot.cloakEscape && s_bot.cloakForRevive
+				&& ((pMe->GetNanoSuit() && pMe->GetNanoSuit()->GetMode() == NANOMODE_CLOAK) || Now() - s_bot.cloakSince < 1.5f);
 			if (!atBody && pEnemy && d > 4.0f && Dist2D(pEnemy->GetEntity()->GetWorldPos(), pos) < 40.0f
-				&& Now() - s_bot.downedSince < 40.0f)
+				&& Now() - s_bot.downedSince < 40.0f && !cloakedWay)
 			{
 				// an enemy close: the way is cleared first (from here or from
 				// cover close by), not walked into
@@ -4260,7 +4793,7 @@ namespace
 					Dodge(pos, pEnemy);
 				s_bot.doing.Format("clearing the way to %s (%.0f m): fighting %s", pDowned->GetEntity()->GetName(), d, pEnemy->GetEntity()->GetName());
 			}
-			else if (!atBody && !pEnemy && underFire)
+			else if (!atBody && !pEnemy && underFire && !cloakedWay)
 			{
 				// shot at by someone it cannot shoot back at: running to the body
 				// now would get it killed too; down, until the shots stop
@@ -4272,9 +4805,16 @@ namespace
 			}
 			else if (!atBody)
 			{
-				MoveTo(pMe, body, 0.9f, !pEnemy, false, pDowned->GetEntity()->GetName());
+				MoveTo(pMe, body, 0.9f, !pEnemy && !cloakedWay, false, pDowned->GetEntity()->GetName());
 				s_bot.reviveSince = -1;
-				if (pEnemy)
+				if (cloakedWay)
+				{
+					Fire(pMe, false);
+					HoldUse(pMe, false, 0);
+					LookAt(eye, body + Vec3(0, 0, 1.2f), 6.0f);
+					s_bot.doing.Format("to %s cloaked (%.0f m)", pDowned->GetEntity()->GetName(), d);
+				}
+				else if (pEnemy)
 				{
 					FightStep(pMe, eye, pEnemy);
 					s_bot.doing.Format("making its way to %s (%.0f m), fighting %s", pDowned->GetEntity()->GetName(), d, pEnemy->GetEntity()->GetName());
@@ -4287,17 +4827,17 @@ namespace
 					s_bot.doing.Format("running to revive %s (%.0f m)", pDowned->GetEntity()->GetName(), d);
 				}
 			}
-			else if (pEnemy && !(reviving && !enemyClose))
+			else if (pEnemy && !(reviving && !enemyClose) && !(cloakedWay && !foeVeryClose))
 			{
 				s_ctl.moveDir.zero();
 				s_ctl.crouch = true;
 				FightStep(pMe, eye, pEnemy);
 				s_bot.doing.Format("at %s, fighting %s first", pDowned->GetEntity()->GetName(), pEnemy->GetEntity()->GetName());
 			}
-			else if (underFire)
+			else if (underFire && !cloakedWay)
 			{
 				// shot at and nobody it can shoot back at (or they are out of its
-				// line of fire): no revive under fire (a revive under way stops
+				// line of fire): no revive under fire (cloaked it revives) (a revive under way stops
 				// too), down by the body until the shots stop. Not shot at: it
 				// revives, enemies about or not (those it cannot hit and who do
 				// not shoot at it are no reason to wait)
@@ -4345,6 +4885,12 @@ namespace
 		s_bot.bodyToldFor = 0;
 		s_bot.downedFor = 0;
 		HoldUse(pMe, false, 0);
+		if (s_bot.cloakEscape && s_bot.cloakForRevive)
+		{
+			s_bot.cloakEscape = false;
+			CryLogAlways("[CoopAgent] the cloaked move is over (nobody down to revive any more)");
+		}
+		s_bot.cloakForRevive = false;
 		if (s_bot.order == eO_Revive)
 			s_bot.order = eO_Free;
 
@@ -4545,6 +5091,20 @@ namespace
 			if (enemy)
 				s_bot.lastFought = enemy;
 			s_bot.enemy = enemy;
+			// (the cover was for the one before: still one from him? It sat
+			// in a cover asked against another soldier and was shot from the
+			// side, the user's game of 2026-10-21)
+			IActor* pNew = ActorOf(enemy);
+			if (pNew && s_bot.haveCover && !s_bot.retreating && Dist2D(s_bot.cover, pos) < 1.5f)
+			{
+				std::vector<IActor*> him(1, pNew);
+				if (!HiddenFrom(pMe, s_bot.cover, s_bot.coverProne ? 0.4f : 1.0f, him))
+				{
+					s_bot.haveCover = false;
+					s_bot.coverAskAt = 0.0f;
+					Event("its cover is no cover from %s: another one", pNew->GetEntity()->GetName());
+				}
+			}
 		}
 		IActor* pEnemy = ActorOf(enemy);
 		bool aiming = false;
@@ -4557,7 +5117,8 @@ namespace
 		if (Survive(pMe, pos, eye, pEnemy))
 			return;
 		// a grenade at enemies standing together or hiding behind cover
-		if (GrenadeStep(pMe, pos, eye, pEnemy))
+		// (not from its cloaked move: a throw costs it 100 energy or all)
+		if (!s_bot.cloakEscape && !(pMe->GetNanoSuit() && pMe->GetNanoSuit()->GetMode() == NANOMODE_CLOAK) && GrenadeStep(pMe, pos, eye, pEnemy))
 			return;
 		// a cover is good for a while (the enemies move)
 		if (s_bot.haveCover && Now() - s_bot.coverAt > 20.0f)
@@ -4580,6 +5141,46 @@ namespace
 			const bool hitLately = Now() - s_bot.hitAt < 3.0f;
 			if (!s_bot.haveCover && (hitLately || (s_bot.openSince >= 0.0f && Now() - s_bot.openSince > 4.0f)))
 				AskCover(pEnemy, !hitLately);
+			// hit in the open: to cover out of their sight, cloaked, while the
+			// energy is there for the way. The armor takes 2 energy a point of
+			// damage: two rifle hits and it is gone, and the cloak never came
+			// (the user's game of 2026-10-21: no cloak at all, the energy 0 at
+			// 78 of 94 hits). Not with one close by it has to shoot
+			const bool inCoverNow = s_bot.haveCover && Dist2D(s_bot.cover, pos) < 1.5f;
+			CNanoSuit* pFightSuit = pMe->GetNanoSuit();
+			const float fightEnergy = pFightSuit ? pFightSuit->GetSuitEnergy() : 0.0f;
+			const float toCover = s_bot.haveCover ? Dist2D(s_bot.cover, pos) : 10.0f;
+			// (with a cover known - the answer comes a moment after the hit -
+			// not to nowhere for 3 s, the review)
+			if (Now() - s_bot.hitAt < 2.0f && s_bot.haveCover && !inCoverNow && !s_bot.cloakEscape && !s_bot.retreating && toCover > 2.0f
+				&& Now() - s_bot.cloakSince > 6.0f && pEnemy->GetEntity()->GetWorldPos().GetDistance(pos) > 10.0f && fightEnergy >= CloakNeed(toCover) && CanCloak(pMe))
+			{
+				string why;
+				why.Format("hit in the open by %s, to cover %.0f m off", NameOf(LastShooter(2.0f)), toCover);
+				StartCloakedMove(pMe, s_bot.cover, why.c_str(), fightEnergy);
+			}
+			// spotted in the open (the soldiers' meter on it 85 and more) with
+			// no cover yet: to cover cloaked before the first hit takes the
+			// energy (the co-op server's suit recharges only 3 s after the
+			// last hit, 10 a second: under fire it never comes back)
+			float spottedBar = 0.0f, vehicleBar = 0.0f;
+			const bool spotted = CoopAI::GetStealth(spottedBar, vehicleBar) && spottedBar >= 85.0f;
+			// (a cover first: without one it went cloaked nowhere for 3 s, not
+			// shooting, again every 6 s, the review)
+			if (spotted && !inCoverNow && !s_bot.cloakEscape && !s_bot.retreating && s_bot.openSince >= 0.0f && Now() - s_bot.openSince > 0.5f)
+			{
+				if (!s_bot.haveCover)
+					AskCover(pEnemy, true);
+				else if (Now() - s_bot.cloakSince > 6.0f && toCover > 2.0f && pEnemy->GetEntity()->GetWorldPos().GetDistance(pos) > 10.0f
+					&& fightEnergy >= CloakNeed(toCover) && CanCloak(pMe))
+				{
+					string why;
+					why.Format("spotted in the open (meter %.0f), to cover %.0f m off", spottedBar, toCover);
+					StartCloakedMove(pMe, s_bot.cover, why.c_str(), fightEnergy);
+				}
+			}
+			if (s_bot.cloakEscape && s_bot.cloakGoal.IsZero() && s_bot.haveCover && !s_bot.retreating)
+				s_bot.cloakGoal = s_bot.cover;
 		}
 		else
 		{
@@ -6397,9 +6998,25 @@ namespace
 	// one that the nearest enemies (the one it fights first) can not see a
 	// crouching head at, not toward them, not away from the host, and that
 	// it can walk to (the AI navigation's way)
-	bool FindCover(IActor* pAgent, const std::vector<IActor*>& named, std::vector<Vec3>& path, Vec3& cover, int& peek)
+	// (the first hard of named must not see the place; tetherRadius > 0: none
+	// farther from tether; prone: the place hides it only lying down)
+	bool FindCover(IActor* pAgent, const std::vector<IActor*>& named, int hard, const Vec3& tether, float tetherRadius,
+		std::vector<Vec3>& path, Vec3& cover, int& peek, bool& prone)
 	{
-		const Vec3 from = pAgent->GetEntity()->GetWorldPos();
+		Vec3 from = pAgent->GetEntity()->GetWorldPos();
+		prone = false;
+		// (its feet on the ground below it: put back 6 m up after "falling
+		// through the ground", every place round it was too far down and the
+		// answer was "none found", the user's game of 2026-10-21)
+		{
+			// (only when it is in the air: on a crate, a deck or a boat its feet
+			// are where it stands, the review)
+			IPhysicalEntity* pSelf = pAgent->GetEntity()->GetPhysics();
+			ray_hit floor;
+			if (gEnv->pPhysicalWorld->RayWorldIntersection(from + Vec3(0, 0, 0.5f), Vec3(0, 0, -12.0f), ent_static | ent_terrain | ent_rigid | ent_sleeping_rigid,
+				rwi_stop_at_pierceable | rwi_colltype_any, &floor, 1, &pSelf, pSelf ? 1 : 0) && from.z - floor.pt.z > 1.5f)
+				from.z = floor.pt.z;
+		}
 		// the threats: those named (who shot it first), every soldier after
 		// it (its attention on it: it hid from the one it aimed at while
 		// others shot it, 11 of 18 times in the user's games), the nearest
@@ -6449,15 +7066,22 @@ namespace
 			float score;
 			Vec3 pos;
 			int peek;
+			bool lying;     // hidden there only lying down
 			bool operator<(const SCandidate& o) const { return score < o.score; }
 		};
 		std::vector<SCandidate> candidates;
-		static const float s_radii[] = { 4.0f, 7.0f, 11.0f, 15.0f, 20.0f, 25.0f, 30.0f };
-		for (int r = 0; r < 7; ++r)
-			for (int k = 0; k < 24; ++k)
+		// (where it stands first, then 2 m round it: the nearest cover is the
+		// best, every fall back was a run of 4 m and more under fire)
+		static const float s_radii[] = { 0.0f, 2.0f, 4.0f, 7.0f, 11.0f, 15.0f, 20.0f, 25.0f, 30.0f };
+		hard = max(1, min(hard, (int)eyes.size()));
+		for (int r = 0; r < 9; ++r)
+			for (int k = 0; k < (r == 0 ? 1 : r == 1 ? 12 : 24); ++k)
 			{
-				const float a = k * gf_PI2 / 24.0f;
+				const float a = k * gf_PI2 / (r == 1 ? 12.0f : 24.0f);
 				Vec3 p = from + Vec3(cosf(a), sinf(a), 0) * s_radii[r];
+				// (held to a downed teammate: none farther from him)
+				if (tetherRadius > 0.0f && Dist2D(p, tether) > tetherRadius)
+					continue;
 				// the ground there (not on a roof, not down a cliff)
 				ray_hit hit;
 				if (!gEnv->pPhysicalWorld->RayWorldIntersection(Vec3(p.x, p.y, from.z + 3.0f), Vec3(0, 0, -8.0f),
@@ -6476,12 +7100,13 @@ namespace
 				if (close)
 					continue;
 				// hidden: solid between each of their eyes and a crouching
-				// head there (the first threat's must hide it; the others count;
-				// the first one first: seen by him, no more rays for this spot,
-				// the host's game cast up to 11 a spot)
+				// head there. Those who hit it a moment ago (the first hard
+				// named) must all be hidden from, the others count; seen by
+				// one of those, no more rays for this spot. Not hidden so:
+				// lying down (a head 0.4 m up), a second choice
 				int seenBy = 0;
-				bool firstSees = false;
-				for (size_t e = 0; e < eyes.size() && !firstSees; ++e)
+				bool hardSees = false;
+				for (size_t e = 0; e < eyes.size() && !hardSees; ++e)
 				{
 					IPhysicalEntity* skipE[2];
 					int nE = 0;
@@ -6491,39 +7116,40 @@ namespace
 						skipE[nE++] = rides[e];
 					if (!SolidBetween(eyes[e], p + Vec3(0, 0, 1.0f), skipE, nE))
 					{
-						firstSees = e == 0;
+						hardSees = (int)e < hard;
 						++seenBy;
 					}
 				}
-				if (firstSees)
-					continue;
+				bool lying = false;
+				if (hardSees)
+				{
+					for (int e = 0; e < hard && !lying; ++e)
+					{
+						IPhysicalEntity* skipE[2];
+						int nE = 0;
+						if (nSkip)
+							skipE[nE++] = skip[0];
+						if (rides[e])
+							skipE[nE++] = rides[e];
+						if (!SolidBetween(eyes[e], p + Vec3(0, 0, 0.4f), skipE, nE))
+							lying = true;    // (seen lying down too: no use)
+					}
+					if (lying)
+						continue;
+					lying = true;
+				}
+				// (nearer to those who shot it costs; the others, soldiers that
+				// never fired among them, are not to step away from: each new
+				// ask went farther off, 4 m at a time, the user's game)
 				float closer = 0.0f;
-				for (size_t e = 0; e < eyes.size(); ++e)
+				for (int e = 0; e < hard; ++e)
 					closer += max(0.0f, Dist2D(from, eyes[e]) - Dist2D(p, eyes[e]));
 				// (where it fights from there: looked at below, for the best few)
-				const SCandidate c = { s_radii[r] + closer * 2.0f + seenBy * 12.0f + max(0.0f, Dist2D(p, host) - 20.0f) * 0.5f, p, -1 };
+				const SCandidate c = { s_radii[r] + closer * 2.0f + seenBy * 6.0f + max(0.0f, Dist2D(p, host) - 20.0f) * 0.5f + (lying ? 4.0f : 0.0f), p, -1, lying };
 				candidates.push_back(c);
 			}
-		// no hidden place close by: the one farthest from them it can get to
-		// (along the navigation, not into a wall or down a cliff)
-		if (candidates.empty())
-			for (int k = 0; k < 24; ++k)
-			{
-				const float a = k * gf_PI2 / 24.0f;
-				Vec3 p = from + Vec3(cosf(a), sinf(a), 0) * 22.0f;
-				ray_hit hit;
-				if (!gEnv->pPhysicalWorld->RayWorldIntersection(Vec3(p.x, p.y, from.z + 3.0f), Vec3(0, 0, -8.0f),
-					ent_static | ent_terrain, rwi_stop_at_pierceable | rwi_colltype_any, &hit, 1, skip, nSkip))
-					continue;
-				p = hit.pt;
-				if (fabsf(p.z - from.z) > 3.0f)
-					continue;
-				float nearest = 1e9f;
-				for (size_t e = 0; e < eyes.size(); ++e)
-					nearest = min(nearest, Dist2D(p, eyes[e]));
-				const SCandidate c = { -nearest + max(0.0f, Dist2D(p, host) - 25.0f) * 0.5f, p, 3 };
-				candidates.push_back(c);
-			}
+		// (no hidden place close by: none. It was the place farthest from them
+		// 22 m off; the companion lies down where it is now and shoots back)
 		std::sort(candidates.begin(), candidates.end());
 		// a place to fight from: standing up, or leaning out to a side, it
 		// sees the first threat's chest (a blind peek is no shot), for the
@@ -6549,6 +7175,22 @@ namespace
 		{
 			if (candidates[i].peek < 0)
 				candidates[i].peek = 3;
+			// (where it stands, or a step off with nothing between and level:
+			// no way to ask for. Behind a wall 2 m off is not a step, the review)
+			const Vec3 c = candidates[i].pos;
+			IPhysicalEntity* pSelfPhys = pAgent->GetEntity()->GetPhysics();
+			if (Dist2D(from, c) < 0.5f
+				|| (Dist2D(from, c) < 2.5f && fabsf(c.z - from.z) < 0.5f
+					&& !SolidBetween(from + Vec3(0, 0, 0.5f), c + Vec3(0, 0, 0.5f), &pSelfPhys, pSelfPhys ? 1 : 0)
+					&& !SolidBetween(from + Vec3(0, 0, 1.2f), c + Vec3(0, 0, 1.2f), &pSelfPhys, pSelfPhys ? 1 : 0)))
+			{
+				path.clear();
+				path.push_back(candidates[i].pos);
+				cover = candidates[i].pos;
+				peek = candidates[i].peek;
+				prone = candidates[i].lying;
+				return true;
+			}
 			if (!FindPath(from, candidates[i].pos, path))
 				continue;
 			// the way there not much longer than the straight line
@@ -6563,6 +7205,7 @@ namespace
 			{
 				cover = candidates[i].pos;
 				peek = candidates[i].peek;
+				prone = candidates[i].lying;
 				return true;
 			}
 		}
@@ -7311,6 +7954,11 @@ void CoopAgent::SteerInput(CPlayer* pPlayer, Ang3& deltaRotation, Vec3& deltaMov
 		actions |= ACTION_CROUCH;
 	else
 		actions &= ~ACTION_CROUCH;
+	// (lying down: no cover close by under fire, or the cover hides it only so)
+	if (s_ctl.prone && !s_ctl.crouch)
+		actions |= ACTION_PRONE;
+	else
+		actions &= ~ACTION_PRONE;
 	if (s_ctl.jump)
 	{
 		actions |= ACTION_JUMP;
@@ -7478,31 +8126,47 @@ void CoopAgent::OnServerRequest(EntityId agent, int op, const char* name)
 	// with the way there
 	if (op == 6 && !pMine && name)
 	{
-		// (the names: who shot it lately first, then the one it fights)
+		// (the names: "A,B|C,D@x,y,z,r": the cover hides it from A and B,
+		// who hit it a moment ago; C and D only count; none farther than r
+		// from x y z. No "|": the first one alone, as before)
 		std::vector<IActor*> threats;
 		string names = name;
-		for (int start = 0; start < (int)names.length(); )
+		Vec3 tether(ZERO);
+		float tetherRadius = 0.0f;
+		const size_t atSign = names.find('@');
+		if (atSign != string::npos)
 		{
-			int end = (int)names.find(',', start);
-			if (end < 0)
-				end = (int)names.length();
-			if (IActor* p = ActorByName(names.substr(start, end - start).c_str()))
-				if (std::find(threats.begin(), threats.end(), p) == threats.end())
-					threats.push_back(p);
+			if (sscanf(names.c_str() + atSign + 1, "%f,%f,%f,%f", &tether.x, &tether.y, &tether.z, &tetherRadius) != 4)
+				tetherRadius = 0.0f;
+			names = names.substr(0, atSign);
+		}
+		int hard = -1;
+		for (int start = 0; start <= (int)names.length(); )
+		{
+			int end = start;
+			while (end < (int)names.length() && names[end] != ',' && names[end] != '|')
+				++end;
+			if (end > start)
+				if (IActor* p = ActorByName(names.substr(start, end - start).c_str()))
+					if (std::find(threats.begin(), threats.end(), p) == threats.end())
+						threats.push_back(p);
+			if (end < (int)names.length() && names[end] == '|')
+				hard = (int)threats.size();
 			start = end + 1;
 		}
 		std::vector<Vec3> path;
 		Vec3 cover(ZERO);
 		int peek = 3;
+		bool prone = false;
 		string text, goal;
-		if (!threats.empty() && FindCover(pAgent, threats, path, cover, peek))
+		if (!threats.empty() && FindCover(pAgent, threats, hard < 1 ? 1 : hard, tether, tetherRadius, path, cover, peek, prone))
 			for (size_t i = 0; i < path.size() && i < 20; ++i)
 				text += string().Format("%s%.1f %.1f %.1f", i ? ";" : "", path[i].x, path[i].y, path[i].z);
-		goal.Format("%.1f %.1f %.1f %d", cover.x, cover.y, cover.z, peek);
+		goal.Format("%.1f %.1f %.1f %d %d", cover.x, cover.y, cover.z, peek, prone ? 1 : 0);
 		static const char* const s_peeks[] = { "standing up", "leaning left", "leaning right", "no shot from there" };
 		CryLogAlways("[CoopAgent] cover for %s from %s: %s", pAgent->GetEntity()->GetName(), name,
-			text.empty() ? "none found" : string().Format("%.0f m away, %d points, fights %s", cover.GetDistance(pAgent->GetEntity()->GetWorldPos()),
-				(int)path.size(), s_peeks[peek]).c_str());
+			text.empty() ? "none found" : string().Format("%.0f m away, %d points, fights %s%s", cover.GetDistance(pAgent->GetEntity()->GetWorldPos()),
+				(int)path.size(), s_peeks[peek], prone ? ", lying down" : "").c_str());
 		pRules->CoopSendSync(16, 1, 0, goal.c_str(), text.c_str(), 0, 0.0f, static_cast<CActor*>(pAgent)->GetChannelId());
 		return;
 	}
@@ -7642,12 +8306,15 @@ void CoopAgent::OnPath(int op, const char* goal, const char* text)
 		s_bot.haveCover = !path.empty();
 		if (s_bot.haveCover)
 		{
-			int peek = 3;
+			int peek = 3, prone = 0;
 			Vec3 at;
-			if (goal && sscanf(goal, "%f %f %f %d", &at.x, &at.y, &at.z, &peek) == 4)
-				s_bot.coverPeek = peek;
-			else
-				s_bot.coverPeek = 0;
+			const int got = goal ? sscanf(goal, "%f %f %f %d %d", &at.x, &at.y, &at.z, &peek, &prone) : 0;
+			s_bot.coverPeek = got >= 4 ? peek : 0;
+			s_bot.coverProne = got >= 5 && prone != 0;
+			s_bot.coverReachedAt = -1.0f;
+			s_bot.proneUntil = 0.0f;
+			s_bot.coverBest = 1e9f;
+			s_bot.coverBestAt = Now();
 			s_bot.cover = g;
 			s_bot.coverAt = Now();
 			s_bot.peekUp = false;

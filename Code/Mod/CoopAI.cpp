@@ -2667,9 +2667,70 @@ void CoopAI::ResyncChannel(int channelId)
 	SendSyncHistory(channelId);
 }
 
+int CoopAI::ReleaseAIVoiceListeners()
+{
+	if (!g_pGame || !g_pGame->GetIGameFramework())
+		return 0;
+	int released = 0, foreign = 0;
+	string names;
+	IActorIteratorPtr it = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+	while (IActor* pActor = it->Next())
+	{
+		CActor* pA = static_cast<CActor*>(pActor);
+		if (strcmp(pA->GetActorClass(), CPlayer::GetActorClassType()) || !strcmp(pActor->GetEntity()->GetClass()->GetName(), "Player"))
+			continue;
+		CPlayer* pPlayer = static_cast<CPlayer*>(pA);
+		if (!pPlayer->HasVoiceListener())
+		{
+			// (one made some other way than CPlayer's: only counted)
+			if (pPlayer->GetGameObject() && pPlayer->GetGameObject()->QueryExtension("VoiceListener"))
+				++foreign;
+			continue;
+		}
+		// (a few at a time: FMOD's stream thread reads the listener of each
+		// stream; the engine releases one per player who leaves)
+		if (released >= 4)
+			continue;
+		pPlayer->ReleaseVoiceListener();
+		names += string(released ? ", " : "") + pActor->GetEntity()->GetName();
+		++released;
+	}
+	if (released)
+		CryLogAlways("[CoopSound] voice-chat listeners of %d AI soldiers released (%s): each held an FMOD voice with silence", released, names.c_str());
+	static int s_foreignTold = -1;
+	if (foreign != s_foreignTold && (foreign || s_foreignTold > 0))
+	{
+		s_foreignTold = foreign;
+		CryLogAlways("[CoopSound] %d AI soldiers have a voice-chat listener not made by their player (left alone)", foreign);
+	}
+	return released;
+}
+
 void CoopAI::OnGameLoaded(bool clientsKept)
 {
 	TakeLevelTOD("save loaded");
+	// (a soldier the save brought back with a voice-chat listener)
+	ReleaseAIVoiceListeners();
+	// (the friends kept through the load: the load stopped their voice-chat
+	// streams and a listener never makes one again: a new listener each, or
+	// the host hears none of them till they join again, the review)
+	if (clientsKept && gEnv->bServer)
+	{
+		IActor* pLocalActor = g_pGame->GetIGameFramework()->GetClientActor();
+		IActorIteratorPtr pPlayers = g_pGame->GetIGameFramework()->GetIActorSystem()->CreateActorIterator();
+		while (IActor* pActor = pPlayers->Next())
+		{
+			CActor* pA = static_cast<CActor*>(pActor);
+			if (pActor == pLocalActor || strcmp(pA->GetActorClass(), CPlayer::GetActorClassType()) || strcmp(pActor->GetEntity()->GetClass()->GetName(), "Player"))
+				continue;
+			CPlayer* pPlayer = static_cast<CPlayer*>(pA);
+			if (pPlayer->HasVoiceListener())
+			{
+				pPlayer->ReleaseVoiceListener();
+				pPlayer->CreateVoiceListener();
+			}
+		}
+	}
 	// entities the save brought back (soldiers spawned during play, script
 	// objects) are new game objects: the same network setup as on level load
 	s_aiAspectsOff.clear();
@@ -3512,6 +3573,17 @@ void CoopAI::Update(float frameTime)
 	UpdateTimeOfDaySync(frameTime);
 	UpdateDialogLock(frameTime);
 	UpdateSoundLimits(frameTime);
+	// (none should be made any more: CPlayer::CreateVoiceListener; a safety
+	// net every 2 s, on the host and the clients)
+	{
+		static float s_voiceAt = 0.0f;
+		const float now = gEnv->pTimer->GetAsyncCurTime();
+		if (now >= s_voiceAt && !s_inLoading)
+		{
+			s_voiceAt = now + 2.0f;
+			ReleaseAIVoiceListeners();
+		}
+	}
 	UpdateStealth(frameTime);
 	UpdateMusicSync(frameTime);
 	UpdateTeamMates(frameTime);
@@ -4388,7 +4460,17 @@ namespace
 		if (pLocal)
 			for (size_t i = 0; i < joiners.size(); ++i)
 				farthest = max(farthest, (joiners[i] - pLocal->GetEntity()->GetWorldPos()).GetLength());
-		const bool wantAll = farthest > 50.0f;
+		// (far for 2 s: right after a checkpoint load the companion's own game
+		// still sent its old place for a moment, 268 m off, and every enabled
+		// soldier of the level was woken for it; the autotester's
+		// load-prev-checkpoint, 2026-10-21)
+		static float s_farSince = -1.0f;
+		const float farNow = gEnv->pTimer->GetAsyncCurTime();
+		if (farthest <= 50.0f)
+			s_farSince = -1.0f;
+		else if (s_farSince < 0.0f)
+			s_farSince = farNow;
+		const bool wantAll = farthest > 50.0f && farNow - s_farSince > 2.0f;
 		if (ICVar* pAll = gEnv->pConsole->GetCVar("ai_UpdateAllAlways"))
 		{
 			if (wantAll && !s_updateAllOn)

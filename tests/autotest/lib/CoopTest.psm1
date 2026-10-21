@@ -159,8 +159,10 @@ function New-BootDir([string]$RunDir, [string]$Name) {
 
 # the profile's game.cfg is read before the command line: a window from the
 # start and no sound (or sound into a WAV file)
-function Write-GameCfg([string]$Prof, [string]$Sound) {
-    $lines = @("r_Fullscreen = 0", "r_Width = 800", "r_Height = 600", "cl_voice_recording = 0", "net_enable_voice_chat = 0")
+# (VoiceChat: the host's voice chat on, as in a real game - its default -
+# with the microphone off; the user's silence came from voice-chat streams)
+function Write-GameCfg([string]$Prof, [string]$Sound, [bool]$VoiceChat = $false) {
+    $lines = @("r_Fullscreen = 0", "r_Width = 800", "r_Height = 600", "cl_voice_recording = 0", "net_enable_voice_chat = $(if ($VoiceChat) { 1 } else { 0 })")
     if ($Sound -eq "wav") { $lines += @("s_SoundEnable = 1", "s_DummySound = 0", "s_OutputConfig = 2") }
     else { $lines += @("s_SoundEnable = 0", "s_DummySound = 1") }
     Assert-SafeWrite $Prof
@@ -184,7 +186,8 @@ function Save-Fixture([string]$Campaign, [string]$Name) {
     $ids = @()
     foreach ($d in Get-ChildItem -LiteralPath $coop -Directory) {
         $prog = Join-Path $d.FullName "progress.txt"
-        $nameLine = if (Test-Path -LiteralPath $prog) { @(Get-Content -LiteralPath $prog -Encoding utf8 | Where-Object { $_ -like "name=*" } | Select-Object -First 1) } else { @() }
+        # (@() round the if: an if hands one line on as a bare string, [0] was its first letter)
+        $nameLine = @(if (Test-Path -LiteralPath $prog) { Get-Content -LiteralPath $prog -Encoding utf8 | Where-Object { $_ -like "name=*" } | Select-Object -First 1 })
         $campName = if ($nameLine.Count) { $nameLine[0].Substring(5) } else { "" }
         if ($d.Name -eq $Campaign -or $campName -eq $Campaign) { $ids += $d.Name }
     }
@@ -370,13 +373,13 @@ function Pause-Game([double]$Seconds) { Invoke-Pump $Seconds }
 
 # ---- starting and stopping ---------------------------------------------------
 
-# Session: @{ Fixture = 'save:<name>' | 'new:rescue'; Companion = $true|$false|'late'; Cvars = @{}; Extra = @(); Sound = $false|'wav' }
+# Session: @{ Fixture = 'save:<name>' | 'new:rescue'; Companion = $true|$false|'late'; Cvars = @{}; Extra = @(); Sound = $false|'wav'; Campaign = <id>; ReadyCommands = @(); VoiceChat = $false|$true }
 function Start-Boot([hashtable]$Session, [string]$RunDir, [string]$Name) {
     # (a boot that fails before its game starts must not leave the last one's as its own)
     $script:Boot = $null
     $dir = New-BootDir $RunDir $Name
     $prof = Join-Path $dir "host"
-    Write-GameCfg $prof $Session.Sound
+    Write-GameCfg $prof $Session.Sound ([bool]$Session.VoiceChat)
     # (a profile as after a first game: the engine runs its first-login spec
     # detection otherwise, every test boot; the person's games never do)
     if ($Session.SeedProfile) {
@@ -387,7 +390,7 @@ function Start-Boot([hashtable]$Session, [string]$RunDir, [string]$Name) {
     }
     $a = @("-mod", $script:TestMod, "-dx9", "-devmode", "-userpath", "`"$prof`"", "-logfile", "at_host.log",
         "+coop_test_free_cursor", "1", "+coop_test_cmdfile", "at_host_cmd.txt", "+r_Fullscreen", "0",
-        "+cl_voice_recording", "0", "+net_enable_voice_chat", "0", "+coop_relay", "ws://127.0.0.1:9/", "+coop_cloud", "0")
+        "+cl_voice_recording", "0", "+net_enable_voice_chat", $(if ($Session.VoiceChat) { "1" } else { "0" }), "+coop_relay", "ws://127.0.0.1:9/", "+coop_cloud", "0")
     $fix = [string]$Session.Fixture
     $comp = $Session.Companion
     $a += @("+coop_companion", $(if ($comp -eq $true) { "1" } else { "0" }))
@@ -441,6 +444,9 @@ function Start-Boot([hashtable]$Session, [string]$RunDir, [string]$Name) {
     if (-not $ready) { throw "INFRA: the level was not ready within 420 s" }
     Write-Step "level ready: $($ready.Text)"
     $script:Boot.Marks.Ready = New-Mark
+    # (commands at once, before the companion is waited for: a checkpoint in
+    # a fight kills the host in seconds, coop_settings.cfg set coop_god 0)
+    if ($Session.ReadyCommands) { Send-Game host @($Session.ReadyCommands) }
     $script:Boot.Marks.Window = [CoopTestNative]::WindowSize($script:Boot.HostPid)
     if ($comp -eq $true) { Wait-Companion 300 | Out-Null }
     return $script:Boot
@@ -459,11 +465,23 @@ function Read-HelperFile([string]$Path) {
 
 function Start-WindowHook([int]$Thread, [string]$Dir) {
     $ps32 = Join-Path $env:WINDIR "SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
-    # (in the run's folder: loaded into the test games and the helper, it must
-    # not hold the test mod's folder)
-    $dll = Join-Path (Split-Path $Dir) "CoopTestHook.dll"
+    # (one path for every run, outside the test mod: loaded into the test
+    # games and the helper, it must not hold the test mod's folder. Windows
+    # keeps a session's hook DLLs in a table of 32 by path, and a game that
+    # crashed with the hook in it leaves its entry for good: a new path each
+    # run - it was the run's folder - filled the table, then every hook
+    # failed with 126 till a reboot (2026-10-18 and 10-21). A path in the
+    # table is found again. hook_path.txt in the test home names another
+    # DLL path to use)
+    $dll = Join-Path $script:TestHome "hook\CoopTestHook.dll"
+    $pick = Join-Path $script:TestHome "hook_path.txt"
+    if (Test-Path -LiteralPath $pick) {
+        $named = [string](Get-Content -LiteralPath $pick -TotalCount 1)
+        if ($named -and (Test-Path -LiteralPath $named.Trim())) { $dll = $named.Trim() }
+    }
     if (-not (Test-Path -LiteralPath $dll)) {
         $built = Join-Path $script:Repo "build\Bin32\CoopTestHook.dll"
+        New-Item -ItemType Directory -Force (Split-Path $dll) | Out-Null
         if (Test-Path -LiteralPath $built) { Copy-Item -LiteralPath $built $dll -Force }
     }
     if (-not (Test-Path -LiteralPath $ps32) -or -not (Test-Path -LiteralPath $dll) -or -not $Thread) { return "none" }

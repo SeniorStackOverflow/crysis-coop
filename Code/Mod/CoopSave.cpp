@@ -607,6 +607,9 @@ namespace
 	string s_campaignName;
 	string s_lastSave;              // the savegame slot written last
 	string s_lastEngineFile;        // CryAction's file of the last savegame
+	SProgress s_load;               // the checkpoint loading or loaded last
+	string s_worldSave;             // the savegame the running world is (loaded or saved last), "" none
+	float s_prevNewerAt = -100.0f;  // PreviousIsNewer looked at the files then (-100: look again)
 	string s_menuStatus;            // what the co-op menu shows as the last result
 
 	const char* ShortLevelName(const char* level)
@@ -798,12 +801,27 @@ namespace
 			CryLogAlways("[CoopSave] checkpoint %s: the game refused to save", name.c_str());
 			return false;
 		}
+		s_worldSave = save;
+		s_prevNewerAt = -100.0f;
 
 		// the previous checkpoint stays as progress_prev.txt (its savegame is the
 		// other slot)
 		MakeDirs(s_campaign);
 		const string cur = CampaignFile(s_campaign, "progress.txt"), prev = CampaignFile(s_campaign, "progress_prev.txt");
-		MoveFileExA(cur.c_str(), prev.c_str(), MOVEFILE_REPLACE_EXISTING);
+		// (progress.txt names the checkpoint played from. If it does not -
+		// the one loaded could not be made current - that one is the
+		// previous now: its savegame is the slot this save left alone, the
+		// other slot's progress would name the savegame just written over)
+		SProgress was;
+		if (!s_lastSave.empty() && !stricmp(s_load.save.c_str(), s_lastSave.c_str()) && ReadProgress(cur, was) && stricmp(was.save.c_str(), s_lastSave.c_str()))
+		{
+			CryLogAlways("[CoopSave] progress.txt named %s, not the checkpoint loaded (%s): that one is the previous checkpoint", was.checkpoint.c_str(), s_load.checkpoint.c_str());
+			SProgress loaded = s_load;
+			loaded.campaign = s_campaign;
+			WriteProgress(prev, loaded);
+		}
+		else
+			MoveFileExA(cur.c_str(), prev.c_str(), MOVEFILE_REPLACE_EXISTING);
 		WriteProgress(cur, progress);
 		s_lastSave = save;
 		CryLogAlways("[CoopSave] checkpoint %s saved: campaign \"%s\", %s, %s (%d players' equipment)", name.c_str(), s_campaignName.c_str(),
@@ -828,10 +846,10 @@ namespace
 		eLS_Loading,
 	};
 	ELoadState s_loadState = eLS_None;
-	SProgress s_load;
 	float s_loadWait = 0.0f;
 	bool s_loadInPlace = false;     // into the level that runs, no level load (a checkpoint of this level)
 	bool s_loadKeepClients = false; // and the friends stay connected
+	bool s_loadPrevious = false;    // the campaign's previous checkpoint (progress_prev.txt) is the one loading
 	ICVar* s_pLoadInPlace = 0;
 	ICVar* s_pLoadKeep = 0;
 	ICVar* s_pLoadAIReset = 0;
@@ -941,6 +959,8 @@ namespace
 		}
 	}
 
+	bool ReadSavedIds(const string& save, std::vector<EntityId>& ids);
+
 	// before the load: false = the old way (the friends are disconnected)
 	bool KeepBegin()
 	{
@@ -961,8 +981,39 @@ namespace
 		}
 		if (!s_savedIds.count(s_load.save))
 		{
-			CryLogAlways("[CoopSave] %s was not saved or loaded in this game: the load disconnects the friends (they join again)", s_load.save.c_str());
-			return false;
+			// (a checkpoint of another game, the one before say: the save's
+			// own list of its entities, as after every load. The companion
+			// went out and joined again a minute later for the first load of
+			// the checkpoint before, the autotester's load-prev-checkpoint)
+			std::vector<EntityId> ids;
+			if (!ReadSavedIds(s_load.save, ids) || ids.empty())
+			{
+				CryLogAlways("[CoopSave] %s was not saved or loaded in this game and its list of entities is not readable: the load disconnects the friends (they join again)", s_load.save.c_str());
+				return false;
+			}
+			// (a save of another game: an id of it that is something else in
+			// this world - made in this game, not the level's, not one of the
+			// world's own save - would get the save's things loaded into it;
+			// then the old way, the review)
+			const std::set<EntityId>* pWorld = !s_worldSave.empty() && s_savedIds.count(s_worldSave) ? &s_savedIds[s_worldSave] : 0;
+			int clash = 0;
+			string clashName;
+			for (size_t i = 0; i < ids.size(); ++i)
+				if (IEntity* pOther = gEnv->pEntitySystem->GetEntity(ids[i]))
+					if (!CoopAI::IsLevelEntity(ids[i]) && !(pWorld && pWorld->count(ids[i])))
+					{
+						if (!clash)
+							clashName = pOther->GetName();
+						++clash;
+					}
+			if (clash)
+			{
+				CryLogAlways("[CoopSave] %s was not saved or loaded in this game and %d of its ids are other things here (%s...): the load disconnects the friends (they join again)",
+					s_load.save.c_str(), clash, clashName.c_str());
+				return false;
+			}
+			s_savedIds[s_load.save].insert(ids.begin(), ids.end());
+			CryLogAlways("[CoopSave] %s was not saved or loaded in this game: its own list of %d entities taken, the friends stay", s_load.save.c_str(), (int)ids.size());
 		}
 		if (!PatchKick(true))
 		{
@@ -1780,7 +1831,64 @@ namespace
 			return;
 		}
 		p.campaign = e.campaign;
+		s_loadPrevious = prev;
 		HostCheckpoint(p);
+	}
+
+	// The previous checkpoint, once loaded, is the campaign's current one: the
+	// user (2026-10-21) loaded it from the co-op menu, and when everybody went
+	// down later the game went back to the newer one, as progress.txt still
+	// named it. Its progress and the newer one's change places (the newer is
+	// its previous now, gone with the next checkpoint saved: that goes to the
+	// newer's savegame slot); its stamp is now, so that the cloud's copy and
+	// the campaign list take it as the newest; the cloud gets it as its last.
+	void MakeLoadedCurrent()
+	{
+		const string cur = CampaignFile(s_campaign, "progress.txt"), prev = CampaignFile(s_campaign, "progress_prev.txt");
+		SProgress newer, loaded;
+		const bool haveNewer = ReadProgress(cur, newer);
+		if (!ReadProgress(prev, loaded) || stricmp(loaded.save.c_str(), s_load.save.c_str()))
+		{
+			CryLogAlways("[CoopSave] the previous checkpoint was loaded, but progress_prev.txt %s: the current checkpoint stays",
+				loaded.save.empty() ? "is gone" : "names another savegame");
+			return;
+		}
+		loaded.campaign = s_campaign;
+		loaded.stamp = (unsigned int)time(0);
+		// (both written to new files first, then moved over the old ones,
+		// the current first: a write that fails leaves the files as they
+		// were, never both naming the newer one, the review)
+		const string curTmp = cur + ".tmp", prevTmp = prev + ".tmp";
+		newer.campaign = s_campaign;
+		if (!WriteProgress(curTmp, loaded) || (haveNewer && !WriteProgress(prevTmp, newer))
+			|| !MoveFileExA(curTmp.c_str(), cur.c_str(), MOVEFILE_REPLACE_EXISTING))
+		{
+			DeleteFileA(curTmp.c_str());
+			DeleteFileA(prevTmp.c_str());
+			CryLogAlways("[CoopSave] the previous checkpoint was loaded, but its progress could not be written: the current checkpoint stays");
+			return;
+		}
+		// (the second one checked too: else both files named the one loaded
+		// and the newer one was in neither, the review)
+		if (haveNewer && !MoveFileExA(prevTmp.c_str(), prev.c_str(), MOVEFILE_REPLACE_EXISTING)
+			&& !MoveFileExA(prevTmp.c_str(), prev.c_str(), MOVEFILE_REPLACE_EXISTING))
+		{
+			DeleteFileA(prevTmp.c_str());
+			if (!WriteProgress(prev, newer))
+				CryLogAlways("[CoopSave] the newer checkpoint (%s) could not be kept as the previous one", newer.checkpoint.c_str());
+		}
+		else if (!haveNewer)
+			DeleteFileA(prev.c_str());
+		s_prevNewerAt = -100.0f;
+		s_lastSave = loaded.save;
+		CryLogAlways("[CoopSave] checkpoint %s (saved %s) is the campaign's current checkpoint now; the newer one (%s) is its previous", loaded.checkpoint.c_str(),
+			loaded.time.c_str(), haveNewer ? newer.checkpoint.c_str() : "none");
+		if (CoopCloud::Enabled())
+		{
+			// (its own savegame file: the last one saved here is the other slot)
+			s_lastEngineFile.clear();
+			UploadCheckpoint(loaded);
+		}
 	}
 
 	// a downloaded checkpoint: stored as the campaign's newest on this PC
@@ -2158,6 +2266,12 @@ namespace
 				CaptureSaveableIds(s_load.save);
 		}
 		CoopText::Say("[CoopSave] progress loaded: %s, checkpoint %s (saved %s)", s_load.level.c_str(), s_load.checkpoint.c_str(), s_load.time.c_str());
+		s_worldSave = s_load.save;
+		if (s_loadPrevious)
+		{
+			s_loadPrevious = false;
+			MakeLoadedCurrent();
+		}
 		// (the world settles: see Settle)
 		s_settleUntil = gEnv->pTimer->GetAsyncCurTime() + 10.0f;
 		// while the world settles no player is hurt by things falling on him
@@ -2334,6 +2448,11 @@ void CoopSave::Init()
 
 void CoopSave::OnLoadingStart(const char* levelName)
 {
+	// (a level load: the entities and their ids are of another world now; a
+	// save's list of them, and which save the world was, do not hold any
+	// more, the review)
+	s_savedIds.clear();
+	s_worldSave.clear();
 	s_readyLevel.clear();
 	s_pending = false;
 	s_levelStartSaved = false;
@@ -2882,4 +3001,23 @@ bool CoopSave::OnGameKey(const SInputEvent& event)
 const char* CoopSave::CurrentCampaign()
 {
 	return s_campaignName.c_str();
+}
+
+bool CoopSave::PreviousIsNewer(const char* id)
+{
+	// (the menu asks every frame: the files read every 2 s at most)
+	static string s_id;
+	static bool s_newer = false;
+	const string campaign = id ? string(id) : s_campaign;
+	const float now = gEnv->pTimer->GetAsyncCurTime();
+	if (campaign != s_id || now - s_prevNewerAt > 2.0f)
+	{
+		s_id = campaign;
+		s_prevNewerAt = now;
+		SProgress cur, prev;
+		// ("2026-10-21 19:23:56": compared as text)
+		s_newer = !campaign.empty() && ReadProgress(CampaignFile(campaign, "progress.txt"), cur)
+			&& ReadProgress(CampaignFile(campaign, "progress_prev.txt"), prev) && strcmp(prev.time.c_str(), cur.time.c_str()) > 0;
+	}
+	return s_newer;
 }

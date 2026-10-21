@@ -3594,10 +3594,25 @@ void CPlayer::CreateVoiceListener()
 	if(gEnv->bMultiplayer && gEnv->bClient && !IsClient())
 	{
 		// remote players need a voice listener
-		if(!m_pVoiceListener)
+		// (co-op: only the players, who can speak. An AI soldier is a CPlayer
+		// too, and the co-op host runs as a network game: each soldier got a
+		// voice-chat stream that looped 200 ms of silence at full volume at
+		// the listener and never stopped; 64 of them took every one of FMOD's
+		// voices and the game went silent, the user's games of 2026-10-18 and
+		// 10-21)
+		if(!m_pVoiceListener && !strcmp(GetEntity()->GetClass()->GetName(), "Player"))
 		{
 			m_pVoiceListener = GetGameObject()->AcquireExtension("VoiceListener");
 		}
+	}
+}
+
+void CPlayer::ReleaseVoiceListener()
+{
+	if (m_pVoiceListener)
+	{
+		GetGameObject()->ReleaseExtension("VoiceListener");
+		m_pVoiceListener = NULL;
 	}
 }
 

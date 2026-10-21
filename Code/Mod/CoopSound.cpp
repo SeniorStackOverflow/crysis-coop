@@ -12,6 +12,7 @@ float CoopSoundOutputPeak(bool* pActive);	// CoopSoundMeter.cpp
 bool CoopSoundOutputMuted();	// CoopSoundMeter.cpp
 bool CoopFmodChannels(void* pSystem, int maxChannels, int* pPlaying, int* pVirtual, int* pSoftware, float cpu[4]);	// CoopSoundMeter.cpp
 int CoopFmodChannelList(void* pSystem, int maxChannels, const char* filter, int maxLines, void (*pLine)(const char*));	// CoopSoundMeter.cpp
+int CoopFmodVoiceStreams(void* pSystem, int maxChannels, int* pHeard);	// CoopSoundMeter.cpp
 struct SCoopFmodWatch
 {
 	int stuck, stopped, late, takenAway, started, startedHeard;
@@ -44,6 +45,8 @@ bool CoopWindowFocused(void* hwnd);	// CoopSoundMeter.cpp
 
 namespace CoopSound
 {
+	void* FmodSystem(int* pMaxChannels);
+
 	namespace
 	{
 		const float CHECK_EVERY = 1.0f;		// s between looks at the output
@@ -92,9 +95,12 @@ namespace CoopSound
 			string nan;
 			if (s.mixNaN)
 				nan.Format(" (%d not a number)", s.mixNaN);
-			return string().Format("mix peak %.4f%s%s; master volume %.2f%s%s, peak %.4f; %d groups%s%s; channels %d playing, %d heard, %d audible (%d moving on, %d standing, %d more paused); loudest:%s",
+			int maxChannels = 0, voiceHeard = 0;
+			void* pSystem = FmodSystem(&maxChannels);
+			const int voice = pSystem ? CoopFmodVoiceStreams(pSystem, maxChannels, &voiceHeard) : 0;
+			return string().Format("mix peak %.4f%s%s; master volume %.2f%s%s, peak %.4f; %d groups%s%s; channels %d playing, %d heard, %d audible (%d moving on, %d standing, %d more paused); voice-chat streams %d (%d heard); loudest:%s",
 				s.mixPeak, nan.c_str(), s.mixSame ? " (the same samples as a second ago)" : "", s.masterVolume, s.masterPaused ? " PAUSED" : "", s.masterMute ? " MUTED" : "",
-				s.masterPeak, s.groups, s.groupsOff[0] ? ", off:" : "", s.groupsOff, s.playing, s.heard, s.audible, s.moving, s.frozen, s.pausedAudible, s.top[0] ? s.top : " -");
+				s.masterPeak, s.groups, s.groupsOff[0] ? ", off:" : "", s.groupsOff, s.playing, s.heard, s.audible, s.moving, s.frozen, s.pausedAudible, voice, voiceHeard, s.top[0] ? s.top : " -");
 		}
 
 		// the sound system off and on again (0.3 s)
@@ -175,8 +181,12 @@ namespace CoopSound
 		float cpu[4];
 		if (!CoopFmodChannels(pSystem, maxChannels, &playing, &isVirtual, &software, cpu))
 			return string().Format("FMOD: no answer (%d channels)", maxChannels);
-		return string().Format("FMOD: %d channels playing (%d heard, %d virtual) of %d, %d mixed at most; cpu %.1f%% (dsp %.1f, stream %.1f, update %.1f)",
-			playing, playing - isVirtual, isVirtual, maxChannels, software, cpu[3], cpu[0], cpu[1], cpu[2]);
+		// (voice-chat streams: one per soldier took every voice, see
+		// CPlayer::CreateVoiceListener)
+		int voiceHeard = 0;
+		const int voice = CoopFmodVoiceStreams(pSystem, maxChannels, &voiceHeard);
+		return string().Format("FMOD: %d channels playing (%d heard, %d virtual) of %d, %d mixed at most; cpu %.1f%% (dsp %.1f, stream %.1f, update %.1f); voice-chat streams %d (%d heard)",
+			playing, playing - isVirtual, isVirtual, maxChannels, software, cpu[3], cpu[0], cpu[1], cpu[2], voice, voiceHeard);
 	}
 
 	// FMOD's one-shot channels stuck virtual at their start (CoopFmodWatch):

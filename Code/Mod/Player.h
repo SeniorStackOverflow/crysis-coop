@@ -687,7 +687,10 @@ public:
 	//Hit assistance
 	bool HasHitAssistance();
 
-	void CreateVoiceListener();	
+	void CreateVoiceListener();
+	// co-op: an AI soldier's voice-chat listener off again (CoopAI)
+	void ReleaseVoiceListener();
+	bool HasVoiceListener() const { return m_pVoiceListener != NULL; }
 
 	struct SStagingParams
 	{

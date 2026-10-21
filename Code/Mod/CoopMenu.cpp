@@ -543,11 +543,13 @@ namespace
 		// the campaign's buttons side by side, each as wide as its label
 		const bool picked = s_selected >= 0 && s_selected < (int)s_campaigns.size() && !CoopSave::IsBusy();
 		const char* del = s_deleteArmed == s_selected && picked ? "Sure? Delete" : "Delete";
-		const float w1 = FitW("Continue", 140), w2 = FitW("Checkpoint before", 150), w3 = (std::max)(FitW("Sure? Delete", 130), FitW("Delete", 130));
+		// (its "previous" is the newer one after the one before was loaded)
+		const char* before = picked && CoopSave::PreviousIsNewer(s_campaigns[s_selected].id.c_str()) ? "Newer checkpoint" : "Checkpoint before";
+		const float w1 = FitW("Continue", 140), w2 = FitW(before, 150), w3 = (std::max)(FitW("Sure? Delete", 130), FitW("Delete", 130));
 		if (!Drawing())
 			NeedInner(w1 + w2 + w3 + 20);
 		Button(ID_CAMPAIGN_CONTINUE, x, y, w1, 34, "Continue", picked);
-		Button(ID_CAMPAIGN_PREV, x + w1 + 10, y, w2, 34, "Checkpoint before", picked);
+		Button(ID_CAMPAIGN_PREV, x + w1 + 10, y, w2, 34, before, picked);
 		Button(ID_CAMPAIGN_DELETE, x + w1 + w2 + 20, y, w3, 34, del, picked);
 		y += 46;
 		y += StatusLine(x, y);
@@ -650,7 +652,7 @@ namespace
 			Button(ID_SAVE, x, y, w, 36, "Save now", !busy);
 			y += 44;
 			Button(ID_LOAD, x, y, w * 0.5f - 5, 36, "Back to the last checkpoint", !busy && campaign[0]);
-			Button(ID_LOAD_PREV, x + w * 0.5f + 5, y, w * 0.5f - 5, 36, "The checkpoint before", !busy && campaign[0]);
+			Button(ID_LOAD_PREV, x + w * 0.5f + 5, y, w * 0.5f - 5, 36, CoopSave::PreviousIsNewer(0) ? "The newer checkpoint" : "The checkpoint before", !busy && campaign[0]);
 			y += 44;
 			Button(ID_GAME_CAMPAIGNS, x, y, w, 36, "Other campaigns / new campaign");
 			y += 52;
@@ -796,7 +798,8 @@ namespace
 		else if ((id == ID_CAMPAIGN_CONTINUE || id == ID_CAMPAIGN_PREV) && s_selected >= 0 && s_selected < (int)s_campaigns.size())
 		{
 			CoopSave::ContinueCampaign(s_campaigns[s_selected].id.c_str(), id == ID_CAMPAIGN_PREV);
-			Note(id == ID_CAMPAIGN_PREV ? "Continuing from the checkpoint before..." : "Continuing...");
+			Note(id != ID_CAMPAIGN_PREV ? "Continuing..." : CoopSave::PreviousIsNewer(s_campaigns[s_selected].id.c_str())
+				? "Continuing from the newer checkpoint..." : "Continuing from the checkpoint before...");
 		}
 		else if (id == ID_CAMPAIGN_DELETE && s_selected >= 0 && s_selected < (int)s_campaigns.size())
 		{

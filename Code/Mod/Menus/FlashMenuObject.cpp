@@ -1273,6 +1273,10 @@ void CFlashMenuObject::ShowInGameMenu(bool bShow)
 		else
 		{
 			DestroyIngameMenu();
+			// (the menu's ambience loop off with it: only HideInGameMenuNextFrame
+			// stopped it, and after a checkpoint loaded from the co-op menu it
+			// went on in the level, the user's game of 2026-10-21)
+			PlaySound(ESound_MenuAmbience, false);
 		}
 		m_repeatEvent = SInputEvent();
 	}

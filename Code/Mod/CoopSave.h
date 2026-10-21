@@ -76,4 +76,7 @@ namespace CoopSave
 	// F8 by default) save and load the co-op game; true: the key was taken
 	bool OnGameKey(const struct SInputEvent& event);
 	const char* CurrentCampaign();      // its name, "" none
+	// the campaign's "previous" checkpoint is the newer one (the one before
+	// was loaded and made current); 0: the campaign the host plays
+	bool PreviousIsNewer(const char* id);
 }

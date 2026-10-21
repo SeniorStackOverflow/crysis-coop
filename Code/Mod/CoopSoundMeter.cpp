@@ -234,6 +234,62 @@ bool CoopFmodChannels(void* pSystem, int maxChannels, int* pPlaying, int* pVirtu
 // filter, every one for an empty filter): heard or virtual, paused, where it
 // plays in its sound, priority, volume, audibility, loops left. Calls
 // pLine(text) for each, at most maxLines; returns how many matched
+// CrySound's voice-chat playback streams (CryAction's CVoiceListener: a
+// user stream with no name, 200 ms of 8 kHz mono looped, at the listener at
+// full volume while nobody speaks): how many play, how many FMOD mixes. One
+// for each AI soldier filled all 64 voices with silence (the user's games of
+// 2026-10-18 and 10-21)
+int CoopFmodVoiceStreams(void* pSystem, int maxChannels, int* pHeard)
+{
+	typedef int(__stdcall* FnGetChannel)(void*, int, void**);
+	typedef int(__stdcall* FnGetBool)(void*, bool*);
+	typedef int(__stdcall* FnGetPtr)(void*, void**);
+	typedef int(__stdcall* FnGetName)(void*, char*, int);
+	typedef int(__stdcall* FnGetUIntUnit)(void*, unsigned int*, unsigned int);
+	static FnGetChannel s_channel = 0;
+	static FnGetBool s_isPlaying = 0, s_isVirtual = 0;
+	static FnGetPtr s_sound = 0;
+	static FnGetName s_name = 0;
+	static FnGetUIntUnit s_length = 0;
+	static bool s_looked = false;
+	if (!s_looked)
+	{
+		s_looked = true;
+		if (HMODULE h = GetModuleHandleA("fmodex.dll"))
+		{
+			s_channel = (FnGetChannel)GetProcAddress(h, "?getChannel@System@FMOD@@QAG?AW4FMOD_RESULT@@HPAPAVChannel@2@@Z");
+			s_isPlaying = (FnGetBool)GetProcAddress(h, "?isPlaying@Channel@FMOD@@QAG?AW4FMOD_RESULT@@PA_N@Z");
+			s_isVirtual = (FnGetBool)GetProcAddress(h, "?isVirtual@Channel@FMOD@@QAG?AW4FMOD_RESULT@@PA_N@Z");
+			s_sound = (FnGetPtr)GetProcAddress(h, "?getCurrentSound@Channel@FMOD@@QAG?AW4FMOD_RESULT@@PAPAVSound@2@@Z");
+			s_name = (FnGetName)GetProcAddress(h, "?getName@Sound@FMOD@@QAG?AW4FMOD_RESULT@@PADH@Z");
+			s_length = (FnGetUIntUnit)GetProcAddress(h, "?getLength@Sound@FMOD@@QAG?AW4FMOD_RESULT@@PAII@Z");
+		}
+	}
+	if (pHeard)
+		*pHeard = 0;
+	if (!pSystem || !s_channel || !s_isPlaying || !s_isVirtual || !s_sound || !s_name || !s_length || maxChannels <= 0 || maxChannels > 4096
+		|| IsBadReadPtr(pSystem, 64))
+		return 0;
+	int n = 0;
+	for (int i = 0; i < maxChannels; ++i)
+	{
+		void* pChannel = 0;
+		void* pSound = 0;
+		bool playing = false, isVirtual = false;
+		if (s_channel(pSystem, i, &pChannel) != 0 || !pChannel || s_isPlaying(pChannel, &playing) != 0 || !playing
+			|| s_sound(pChannel, &pSound) != 0 || !pSound)
+			continue;
+		char name[16] = "?";
+		unsigned int length = 0;
+		if (s_name(pSound, name, sizeof(name) - 1) != 0 || name[0] || s_length(pSound, &length, 1) != 0 || length != 200)
+			continue;
+		++n;
+		if (pHeard && s_isVirtual(pChannel, &isVirtual) == 0 && !isVirtual)
+			++*pHeard;
+	}
+	return n;
+}
+
 int CoopFmodChannelList(void* pSystem, int maxChannels, const char* filter, int maxLines, void (*pLine)(const char*))
 {
 	typedef int(__stdcall* FnGetChannel)(void*, int, void**);

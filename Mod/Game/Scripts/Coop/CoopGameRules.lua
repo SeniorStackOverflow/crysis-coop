@@ -728,9 +728,13 @@ function TeamInstantAction:ProcessActorDamage(hit)
 		end
 		local health = math.floor(target.actor:GetHealth() - damage);
 		if (C.DEBUG) then
-			CoopLog(string.format("DAMAGE player %s by %s type=%s hit=%.1f taken=%.1f hp %d->%d",
+			-- (the suit's energy after the armor took its part, and the mode:
+			-- each hit's cost, for the AI companion's suit rules)
+			local energy = target.actor.GetNanoSuitEnergy and target.actor:GetNanoSuitEnergy();
+			local mode = target.actor.GetNanoSuitMode and target.actor:GetNanoSuitMode();
+			CoopLog(string.format("DAMAGE player %s by %s type=%s hit=%.1f taken=%.1f hp %d->%d suit %s en %s",
 				tostring(target:GetName()), tostring(shooter and shooter:GetName()), tostring(hit.type),
-				hit.damage or 0, damage, target.actor:GetHealth(), health));
+				hit.damage or 0, damage, target.actor:GetHealth(), health, tostring(mode), energy and string.format("%.0f", energy) or "?"));
 		end
 		target.actor:SetHealth(health);
 		return (health <= 0);
@@ -1830,7 +1834,15 @@ function TeamInstantAction:CoopTickFallWatch()
 			self.coopFallWatch[id] = nil;
 		else
 			local now = p:GetWorldPos(g_Vectors.temp_v1);
-			if (now.z < w.pos.z - 8) then
+			local dx, dy = now.x - w.pos.x, now.y - w.pos.y;
+			-- moved elsewhere (the host's game put the companion next to the
+			-- one it follows): no fall. It was put back into the enemy camp
+			-- twice, 270 m off and 6 m up (the user's game of 2026-10-21). Not
+			-- a few metres: a revived player walks, and the client keeps its
+			-- old place for a tick after a put-back
+			if (dx * dx + dy * dy > 400 and _time - w.t > 1.5) then
+				self.coopFallWatch[id] = nil;
+			elseif (now.z < w.pos.z - 8) then
 				local by = w.by and System.GetEntity(w.by);
 				local to, ang;
 				if (by and by.actor and not by:IsDead()) then
@@ -1873,11 +1885,36 @@ function TeamInstantAction:CoopSpotOf(p, n)
 		return nil;
 	end
 	local pos, ang = CopyVec(base.pos), CopyVec(base.ang);
-	-- side by side, 1.5 m apart, to the right of where the host looks
+	-- side by side, 1.5 m apart, to the right of where the host looks (out
+	-- of the side of the vehicle he sits in)
 	local right = { x = math.cos(ang.z), y = math.sin(ang.z), z = 0 };
-	pos.x = pos.x + right.x * 1.5 * n;
-	pos.y = pos.y + right.y * 1.5 * n;
+	local d = (base.side or 0) + 1.5 * n;
+	pos.x = pos.x + right.x * d;
+	pos.y = pos.y + right.y * d;
 	return pos, ang;
+end
+
+-- the host's place in the world just loaded (the save put him there); in a
+-- vehicle seat: the vehicle's place, the friends beside it
+function TeamInstantAction:CoopLoadedHostSpot()
+	local h = g_localActor;
+	if (not h or not h.actor or h:IsDead()) then
+		return nil;
+	end
+	local spot = {
+		pos = CopyVec(h:GetWorldPos(g_Vectors.temp_v1)),
+		ang = CopyVec(h:GetWorldAngles(g_Vectors.temp_v2)),
+		host = true,
+	};
+	local vid = h.actor:GetLinkedVehicleId();
+	local v = vid and System.GetEntity(vid);
+	if (v) then
+		spot.pos = CopyVec(v:GetWorldPos(g_Vectors.temp_v1));
+		spot.ang = CopyVec(v:GetWorldAngles(g_Vectors.temp_v2));
+		local mins, maxs = v:GetLocalBBox();
+		spot.side = (mins and maxs) and (math.max(math.abs(mins.x), math.abs(maxs.x), math.abs(mins.y), math.abs(maxs.y)) + 1) or 4;
+	end
+	return spot;
 end
 
 -- everybody is down: as in single player, the last checkpoint is loaded:
@@ -1934,6 +1971,14 @@ end
 -- stayed connected (the load does not have them): as the host, each is back
 -- at his place of that checkpoint with what he had there (the carry)
 function TeamInstantAction:CoopTeamToCheckpoint()
+	-- the places kept before the load are of the world before it, maybe of
+	-- another checkpoint: the user's game of 2026-10-21 put the companion
+	-- 270 m off, next to the host's place of the checkpoint loaded before.
+	-- The friends come back next to the host, where the save put him
+	local host = self:CoopLoadedHostSpot();
+	if (host) then
+		self.coopSpots = { [g_localActor:GetName()] = host };
+	end
 	local n = 0;
 	for i,p in ipairs(self.game:GetPlayers() or {}) do
 		if (p.actor and p.id ~= g_localActorId and p.actor:GetChannel() and p.actor:GetChannel() > 0) then

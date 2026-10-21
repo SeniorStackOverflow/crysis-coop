@@ -31,6 +31,7 @@ this PC	этот ПК
 cloud	облако
 cloud (a friend's game)	облако (игра друга)
 Checkpoint before	Чекпоинт раньше
+Newer checkpoint	Чекпоинт новее
 Sure? Delete	Точно удалить?
 Delete	Удалить
 Refresh	Обновить
@@ -62,6 +63,7 @@ Campaign %s	Кампания %s
 Save now	Сохранить сейчас
 Back to the last checkpoint	Вернуться к последнему чекпоинту
 The checkpoint before	Предыдущий чекпоинт
+The newer checkpoint	Более новый чекпоинт
 Other campaigns / new campaign	Другие кампании / новая кампания
 Playing on a server (not through the relay)	Игра на сервере (не через ретранслятор)
 In your friend's game %s	В игре друга %s
@@ -71,6 +73,7 @@ The host saves the game. If he loads a checkpoint, you join again by yourself.	�
 Leave the game	Выйти из игры
 Continuing...	Продолжаю...
 Continuing from the checkpoint before...	Продолжаю с предыдущего чекпоинта...
+Continuing from the newer checkpoint...	Продолжаю с более нового чекпоинта...
 AI companion on: it joins your game in a moment	ИИ-компаньон включён: сейчас войдёт в твою игру
 AI companion off	ИИ-компаньон выключен
 Joining...	Подключаюсь...
