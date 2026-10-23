@@ -27,6 +27,8 @@ History:
 #include "WeaponSystem.h"
 #include "Projectile.h"
 #include "CoopAI.h"
+#include "CoopProps.h"
+#include "CoopAgent.h"
 
 #define KILL_NPC_TIMEOUT	7.25f
 #define TIME_TO_UPDATE_CH 0.25f
@@ -43,6 +45,9 @@ History:
 #define GRAB_TYPE_ONE_HANDED	0
 #define GRAB_TYPE_TWO_HANDED  1
 #define GRAB_TYPE_NPC					2
+
+// (Crysis Coop: CanPerformPickUp is asked for the use key's press)
+static bool s_coopUseKeyPickUp = false;
 
 #define ITEM_NO_EXCHANGE			0
 #define ITEM_CAN_PICKUP				1
@@ -633,7 +638,8 @@ void COffHand::UpdateFPView(float frameTime)
 
 	if(m_currentState==eOHS_INIT_STATE)
 	{
-		if(!gEnv->bMultiplayer)
+		// (Crysis Coop: things to carry too, as single player)
+		if(!gEnv->bMultiplayer || CoopProps::Enabled())
 			UpdateCrosshairUsabilitySP();
 		else
 			UpdateCrosshairUsabilityMP();
@@ -927,6 +933,11 @@ void COffHand::UpdateHeldObject()
 		finalMatrix.Scale(m_holdScale);	
 		finalMatrix.SetTranslation(GetSlotHelperPos(id, "item_attachment", true));
 		finalMatrix = finalMatrix * m_holdOffset;
+		// Crysis Coop: the AI companion's game has no first-person view (its
+		// camera stays at the world's origin): before its eyes, as every other
+		// game shows it
+		if (CoopAgent::IsCompanion() && GetOwnerActor())
+			finalMatrix = CoopProps::HoldMatrix(GetOwnerActor(), pEntity, m_grabType, &m_holdOffset);
 
 		//This is need it for breakable/joint-constraints stuff
 		if(IPhysicalEntity* pPhys = pEntity->GetPhysics())
@@ -1231,7 +1242,9 @@ bool COffHand::ProcessOffHandActions(EOffHandActions eOHA, int input, int activa
 	{
 		if(m_currentState&eOHS_INIT_STATE)
 		{
+			s_coopUseKeyPickUp = true;
 			int typ = CanPerformPickUp(GetOwnerActor(),NULL,true);
+			s_coopUseKeyPickUp = false;
 			if(typ==OH_GRAB_ITEM)
 			{
 				StartPickUpItem();
@@ -1719,13 +1732,24 @@ void COffHand::PerformThrow(int activationMode, EntityId throwableId, int oldFMI
 	// left hand (an ammo box it reached for, a thing): the throw reaches it as
 	// a start of fire, and it throws a real grenade (and its body stays with
 	// the left hand up at the head). The client lets go of it instead
-	if (throwableId && activationMode == eAAM_OnPress && CoopAI::IsCoopSession() && !gEnv->bServer)
+	if (throwableId && activationMode == eAAM_OnPress && CoopAI::IsCoopSession() && !gEnv->bServer && !CoopProps::HeldHere(throwableId))
 	{
 		IEntity* pThrowable = gEnv->pEntitySystem->GetEntity(throwableId);
 		CryLogAlways("[Coop] %s lets go of the %s instead of throwing it (the server would throw a grenade)",
 			GetOwnerActor() ? GetOwnerActor()->GetEntity()->GetName() : "?", pThrowable ? pThrowable->GetName() : "?");
 		IgnoreCollisions(false, throwableId);
 		DrawNear(false, throwableId);
+		// (the hand free again: no "heavy thing" left to keep him from lying
+		// down, the review; and his feet on the ground again, as a throw does)
+		if (CActor* pOwner = GetOwnerActor())
+		{
+			if (pOwner->GetActorClass() == CPlayer::GetActorClassType())
+				static_cast<CPlayer*>(pOwner)->NotifyObjectGrabbed(false, throwableId, false, m_grabType == GRAB_TYPE_TWO_HANDED);
+			if (pOwner->IsClient() && m_grabType == GRAB_TYPE_TWO_HANDED)
+				if (ICharacterInstance* pCharacter = pOwner->GetEntity()->GetCharacter(0))
+					if (ISkeletonPose* pSkeletonPose = pCharacter->GetISkeletonPose())
+						pSkeletonPose->EnableFootGroundAlignment(true);
+		}
 		m_mainHand = static_cast<CItem*>(GetOwnerActor()->GetCurrentItem());
 		m_mainHandWeapon = m_mainHand ? static_cast<CWeapon*>(m_mainHand->GetIWeapon()) : NULL;
 		m_mainHandIsDualWield = m_mainHand ? m_mainHand->IsDualWield() : false;
@@ -1832,7 +1856,41 @@ void COffHand::PerformThrow(int activationMode, EntityId throwableId, int oldFMI
 }
 
 //--------------
+// Crysis Coop: in a coop game the left hand picks things up as in single
+// player (a network game: weapons only), but no soldier, no rock of the
+// ground and no piece of something broken: what the server can tell every
+// game about (CoopProps)
 int COffHand::CanPerformPickUp(CActor *pActor, IPhysicalEntity *pPhysicalEntity /*=NULL*/, bool getEntityInfo /*= false*/)
+{
+	const int grab = CanPerformPickUpSP(pActor, pPhysicalEntity, getEntityInfo);
+	if (!CoopProps::Enabled())
+		return grab;
+	IEntity* pThing = m_crosshairId ? m_pEntitySystem->GetEntity(m_crosshairId) : 0;
+	// (not one in somebody else's hands)
+	const bool ok = grab == OH_GRAB_ITEM || grab == OH_NO_GRAB || (grab == OH_GRAB_OBJECT && !m_pRockRN && CoopProps::Eligible(pThing)
+		&& !(CoopProps::IsHeld(pThing->GetId()) && !CoopProps::HeldHere(pThing->GetId())));
+	// (the use key pressed: what the hand made of it, for the log; not the
+	// crosshair's look at a weapon, 4 times a second)
+	if (s_coopUseKeyPickUp && getEntityInfo && pActor && pActor->IsClient())
+	{
+		const ray_hit* pRay = pActor->GetGameObject()->GetWorldQuery() ? pActor->GetGameObject()->GetWorldQuery()->GetLookAtPoint(m_range) : 0;
+		IEntity* pLooked = pRay && pRay->pCollider ? m_pEntitySystem->GetEntityFromPhysics(pRay->pCollider) : 0;
+		static const char* const s_grabs[] = { "nothing", "a thing", "a weapon or item", "a soldier" };
+		CryLogAlways("[CoopProp] %s's left hand: %s%s (looks at %s, %.1f m)", pActor->GetEntity()->GetName(),
+			s_grabs[grab >= 0 && grab <= 3 ? grab : 0], ok ? "" : " - not in a coop game", pLooked ? pLooked->GetName() : (pRay ? "the world" : "nothing in reach"),
+			pRay ? pRay->dist : 0.0f);
+	}
+	if (ok)
+		return grab;
+	if (getEntityInfo)
+	{
+		m_preHeldEntityId = 0;
+		m_pRockRN = NULL;
+	}
+	return OH_NO_GRAB;
+}
+
+int COffHand::CanPerformPickUpSP(CActor *pActor, IPhysicalEntity *pPhysicalEntity, bool getEntityInfo)
 {
 	if (!pActor || !pActor->IsClient())
 		return OH_NO_GRAB;
@@ -1844,7 +1902,7 @@ int COffHand::CanPerformPickUp(CActor *pActor, IPhysicalEntity *pPhysicalEntity 
 	SMovementState info;
 	pMC->GetMovementState(info);
 
-	if(gEnv->bMultiplayer)
+	if(gEnv->bMultiplayer && !CoopProps::Enabled())
 		return CheckItemsInProximity(info.eyePosition,info.eyeDirection,getEntityInfo);
 
 	EStance playerStance = pActor->GetStance();
@@ -2211,10 +2269,29 @@ bool COffHand::PerformPickUp()
 
 		m_checkForConstraintDelay = 2; //Wait 2 frames for checking the constraint (issue with sys_physics_cpu 1)
 
+		// Crysis Coop: a thing in the hand: the server decides, every game sees it
+		if (m_currentState & eOHS_PICKING)
+			CoopProps::OnLocalGrab(pActor, m_heldEntityId, m_grabType);
+
 		return true;
 	}
 
 	return false;
+}
+
+//===========================================================================================
+// Crysis Coop: let go of the thing in the hand, a drop as with the right mouse
+// button (the server said no, or takes it: the holder died, sat in a vehicle)
+void COffHand::CoopForceDrop()
+{
+	if (!m_heldEntityId || !(m_currentState & (eOHS_HOLDING_OBJECT | eOHS_MELEE)))
+		return;
+	if (m_currentState == eOHS_MELEE)
+		GetScheduler()->Reset();
+	m_currentState = eOHS_HOLDING_OBJECT;
+	m_forceThrow = false;
+	OnActionDrop(GetOwnerId(), ActionId("zoom"), eAAM_OnPress, 1.0f);
+	OnActionDrop(GetOwnerId(), ActionId("zoom"), eAAM_OnRelease, 0.0f);
 }
 
 //===========================================================================================

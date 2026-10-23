@@ -7,6 +7,8 @@
 #include <IMusicSystem.h>
 #include "IAnimationGraph.h"
 #include <IActorSystem.h>
+#include <set>
+#include <windows.h>
 
 float CoopSoundOutputPeak(bool* pActive);	// CoopSoundMeter.cpp
 bool CoopSoundOutputMuted();	// CoopSoundMeter.cpp
@@ -655,5 +657,205 @@ namespace CoopSound
 			}
 			Restart(now);
 		}
+	}
+}
+
+// The engine's sound system did not start (s_SoundEnable 0 - the AI
+// companion's game, the autotester's - or no sound device that works):
+// CrySystem deleted its CSoundSystem ("Cannot initialize SoundSystem!") and
+// made a dummy one, but the console variables it registered with its own
+// memory still point into that freed memory. Setting one wrote into MSVCR80's
+// small-block heap, and the game crashed later in MSVCR80: a spec change (the
+// first start's spec detection, the companion's +sys_spec 1: sys_spec_Sound
+// sets nine of them), the mod's sound limits, the host's values a joining
+// client takes (CryAction sets the server's s_PriorityThreshold and
+// s_MaxActiveSounds and disconnects a client that does not take them)
+// (2026-10-22). Each one gets memory of its own: the console's object stays
+// (the engine keeps pointers to them), its pointer is moved; one that cannot
+// be moved is not changed any more
+namespace
+{
+	struct SFailedSoundCvars : public IConsoleVarSink
+	{
+		std::set<ICVar*> dead;	// still pointing into the freed memory
+		std::set<string> told;
+		bool on;
+		SFailedSoundCvars() : on(false) {}
+
+		virtual bool OnBeforeVarChange(ICVar* pVar, const char* sNewValue)
+		{
+			if (!dead.count(pVar))
+				return true;
+			if (told.insert(pVar->GetName()).second)
+				CryLogAlways("[CoopSound] no sound system: %s stays (\"%s\" refused: it still points into the failed sound system's freed memory)",
+					pVar->GetName(), sNewValue ? sNewValue : "");
+			return false;
+		}
+		virtual void OnAfterVarChange(ICVar* pVar) {}
+	};
+	SFailedSoundCvars s_failedSoundCvars;
+
+	// memory for the moved values: the process heap's (Coop.dll's own CRT heap
+	// goes with the DLL, the console outlives it), never freed
+	template <class T>
+	T* KeepMemory()
+	{
+		return (T*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(T));
+	}
+
+	// a kind of console variable CrySystem makes: its class (the vtable) and,
+	// for one with the caller's memory, the place in it of that pointer -
+	// learnt from one of the mod's own (exactly one place holds the address)
+	struct SVarKind
+	{
+		void* vtable;
+		int offset;
+	};
+
+	void* VTable(ICVar* pVar)
+	{
+		return pVar ? *(void**)pVar : 0;
+	}
+
+	template <class T>
+	SVarKind LearnRefKind(const char* name, T value)
+	{
+		SVarKind kind = { 0, -1 };
+		T* pProbe = KeepMemory<T>();
+		if (!pProbe)
+			return kind;
+		*pProbe = value;
+		ICVar* pVar = gEnv->pConsole->Register(name, pProbe, value, 0, "Crysis Coop: the console's kind of variable with its own memory (testing it)");
+		if (!pVar)
+			return kind;
+		kind.vtable = VTable(pVar);
+		int found = 0;
+		// (CrySystem makes them 0x1c bytes: the vtable, then the pointer at 0x18)
+		for (int k = 4; k < 0x1c; k += 4)
+			if (*(T**)((char*)pVar + k) == pProbe)
+			{
+				kind.offset = k;
+				++found;
+			}
+		if (found != 1)
+			kind.offset = -1;
+		return kind;
+	}
+
+	// the variable reads its new memory: a value written there is what it gives
+	bool ReadsFrom(ICVar* pVar, int* p)
+	{
+		const int was = *p;
+		*p = was ^ 0x5A5A;
+		const bool ok = pVar->GetIVal() == *p;
+		*p = was;
+		return ok;
+	}
+	bool ReadsFrom(ICVar* pVar, float* p)
+	{
+		const float was = *p;
+		*p = was == 1234.5f ? 4321.5f : 1234.5f;
+		const bool ok = pVar->GetFVal() == *p;
+		*p = was;
+		return ok;
+	}
+
+	// moves one of the caller's-memory kind to memory of its own
+	template <class T>
+	bool MoveToOwnMemory(ICVar* pVar, const SVarKind& kind)
+	{
+		if (!kind.vtable || kind.offset < 0 || VTable(pVar) != kind.vtable)
+			return false;
+		T** pRef = (T**)((char*)pVar + kind.offset);
+		T* pOld = *pRef;
+		T* pNew = KeepMemory<T>();
+		if (!pOld || !pNew)
+			return false;
+		*pNew = *pOld;	// the value it had (read from the freed memory)
+		*pRef = pNew;
+		if (ReadsFrom(pVar, pNew))
+			return true;
+		*pRef = pOld;
+		return false;
+	}
+
+	void MoveFailedSoundCvars()
+	{
+		IConsole* pConsole = gEnv->pConsole;
+		const SVarKind intRef = LearnRefKind<int>("coop_sound_probe_int", 7);
+		const SVarKind floatRef = LearnRefKind<float>("coop_sound_probe_float", 7.0f);
+		// (the console's own memory: nothing freed under them)
+		const void* own[3] = { VTable(pConsole->RegisterInt("coop_sound_probe_own_int", 7, 0, "Crysis Coop: testing")),
+			VTable(pConsole->RegisterFloat("coop_sound_probe_own_float", 7.0f, 0, "Crysis Coop: testing")),
+			VTable(pConsole->RegisterString("coop_sound_probe_own_string", "7", 0, "Crysis Coop: testing")) };
+		const char* names[1024];
+		const size_t n = pConsole->GetSortedVars(names, 1024, "s_");
+		int moved = 0, owned = 0;
+		string refused;
+		for (size_t i = 0; i < n; ++i)
+		{
+			// (the dummy sound system registers these two again, in its own
+			// memory: the failed one took them out as it went)
+			if (!names[i] || _strnicmp(names[i], "s_", 2) || !_stricmp(names[i], "s_SoundEnable") || !_stricmp(names[i], "s_DummySound"))
+				continue;
+			ICVar* pVar = pConsole->GetCVar(names[i]);
+			if (!pVar)
+				continue;
+			const void* vtable = VTable(pVar);
+			bool ok = false;
+			if (vtable == own[0] || vtable == own[1] || vtable == own[2])
+			{
+				ok = true;
+				++owned;
+			}
+			else if (pVar->GetType() == CVAR_INT ? MoveToOwnMemory<int>(pVar, intRef) : pVar->GetType() == CVAR_FLOAT && MoveToOwnMemory<float>(pVar, floatRef))
+			{
+				ok = true;
+				++moved;
+			}
+			if (!ok)
+			{
+				s_failedSoundCvars.dead.insert(pVar);
+				refused += string(" ") + pVar->GetName();
+				continue;
+			}
+			// (what a change of it called was the failed sound system's)
+			pVar->SetOnChangeCallback(0);
+		}
+		CryLogAlways("[CoopSound] no sound system: of its %d console variables %d have memory of their own now, %d had the console's, %d are not changed any more:%s (the kinds: int %d, float %d)",
+			(int)n, moved, owned, (int)s_failedSoundCvars.dead.size(), refused.empty() ? " -" : refused.c_str(), intRef.offset, floatRef.offset);
+	}
+}
+
+bool CoopSound::NoRealSoundSystem()
+{
+	return s_failedSoundCvars.on;
+}
+
+void CoopSound::GuardFailedSoundSystem(bool on)
+{
+	if (!gEnv || !gEnv->pConsole)
+		return;
+	if (!on)
+	{
+		if (s_failedSoundCvars.on)
+		{
+			gEnv->pConsole->RemoveConsoleVarSink(&s_failedSoundCvars);
+			s_failedSoundCvars.on = false;
+		}
+		return;
+	}
+	ICVar* pEnable = gEnv->pConsole->GetCVar("s_SoundEnable");
+	ICVar* pDummy = gEnv->pConsole->GetCVar("s_DummySound");
+	ISoundSystem* pSound = gEnv->pSoundSystem;
+	IAudioDevice* pDevice = pSound ? pSound->GetIAudioDevice() : 0;
+	const bool off = (pEnable && !pEnable->GetIVal()) || (pDummy && pDummy->GetIVal());
+	CryLogAlways("[CoopSound] the sound system at the start: %s (s_SoundEnable %d, s_DummySound %d, audio device %p)",
+		off || !pDevice ? "none (a dummy one)" : "a real one", pEnable ? pEnable->GetIVal() : -1, pDummy ? pDummy->GetIVal() : -1, pDevice);
+	if ((off || !pDevice) && !s_failedSoundCvars.on)
+	{
+		MoveFailedSoundCvars();
+		gEnv->pConsole->AddConsoleVarSink(&s_failedSoundCvars);
+		s_failedSoundCvars.on = true;
 	}
 }

@@ -314,6 +314,13 @@ public:
 	void CoopSendVehicle(const CoopVehicleParams& params, int channelId);
 	struct CoopTurretParams;
 	void CoopSendTurret(const CoopTurretParams& params, int exceptChannel);
+	struct CoopPropParams;
+	// carried things (CoopProps): to the server; to every client (channelId 0)
+	// or one; a thrown thing's flight (unreliable)
+	void CoopSendPropToServer(const CoopPropParams& params);
+	// (to the games in the game only: channel 0 all of them; the number reached)
+	int CoopSendProp(const CoopPropParams& params, int channelId);
+	int CoopSendPropState(const CoopPropParams& params, int channelId);
 	void CoopSendAIMove(EntityId id, uint8 stance, const Vec3& move, const Vec3& look, bool sprint);
 	virtual void SetObjectiveEntity(int teamId, const char *objective, EntityId entityId);
 	virtual void RemoveObjective(int teamId, const char *objective);
@@ -956,6 +963,43 @@ public:
 		}
 	};
 
+	// Crysis Coop: a thing carried in the left hand (CoopProps): picked up,
+	// held, let go, thrown, where it lies. The thing is a level entity, sent by
+	// its own id (the same on every machine); the one who holds it is a player
+	// (bound: 'eid')
+	struct CoopPropParams
+	{
+		CoopPropParams(): op(0), prop(0), holder(0), grab(0), epoch(0), seq(0)
+		{ pos.zero(); rot.SetIdentity(); v.zero(); w.zero(); relPos.zero(); relRot.SetIdentity(); }
+		uint8 op;
+		uint32 prop;
+		EntityId holder;
+		uint8 grab;      // one-handed 0, two-handed 1
+		uint8 epoch;     // the server's count of loads (older ones are left out)
+		uint16 seq;      // per thing, the server's: newer ones only
+		Vec3 pos;        // the thing's place and turn
+		Quat rot;
+		Vec3 v;          // its speed and spin
+		Vec3 w;
+		Vec3 relPos;     // where it is in the holder's hands (to his eyes)
+		Quat relRot;
+		void SerializeWith(TSerialize ser)
+		{
+			ser.Value("o", op);
+			ser.Value("p", prop);
+			ser.Value("h", holder, 'eid');
+			ser.Value("g", grab);
+			ser.Value("e", epoch);
+			ser.Value("s", seq);
+			ser.Value("x", pos);
+			ser.Value("r", rot);
+			ser.Value("v", v);
+			ser.Value("w", w);
+			ser.Value("rp", relPos);
+			ser.Value("rr", relRot);
+		}
+	};
+
 	struct SetObjectiveParams
 	{
 		SetObjectiveParams(): status(0), entityId(0), rawEntityId(0) {};
@@ -1122,6 +1166,9 @@ public:
 	DECLARE_SERVER_RMI_NOATTACH(SvCoopSync, CoopSyncParams, eNRT_ReliableOrdered);
 	DECLARE_CLIENT_RMI_NOATTACH(ClCoopTurret, CoopTurretParams, eNRT_ReliableOrdered);
 	DECLARE_SERVER_RMI_NOATTACH(SvCoopTurret, CoopTurretParams, eNRT_ReliableOrdered);
+	DECLARE_SERVER_RMI_NOATTACH(SvCoopProp, CoopPropParams, eNRT_ReliableOrdered);
+	DECLARE_CLIENT_RMI_NOATTACH(ClCoopProp, CoopPropParams, eNRT_ReliableOrdered);
+	DECLARE_CLIENT_RMI_NOATTACH_FAST(ClCoopPropState, CoopPropParams, eNRT_UnreliableUnordered);
 	DECLARE_CLIENT_RMI_NOATTACH_FAST(ClSetGameStartTimer, SetGameTimeParams, eNRT_ReliableUnordered);
 
 	DECLARE_SERVER_RMI_NOATTACH(SvVote, NoParams, eNRT_ReliableUnordered);

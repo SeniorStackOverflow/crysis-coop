@@ -9,6 +9,7 @@
 #include "GameRules.h"
 #include "IPlayerInput.h"
 #include "Item.h"
+#include "OffHand.h"
 #include "IVehicleSystem.h"
 #include "Player.h"
 #include "IUIDraw.h"
@@ -278,9 +279,24 @@ bool CoopRevive::IsReviveMode()
 	return CoopAI::IsCoopSession() && (!s_pAutoRespawn || s_pAutoRespawn->GetIVal() == 0);
 }
 
+// a thing in this player's left hand (COffHand's own id is 0 while it is
+// picked up, swung or thrown)
+static bool InHand(CPlayer* pPlayer)
+{
+	if (pPlayer->GetGrabbedEntityId())
+		return true;
+	COffHand* pOffHand = static_cast<COffHand*>(pPlayer->GetWeaponByClass(CItem::sOffHandClass));
+	return pOffHand && pOffHand->CoopHeldId() != 0;
+}
+
 bool CoopRevive::OnUse(CPlayer* pPlayer, int activationMode)
 {
 	if (!IsReviveMode() || !pPlayer || pPlayer->GetHealth() <= 0 || pPlayer->GetLinkedVehicle())
+		return false;
+	// (a thing in the left hand - picked up, held, swung, thrown: the use key
+	// is its, as in single player; a release still ends the revive its press
+	// started)
+	if (activationMode == eAAM_OnPress && InHand(pPlayer))
 		return false;
 	if (activationMode == eAAM_OnPress)
 	{

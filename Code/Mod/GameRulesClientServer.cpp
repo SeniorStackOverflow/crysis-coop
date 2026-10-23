@@ -35,6 +35,7 @@ History:
 #include "IWorldQuery.h"
 #include "ShotValidator.h"
 #include "CoopRevive.h"
+#include "CoopProps.h"
 
 #include <StlUtils.h>
 
@@ -405,6 +406,9 @@ void CGameRules::CullEntitiesInExplosion(const ExplosionInfo &explosionInfo)
 			{
 				// don't remove if entity is held by the player
 				if (pClientActor && pEntity->GetId()==pClientActor->GetGrabbedEntityId())
+					continue;
+				// (Crysis Coop: nor one in anybody's hands or on its way)
+				if (CoopProps::IsBusy(pEntity->GetId()))
 					continue;
 
 				// don't remove items/pickups
@@ -1317,6 +1321,31 @@ IMPLEMENT_RMI(CGameRules, SvCoopTurret)
 	const int channelId = m_pGameFramework->GetGameChannelId(pNetChannel);
 	if (CActor* pActor = GetActorByChannelId(channelId))
 		CoopAI::OnTurretState(params.id, params.part1, params.rot1, params.part2, params.rot2, pActor->GetEntityId(), channelId);
+	return true;
+}
+
+//------------------------------------------------------------------------
+IMPLEMENT_RMI(CGameRules, SvCoopProp)
+{
+	// Crysis Coop: a client picked up, let go of or threw a thing (the sender
+	// is the channel's player)
+	const int channelId = m_pGameFramework->GetGameChannelId(pNetChannel);
+	if (CActor* pActor = GetActorByChannelId(channelId))
+		CoopProps::OnServerMessage(params, pActor, channelId);
+	return true;
+}
+
+//------------------------------------------------------------------------
+IMPLEMENT_RMI(CGameRules, ClCoopProp)
+{
+	CoopProps::OnClientMessage(params, false);
+	return true;
+}
+
+//------------------------------------------------------------------------
+IMPLEMENT_RMI(CGameRules, ClCoopPropState)
+{
+	CoopProps::OnClientMessage(params, true);
 	return true;
 }
 

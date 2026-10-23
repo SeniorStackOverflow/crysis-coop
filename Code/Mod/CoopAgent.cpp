@@ -15,6 +15,7 @@
 #include "GameRules.h"
 #include "CoopSave.h"
 #include "CoopRevive.h"
+#include "CoopProps.h"
 #include "HUD/HUD.h"
 #include "OffHand.h"
 #include "Item.h"
@@ -269,6 +270,18 @@ namespace
 		return through;
 	}
 
+	// what it holds in the left hand (no wall to its eyes: the review)
+	IPhysicalEntity* s_heldPhys = 0;
+
+	// what is in this player's left hand now: part of itself for the walking
+	// checks (a 100 kg bin in its hands is in front of it)
+	IPhysicalEntity* HeldPhysics(CPlayer* pMe)
+	{
+		COffHand* pOffHand = pMe ? static_cast<COffHand*>(pMe->GetWeaponByClass(CItem::sOffHandClass)) : 0;
+		IEntity* pHeld = pOffHand && pOffHand->CoopHeldId() ? gEnv->pEntitySystem->GetEntity(pOffHand->CoopHeldId()) : 0;
+		return pHeld ? pHeld->GetPhysics() : 0;
+	}
+
 	// the first thing in the way along a ray for the eyes (eT_See) or the
 	// feet (eT_Walk); false: nothing
 	bool FirstBlock(const Vec3& from, const Vec3& dir, int objects, IPhysicalEntity** pSkip, int nSkip, ray_hit& block, int mode = eT_See)
@@ -282,7 +295,7 @@ namespace
 		gEnv->pPhysicalWorld->RayWorldIntersection(from, dir, objects, rwi_pierceability0 | rwi_colltype_any, hits, 12, pSkip, nSkip);
 		bool found = false;
 		for (int i = 0; i < 12; ++i)
-			if (hits[i].dist >= 0.0f && hits[i].pCollider && !(Through(hits[i].surface_idx) & mode) && (!found || hits[i].dist < block.dist))
+			if (hits[i].dist >= 0.0f && hits[i].pCollider && hits[i].pCollider != s_heldPhys && !(Through(hits[i].surface_idx) & mode) && (!found || hits[i].dist < block.dist))
 			{
 				block = hits[i];
 				found = true;
@@ -516,6 +529,7 @@ namespace
 		bool doorMode;          // along the host's way point by point (its own squares find none)
 		Vec3 doorFor;
 		float arriveBlockedSince;   // next to the one it follows with something between, since
+		float unreachSince, unreachBest, unreachCheckAt;   // the one it follows out of a straight walk since, the nearest it came, next look
 		float jumpAt;           // when it last jumped up onto something on its way
 		float waitWayUntil;     // stands till then for the host's way (its own squares only got nearer)
 		float reviveSince;      // at the body of whom it revives, since
@@ -603,7 +617,7 @@ namespace
 			slideDir(ZERO), slideUntil(0), localFor(ZERO), localAt(-100), localStage(0), localPlans(0), nextCheckFor(ZERO), toCheckFor(ZERO),
 			nextCheckAt(0), toCheckAt(0), nextClear(true), toClear(true), wayCheckAt(0), wayCheckPath(-100), farSince(-1), askAt(0), reportAt(0), useHeld(false), useFor(0), useSince(0), lastHealth(-1), wasDown(false), named(false),
 			weaponAt(0), loot(0), lootSince(0), useAt(0), useBlocked(0), pathGoal(ZERO), pathAt(-100), pathAskAt(0), pathNoneAt(-100), pathNoneGoal(ZERO),
-			localFound(false), doorMode(false), doorFor(ZERO), arriveBlockedSince(-1), jumpAt(-100), waitWayUntil(0), reviveSince(-1), reachFailSince(-1), bodyToldFor(0),
+			localFound(false), doorMode(false), doorFor(ZERO), arriveBlockedSince(-1), unreachSince(-1), unreachBest(0), unreachCheckAt(0), jumpAt(-100), waitWayUntil(0), reviveSince(-1), reachFailSince(-1), bodyToldFor(0),
 			dodgeUntil(0), dodgeSide(1), retreating(false), hitAt(-100), lastFought(0), bursts(0), heldFire(0), stuckTimes(0), unseen(0), turning(0), statsAt(0), dropAt(0), downedFor(0), downedSince(0), enemySeenAt(-100),
 			cover(ZERO), haveCover(false), coverAskAt(0), retreatSince(-100), recoveredAt(-100), spreadHeldAt(-100), smallFarAt(-100),
 			coverAt(-100), peekUntil(0), peekUp(true), coverPeek(0), peekSince(0), peekSeenAt(-100), peekSide(1), openSince(-1), peeks(0), leanPeeks(0), hitsConfirmed(0), leanHoldUntil(0), leanHoldSide(0),
@@ -714,11 +728,17 @@ namespace
 
 	void Fire(CPlayer* pPlayer, bool on)
 	{
-		// not with something in the left hand: the fire key would throw it
+		// not with something in both hands, nor while picking up: the fire
+		// key would throw it (one in the left hand leaves the rifle free, as
+		// in single player)
 		if (on)
 			if (COffHand* pOffHand = static_cast<COffHand*>(pPlayer->GetWeaponByClass(CItem::sOffHandClass)))
-				if (pOffHand->GetOffHandState() & (eOHS_HOLDING_OBJECT | eOHS_HOLDING_NPC | eOHS_PICKING | eOHS_PICKING_ITEM | eOHS_PICKING_ITEM2))
+			{
+				const int state = pOffHand->GetOffHandState();
+				if ((state & (eOHS_HOLDING_NPC | eOHS_PICKING | eOHS_PICKING_ITEM | eOHS_PICKING_ITEM2 | eOHS_THROWING_OBJECT))
+					|| ((state & eOHS_HOLDING_OBJECT) && pOffHand->GetGrabType() != 0))
 					on = false;
+			}
 		if (on != s_bot.attackHeld)
 		{
 			Press(pPlayer, g_pGame->Actions().attack1, on);
@@ -728,6 +748,23 @@ namespace
 
 	void HoldUse(CPlayer* pPlayer, bool on, EntityId forWhom)
 	{
+		// (a thing in the left hand: the use key would throw it - at the body
+		// it revives; put down first, the key once the hand is free)
+		// (only a thing in the hand: in any other state - a grenade just
+		// thrown - the revive takes the key as before)
+		if (on && !s_bot.useHeld)
+			if (COffHand* pOffHand = static_cast<COffHand*>(pPlayer->GetWeaponByClass(CItem::sOffHandClass)))
+				if (pOffHand->CoopHeldId())
+				{
+					if ((pOffHand->GetOffHandState() & eOHS_HOLDING_OBJECT) && Now() >= s_bot.dropAt)
+					{
+						Press(pPlayer, g_pGame->Actions().zoom, true);
+						Press(pPlayer, g_pGame->Actions().zoom, false);
+						s_bot.dropAt = Now() + 1.5f;
+						Event("puts down what it holds: its hand for the use key");
+					}
+					return;
+				}
 		if (on != s_bot.useHeld)
 		{
 			Press(pPlayer, g_pGame->Actions().use, on);
@@ -944,11 +981,13 @@ namespace
 		Vec3 at = box.IsEmpty() || Dist2D(pBody->GetWorldPos(), body) > 1.0f ? body + Vec3(0, 0, 0.9f) : box.GetCenter();
 		if (fabsf(at.z - pos.z) > 1.6f)
 			return false;
-		IPhysicalEntity* skip[2];
+		IPhysicalEntity* skip[3];
 		int n = 0;
 		if (IPhysicalEntity* p = pMe->GetEntity()->GetPhysics())
 			skip[n++] = p;
 		if (IPhysicalEntity* p = pBody->GetPhysics())
+			skip[n++] = p;
+		if (IPhysicalEntity* p = HeldPhysics(pMe))
 			skip[n++] = p;
 		const Vec3 from = pos + Vec3(0, 0, 1.0f);
 		const Vec3 dir = at - from;
@@ -988,7 +1027,13 @@ namespace
 		const Vec3 dir = to - from;
 		if (dir.x * dir.x + dir.y * dir.y < 0.04f)
 			return true;
-		IPhysicalEntity* pSkip = pMe ? pMe->GetEntity()->GetPhysics() : 0;
+		// (itself, and what it carries)
+		IPhysicalEntity* skip[2];
+		int nSkip = 0;
+		if (IPhysicalEntity* p = pMe ? pMe->GetEntity()->GetPhysics() : 0)
+			skip[nSkip++] = p;
+		if (IPhysicalEntity* p = HeldPhysics(pMe))
+			skip[nSkip++] = p;
 		static const float s_heights[] = { 0.65f, 1.15f, 1.65f };
 		for (int i = 0; i < 3; ++i)
 		{
@@ -997,7 +1042,7 @@ namespace
 			ball.r = radius;
 			geom_contact* pContact = 0;
 			const float hit = gEnv->pPhysicalWorld->PrimitiveWorldIntersection(ball.type, &ball, dir, ent_static, &pContact, 0,
-				WALK_GEOM, 0, 0, 0, &pSkip, pSkip ? 1 : 0);
+				WALK_GEOM, 0, 0, 0, skip, nSkip);
 			if (hit > 0.0f && pContact)
 				return false;
 		}
@@ -1007,7 +1052,7 @@ namespace
 		{
 			const Vec3 at = from + Vec3(0, 0, i < 3 ? 0.65f : 1.25f) + side * (radius * (float)(i % 3 - 1));
 			ray_hit hit;
-			if (gEnv->pPhysicalWorld->RayWorldIntersection(at, dir, ent_rigid | ent_sleeping_rigid, WALK_GEOM, &hit, 1, &pSkip, pSkip ? 1 : 0)
+			if (gEnv->pPhysicalWorld->RayWorldIntersection(at, dir, ent_rigid | ent_sleeping_rigid, WALK_GEOM, &hit, 1, skip, nSkip)
 				&& hit.pCollider && Heavy(hit.pCollider))
 				return false;
 		}
@@ -1102,6 +1147,8 @@ namespace
 		g.light.clear();
 		g.skip.clear();
 		if (IPhysicalEntity* p = pMe ? pMe->GetEntity()->GetPhysics() : 0)
+			g.skip.push_back(p);
+		if (IPhysicalEntity* p = HeldPhysics(pMe))
 			g.skip.push_back(p);
 		IPhysicalEntity** list = 0;
 		const float size = g.n * cell;
@@ -1619,6 +1666,36 @@ namespace
 		Vec3 d = to - pos;
 		d.z = 0;
 		const float dist = d.GetLength();
+		// the one it follows out of a straight walk for long and it gets no
+		// nearer (a way round would): put next to him, however near he is.
+		// After the dome's cutscene the host stood 5-7 m off outside the
+		// door it stood behind; its own squares found no way out, the host's
+		// navigation none indoors, and the catch-ups below wanted him > 8 m
+		// off: it went to and fro at the wall for minutes (the user's game,
+		// 2026-10-22). Not in a fight (going round there is on purpose)
+		if (mayCatchUp && now >= s_bot.unreachCheckAt)
+		{
+			s_bot.unreachCheckAt = now + 0.5f;
+			const bool inFightNow = now - s_bot.hitAt < 5.0f || (s_bot.enemy && now - s_bot.enemySeenAt < 3.0f);
+			const bool clear = dist < 3.5f || fabsf(to.z - pos.z) > 3.0f || ClearWay(pMe, pos, to);
+			if (clear || inFightNow || pMe->GetLinkedVehicle())
+				s_bot.unreachSince = -1.0f;
+			else if (s_bot.unreachSince < 0.0f || dist < s_bot.unreachBest - 1.5f)
+			{
+				// (out of reach from now, or nearer by a good step: round by a door)
+				s_bot.unreachSince = now;
+				s_bot.unreachBest = dist;
+			}
+			else if (now - s_bot.unreachSince > 20.0f)
+			{
+				Event("%s %.0f m off with something between for %.0f s, no nearer: put next to him", toName && *toName ? toName : "the one it follows",
+					dist, now - s_bot.unreachSince);
+				Ask(1, toName);
+				s_bot.unreachSince = -1.0f;
+			}
+		}
+		else if (!mayCatchUp)
+			s_bot.unreachSince = -1.0f;
 		// next to the one it follows with a wall between (he inside a hut,
 		// it outside by the wall): not there yet, round by the door (for a
 		// while: clutter may keep it from a straight walk to him for good)
@@ -1977,6 +2054,194 @@ namespace
 		s_ctl.yaw = Yaw(d);
 		s_ctl.pitch = Pitch(d);
 		s_ctl.turnRate = rate;
+	}
+
+	// ------------------------------------------------------------------
+	// things to carry (the agent's "grab", "throw", "drop"): the left hand as
+	// a player's (CoopProps makes every game see it the same)
+	enum ECarry { eC_None, eC_Grab, eC_Carry, eC_Throw, eC_Drop, eC_Thrown };
+	struct SCarry
+	{
+		EntityId prop;
+		int mode;
+		float since, pressAt;
+		Vec3 at;            // where to throw it (zero: where it looks)
+		string name;
+		SCarry(): prop(0), mode(eC_None), since(0), pressAt(0), at(ZERO) {}
+	} s_carry;
+
+	COffHand* OffHand(CPlayer* pMe)
+	{
+		return pMe ? static_cast<COffHand*>(pMe->GetWeaponByClass(CItem::sOffHandClass)) : 0;
+	}
+
+	Vec3 Middle(IEntity* pEntity)
+	{
+		AABB box;
+		pEntity->GetWorldBounds(box);
+		return box.IsEmpty() ? pEntity->GetWorldPos() : box.GetCenter();
+	}
+
+	// one the left hand takes (Properties.bPickable, as COffHand asks: most
+	// loose things of a level are not, the wheels of a trash container too)
+	bool Pickable(IEntity* pEntity)
+	{
+		IScriptTable* pScript = pEntity->GetScriptTable();
+		SmartScriptTable props;
+		int pickable = 1;
+		return !(pScript && pScript->GetValue("Properties", props) && props->GetValue("bPickable", pickable) && !pickable);
+	}
+
+	// a thing by its name, its id, or "nearest" (within 8 m)
+	IEntity* FindThing(CPlayer* pMe, const string& what)
+	{
+		if (what.empty() || what == "nearest")
+		{
+			const Vec3 pos = pMe->GetEntity()->GetWorldPos();
+			IPhysicalEntity** list = 0;
+			const int n = gEnv->pPhysicalWorld->GetEntitiesInBox(pos - Vec3(8, 8, 4), pos + Vec3(8, 8, 4), list, ent_rigid | ent_sleeping_rigid);
+			IEntity* pBest = 0;
+			float best = 1e9f;
+			for (int i = 0; i < n; ++i)
+			{
+				IEntity* pEntity = gEnv->pEntitySystem->GetEntityFromPhysics(list[i]);
+				if (!pEntity || !CoopProps::Eligible(pEntity) || !Pickable(pEntity) || CoopProps::IsHeld(pEntity->GetId()))
+					continue;
+				const float d = Middle(pEntity).GetDistance(pos);
+				if (d < best)
+				{
+					best = d;
+					pBest = pEntity;
+				}
+			}
+			return pBest;
+		}
+		const int id = atoi(what.c_str());
+		if (id > 0 && what.find_first_not_of("0123456789") == string::npos)
+			return gEnv->pEntitySystem->GetEntity((EntityId)id);
+		return gEnv->pEntitySystem->FindEntityByName(what.c_str());
+	}
+
+	// a step of an order with a thing: true while it takes the frame (walks
+	// to it, aims, presses the key)
+	bool CarryStep(CPlayer* pMe, const Vec3& pos, const Vec3& eye, bool busy)
+	{
+		if (s_carry.mode == eC_None)
+			return false;
+		COffHand* pOffHand = OffHand(pMe);
+		const EntityId held = pOffHand ? pOffHand->CoopHeldId() : 0;
+		IEntity* pThing = gEnv->pEntitySystem->GetEntity(s_carry.prop);
+		const float now = Now();
+		switch (s_carry.mode)
+		{
+		case eC_Grab:
+		{
+			if (!pThing)
+			{
+				Event("the thing to pick up is gone");
+				s_carry = SCarry();
+				return false;
+			}
+			if (held == s_carry.prop && pOffHand->CoopHolding())
+			{
+				Event("holds %s", s_carry.name.c_str());
+				s_carry.mode = eC_Carry;
+				return false;
+			}
+			if (now - s_carry.since > 25.0f)
+			{
+				Event("could not pick up %s", s_carry.name.c_str());
+				s_carry = SCarry();
+				return false;
+			}
+			// (somebody else picked it up meanwhile)
+			if (CoopProps::IsHeld(s_carry.prop) && held != s_carry.prop)
+			{
+				Event("%s is in somebody else's hands", s_carry.name.c_str());
+				s_carry = SCarry();
+				return false;
+			}
+			// (a teammate down, or shot at: that first)
+			if (busy)
+				return false;
+			Fire(pMe, false);
+			HoldUse(pMe, false, 0);
+			const Vec3 middle = Middle(pThing);
+			const float d = Dist2D(middle, pos);
+			if (d > 1.3f)
+			{
+				MoveTo(pMe, middle, 1.2f, d > 5.0f, false, s_carry.name.c_str());
+				LookAt(eye, middle, 6.0f);
+			}
+			else
+			{
+				LookAt(eye, middle, 8.0f);
+				// (aimed at it: the use key, as a player)
+				const Vec3 view = pMe->GetViewQuatFinal().GetColumn1();
+				const Vec3 to = (middle - eye).GetNormalizedSafe(view);
+				if (view.Dot(to) > 0.985f && now >= s_carry.pressAt && pOffHand && pOffHand->GetOffHandState() == eOHS_INIT_STATE)
+				{
+					Press(pMe, g_pGame->Actions().use, true);
+					Press(pMe, g_pGame->Actions().use, false);
+					s_carry.pressAt = now + 1.5f;
+					Event("reaches for %s (%.1f m)", s_carry.name.c_str(), middle.GetDistance(eye));
+				}
+			}
+			s_bot.doing.Format("picking up %s", s_carry.name.c_str());
+			return true;
+		}
+		case eC_Carry:
+			if (held != s_carry.prop)
+			{
+				Event("no longer holds %s", s_carry.name.c_str());
+				s_carry = SCarry();
+			}
+			return false;
+		case eC_Throw:
+		case eC_Drop:
+		{
+			if (held != s_carry.prop || !held)
+			{
+				s_carry = SCarry();
+				return false;
+			}
+			Fire(pMe, false);
+			HoldUse(pMe, false, 0);
+			// (not in the middle of a swing)
+			if (!pOffHand->CoopHolding())
+				return true;
+			if (!s_carry.at.IsZero())
+				LookAt(eye, s_carry.at, 8.0f);
+			// (a moment to turn to where it throws)
+			if (now - s_carry.since < (s_carry.at.IsZero() ? 0.1f : 0.6f))
+				return true;
+			const bool drop = s_carry.mode == eC_Drop;
+			const ActionId& key = drop ? g_pGame->Actions().zoom : g_pGame->Actions().use;
+			Press(pMe, key, true);
+			Press(pMe, key, false);
+			Event("%s %s", drop ? "drops" : "throws", s_carry.name.c_str());
+			if (drop)
+			{
+				s_carry = SCarry();
+				return true;
+			}
+			s_carry.mode = eC_Thrown;
+			s_carry.since = now;
+			return true;
+		}
+		case eC_Thrown:
+			// (the aim kept until it leaves the hand: the throw takes the eyes'
+			// direction 0.15-0.4 s after the key)
+			if (held == s_carry.prop && now - s_carry.since < 1.0f)
+			{
+				if (!s_carry.at.IsZero())
+					LookAt(eye, s_carry.at, 8.0f);
+				return true;
+			}
+			s_carry = SCarry();
+			return false;
+		}
+		return false;
 	}
 
 	// ------------------------------------------------------------------
@@ -4433,9 +4698,11 @@ namespace
 		if (!pMe || !InGame(pMe))
 		{
 			s_wasInGame = false;
+			s_heldPhys = 0;
 			s_bot.doing = pMe ? "waiting to spawn" : "not in a game";
 			return;
 		}
+		s_heldPhys = HeldPhysics(pMe);
 		// (back in the game: joined again after a load, say; what it did
 		// before was in another world)
 		if (!s_wasInGame)
@@ -4501,30 +4768,66 @@ namespace
 		}
 		// something caught in the left hand by the use key (a crate, a bottle
 		// next to a weapon it went to pick up): its rifle in one hand, the
-		// other at its face; thrown away again
+		// other at its face; put down again (not thrown: a throw reaches every
+		// game now, at whoever stands there). Not what it was told to carry
 		if (COffHand* pOffHand = static_cast<COffHand*>(pMe->GetWeaponByClass(CItem::sOffHandClass)))
 		{
-			if (pOffHand->GetOffHandState() & (eOHS_HOLDING_OBJECT | eOHS_HOLDING_NPC))
+			const bool ordered = s_carry.prop && pOffHand->CoopHeldId() == s_carry.prop;
+			if ((pOffHand->GetOffHandState() & (eOHS_HOLDING_OBJECT | eOHS_HOLDING_NPC)) && !ordered)
 			{
 				if (s_bot.dropAt <= 0.0f)
 					s_bot.dropAt = Now() + 1.0f;
 				else if (Now() >= s_bot.dropAt)
 				{
-					Press(pMe, g_pGame->Actions().use, true);
-					Press(pMe, g_pGame->Actions().use, false);
+					Press(pMe, g_pGame->Actions().zoom, true);
+					Press(pMe, g_pGame->Actions().zoom, false);
 					s_bot.dropAt = Now() + 1.5f;
-					Event("throws away what it caught in the left hand");
+					Event("puts down what it caught in the left hand");
 				}
 			}
 			else
 				s_bot.dropAt = 0.0f;
 		}
-		if (down || (pView && pView->IsPlayingCutScene()))
+		// (a cutscene over: when, for the look below)
+		static bool s_inCutscene = false;
+		static float s_cutsceneOverAt = -100.0f;
+		const bool cutscene = pView && pView->IsPlayingCutScene();
+		if (cutscene)
+			s_inCutscene = true;
+		else if (s_inCutscene)
+		{
+			s_inCutscene = false;
+			s_cutsceneOverAt = Now();
+		}
+		if (down || cutscene)
 		{
 			Fire(pMe, false);
 			HoldUse(pMe, false, 0);
 			s_bot.doing = down ? "down, waiting for a teammate" : "watching a cutscene";
 			return;
+		}
+		// a cutscene puts the host where the story goes on, the companion it
+		// leaves where it stood: right after it, far from him or with
+		// something between, put next to him (as the cut in single player).
+		// The research dome's moved the host 29 m out of the dome; it stayed
+		// inside behind a wall (the user's game, 2026-10-22)
+		if (Now() - s_cutsceneOverAt > 1.0f && Now() - s_cutsceneOverAt < 6.0f && s_bot.order != eO_Hold && s_bot.order != eO_Goto)
+		{
+			IActor* pFollow = s_bot.leader.empty() ? HostPlayer() : ActorByName(s_bot.leader.c_str());
+			if (!pFollow)
+				pFollow = HostPlayer();
+			if (pFollow && pFollow->GetHealth() > 0 && !pFollow->GetLinkedVehicle() && !pMe->GetLinkedVehicle())
+			{
+				const Vec3 me = pMe->GetEntity()->GetWorldPos(), him = pFollow->GetEntity()->GetWorldPos();
+				const float apart = Dist2D(me, him);
+				if (apart > 25.0f || (apart > 4.0f && !ClearWay(pMe, me, him)))
+				{
+					Event("the cutscene is over, %s %.0f m off%s: put next to him", pFollow->GetEntity()->GetName(), apart, apart > 25.0f ? "" : " with something between");
+					s_bot.askAt = 0.0f;
+					Ask(1, pFollow->GetEntity()->GetName());
+				}
+				s_cutsceneOverAt = -100.0f;
+			}
 		}
 		// the name the host sees
 		// (again after joining again: a checkpoint load gives it the default
@@ -4604,6 +4907,16 @@ namespace
 			}
 		} suitAtEnd = { pMe, pos, pLeader };
 
+		// an order with a thing: to it, aimed, the key (a teammate down, shot
+		// at a moment ago: that first)
+		if (!pMyVehicle && s_carry.mode != eC_None)
+		{
+			const bool busy = Now() - s_bot.hitAt < 3.0f
+				|| (s_bot.order != eO_Hold && s_bot.order != eO_Goto && DownedTeammate(pMe, pos, 2000.0f));
+			if (CarryStep(pMe, pos, eye, busy))
+				return;
+		}
+
 		// ---- reviving comes first (unless ordered to stay), however far: the
 		// host down 200 m off (it had been put back where it got into a car)
 		// and only 80 m looked at, it stood there (2026-10-15)
@@ -4657,7 +4970,7 @@ namespace
 			// use key through it). Close for long and still something
 			// between (he lies half in a rock): from there then. A revive
 			// under way goes on a step further off and with an enemy not
-			// close
+			// close (not by a vehicle about to blow, below)
 			const bool reach = d <= 1.6f && CanReach(pMe, pos, pDowned, body);
 			if (d <= 1.6f && !reach)
 			{
@@ -4719,7 +5032,11 @@ namespace
 						break;
 					}
 			}
-			const bool bombWait = pBomb && !reviving && (underFire || pEnemy || Now() - s_bot.hitAt < 8.0f);
+			// (a revive under way too: the camp's jeep blew up by the host's
+			// body while the companion revived him, 108 damage; the review.
+			// Not for ever: 40 s after he went down it goes to him anyway, as
+			// clearing the way below)
+			const bool bombWait = pBomb && Now() - s_bot.downedSince < 40.0f && (underFire || pEnemy || Now() - s_bot.hitAt < 8.0f);
 			// in danger on the way: to him cloaked when the energy is enough
 			// for the way (5 a metre) and a little more (holding the use key
 			// does not end the cloak); it lay "down until it stops" at energy
@@ -5283,6 +5600,11 @@ namespace
 		j += "\"level\":" + Esc(pLevel && pLevel->GetLevelInfo() ? pLevel->GetLevelInfo()->GetName() : "");
 		IViewSystem* pView = g_pGame->GetIGameFramework()->GetIViewSystem();
 		j += ",\"cutscene\":" + string(pView && pView->IsPlayingCutScene() ? "true" : "false");
+		{
+			COffHand* pOffHand = OffHand(pMe);
+			IEntity* pHeld = pOffHand && pOffHand->GetHeldEntityId() ? gEnv->pEntitySystem->GetEntity(pOffHand->GetHeldEntityId()) : 0;
+			j += ",\"held\":" + Esc(pHeld ? pHeld->GetName() : "");
+		}
 		if (!pMe)
 		{
 			j += ",\"status\":\"not in a game (connecting to the host...)\"}";
@@ -5632,6 +5954,61 @@ namespace
 				text.Format("throws a grenade %s%s as soon as it has a clear throw (%d left)", s_gren.orderTarget.empty() ? "at the best target" : "at ",
 					s_gren.orderTarget.c_str(), n);
 				Reply(id.c_str(), Ok(text.c_str()));
+			}
+		}
+		else if (cmd == "grab" && pMe)
+		{
+			// grab <name|id|nearest>: picks it up and carries it (till "throw"
+			// or "drop")
+			string what = args;
+			what.Trim();
+			IEntity* pThing = FindThing(pMe, what);
+			if (!pThing)
+				Reply(id.c_str(), Fail("grab: no such thing (a name, an id, or nearest within 8 m)"));
+			else if (!CoopProps::Eligible(pThing) || !Pickable(pThing))
+				Reply(id.c_str(), Fail(string().Format("grab: %s is not a thing to carry", pThing->GetName()).c_str()));
+			else if (CoopProps::IsHeld(pThing->GetId()) && !CoopProps::HeldHere(pThing->GetId()))
+				Reply(id.c_str(), Fail(string().Format("grab: %s is in somebody else's hands", pThing->GetName()).c_str()));
+			else
+			{
+				s_carry = SCarry();
+				s_carry.prop = pThing->GetId();
+				s_carry.mode = eC_Grab;
+				s_carry.since = Now();
+				s_carry.name = pThing->GetName();
+				CryLogAlways("[CoopAgent] grab: %s (%u) by the agent", pThing->GetName(), pThing->GetId());
+				Reply(id.c_str(), Ok(("going to pick up " + s_carry.name).c_str()));
+			}
+		}
+		else if ((cmd == "throw" || cmd == "drop") && pMe)
+		{
+			// throw [x y z | name]: from the left hand, toward that or where it
+			// looks; drop: puts it down
+			COffHand* pOffHand = OffHand(pMe);
+			const EntityId held = pOffHand && (pOffHand->GetOffHandState() & eOHS_HOLDING_OBJECT) ? pOffHand->GetHeldEntityId() : 0;
+			if (!held)
+				Reply(id.c_str(), Fail((cmd + ": nothing in the left hand").c_str()));
+			else
+			{
+				Vec3 at(ZERO);
+				string where = args;
+				where.Trim();
+				if (cmd == "throw" && !where.empty())
+				{
+					float x, y, z;
+					if (sscanf(where.c_str(), "%f %f %f", &x, &y, &z) == 3)
+						at.Set(x, y, z);
+					else if (IEntity* pTo = gEnv->pEntitySystem->FindEntityByName(where.c_str()))
+						at = Middle(pTo);
+				}
+				IEntity* pHeld = gEnv->pEntitySystem->GetEntity(held);
+				s_carry.prop = held;
+				s_carry.mode = cmd == "throw" ? eC_Throw : eC_Drop;
+				s_carry.since = Now();
+				s_carry.at = at;
+				s_carry.name = pHeld ? pHeld->GetName() : "?";
+				CryLogAlways("[CoopAgent] %s: %s by the agent", cmd.c_str(), s_carry.name.c_str());
+				Reply(id.c_str(), Ok(((cmd == "throw" ? "throwing " : "dropping ") + s_carry.name).c_str()));
 			}
 		}
 		else if (cmd == "use" && pMe)
@@ -6508,7 +6885,8 @@ namespace
 				while (*p == ' ' || *p == '\t')
 					++p;
 				if (!_strnicmp(p, "r_Fullscreen", 12) || !_strnicmp(p, "r_Width", 7) || !_strnicmp(p, "r_Height", 8)
-					|| !_strnicmp(p, "s_SoundEnable", 13) || !_strnicmp(p, "s_DummySound", 12) || !_strnicmp(p, "r_Driver", 8))
+					|| !_strnicmp(p, "s_SoundEnable", 13) || !_strnicmp(p, "s_DummySound", 12) || !_strnicmp(p, "r_Driver", 8)
+					|| !_strnicmp(p, "g_startFirstTime", 16))
 					continue;
 				kept += line;
 			}
@@ -6524,6 +6902,14 @@ namespace
 		// game, and a bot needs no picture. Read before the renderer starts
 		// (the command line comes after)
 		kept += "r_Driver = \"NULL\"\nr_Fullscreen = 0\nr_Width = 800\nr_Height = 450\ns_SoundEnable = 0\ns_DummySound = 1\n";
+		// never the first start's machine spec detection: it sets the sound
+		// console variables of its spec, which in this game without a sound
+		// system point into freed memory - the engine's small-block heap was
+		// damaged (3 test boots of 8: the crashes in MSVCR80 as the level
+		// loads, 2026-10-22; CoopSound::GuardFailedSoundSystem refuses them
+		// now too); a companion its host ends never saves the flag its first
+		// start sets
+		kept += "g_startFirstTime = 0\n";
 		if (FILE* f = _wfopen(path.c_str(), L"wb"))
 		{
 			fwrite(kept.data(), 1, kept.size(), f);

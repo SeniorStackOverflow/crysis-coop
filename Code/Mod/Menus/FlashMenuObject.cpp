@@ -961,6 +961,7 @@ void CFlashMenuObject::MP_ResetProgress(int iProgress)
 
 void CFlashMenuObject::OnLoadingStart(ILevelInfo *pLevel)
 {
+	CoopHeap::Check("a level starts loading");
 	CoopAI::OnLoadingStart(pLevel ? pLevel->GetName() : "");
 
 	m_bInLoading = true;

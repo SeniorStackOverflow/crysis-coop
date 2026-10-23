@@ -39,6 +39,7 @@
 #include "CoopSave.h"
 #include "CoopMenu.h"
 #include "CoopRevive.h"
+#include "CoopProps.h"
 #include "Game.h"
 #include "GameCVars.h"
 #include "GameRules.h"
@@ -114,7 +115,7 @@ namespace
 	void UpdateMirrorVideoTrace(float frameTime);
 	void UpdateDebugKillGunners(float frameTime);
 	float s_autopilotHoldUntil = 0.0f; // a debug kill is being watched: the autopilot waits
-	void SendSyncHistory(int channelId);
+	void SendSyncHistory(int channelId, bool props = true);
 	void ClearProtectedVehicles();
 	void ClearInventorySnapshots(const char* levelName);
 	ICVar* s_pAspectMask = nullptr;
@@ -893,7 +894,14 @@ namespace
 	bool s_coopLevelActive = false;
 
 	// entity classes whose instances are created by the server and sent to
-	// the clients: items, vehicles, actors and the vehicle seat helpers
+	// the clients: items, vehicles, actors and the vehicle seat helpers, the
+	// battle dust areas (sys_spec_GameEffects 4 turns them on: every fight
+	// makes them) and the projectiles only the server spawns (grenades,
+	// rockets). A client that joins gets the server's live ones while its
+	// own level still loads; taken for a script's local helper and made
+	// client-only there, the client's copy never binds and its network
+	// stream breaks ("Malformed packet", "Failed ReconfigureObject",
+	// "... for entity BattleDust for RMI CGameRules:ClSetGameTime")
 	bool IsNetworkedClass(IEntityClass* pClass)
 	{
 		const char* name = pClass->GetName();
@@ -904,7 +912,9 @@ namespace
 			return true;
 		if (pFramework->GetIVehicleSystem() && pFramework->GetIVehicleSystem()->IsVehicleClass(name))
 			return true;
-		if (!stricmp(name, "VehicleSeatSerializer"))
+		if (!stricmp(name, "VehicleSeatSerializer") || !stricmp(name, "BattleEvent"))
+			return true;
+		if (g_pGame->GetWeaponSystem() && g_pGame->GetWeaponSystem()->IsServerSpawn(pClass))
 			return true;
 		const char* script = pClass->GetScriptFile();
 		if (script && (CryStringUtils::stristr(script, "entities/ai/") || CryStringUtils::stristr(script, "entities/actor/")))
@@ -1889,6 +1899,7 @@ void CoopAI::Init()
 		gEnv->pConsole->RegisterFloat("coop_debug_explode_joiners", 0.0f, 0, "Crysis Coop debugging: every N seconds an explosion (grenade strength) next to every joined player (0 = off)");
 		gEnv->pConsole->RegisterInt("coop_fake_render", 1, 0, "Crysis Coop: soldiers near a joined player count as rendered (the engine runs unrendered soldiers in a reduced mode: they barely aim and fire)");
 		gEnv->pConsole->RegisterInt("coop_vision", 1, 0, "Crysis Coop: server-side sight of joined players for the soldiers (0 = engine only)");
+		gEnv->pConsole->RegisterInt("coop_cloak_mute", 1, 0, "Crysis Coop: soldiers at a vehicle's gun hold fire while their target (or its memory) is a joined player cloaked beyond ai_CloakMinDist, as foot soldiers do (2: also at mounted guns, 3: every soldier; negative: log only; 0: off)");
 		gEnv->pConsole->RegisterInt("coop_debug_aidump", 0, 0, "Crysis Coop debugging: every N s dump the AI state of the players and the soldier nearest to a joined player");
 	}
 	if (gEnv->pConsole)
@@ -2151,6 +2162,7 @@ void CoopAI::OnLoadingStart(const char* levelName)
 {
 	CoopHeap::Check("level start: before the mod");
 	s_levelEntityIds.clear();
+	CoopProps::Reset();
 	OpenOriginalLevelPak(levelName);
 	CoopHeap::Check("level start: the original level.pak opened");
 	CoopNetSerClearTrace();
@@ -2394,6 +2406,8 @@ void CoopAI::DescribePhysical(IPhysicalEntity* pPhys, char* out, size_t size)
 
 void CoopAI::AfterFrameworkUpdate()
 {
+	// (others' things at their hands, from where they look this frame)
+	CoopProps::AfterFrameworkUpdate();
 	if (s_guardUntil >= 0.0f && !GuardOn())
 	{
 		if (s_guardDropped > 0)
@@ -2416,7 +2430,9 @@ void CoopAI::OnLoadingComplete()
 	CoopHeap::Check("the level loaded");
 	ResetHitchTimer();
 	TakeLevelTOD("level loaded");
+	CoopHeap::Check("loaded: time of day");
 	OpenSoundLimits();
+	CoopHeap::Check("loaded: sound limits");
 	static bool s_breakTrace = false;
 	if (!s_breakTrace && gEnv->pPhysicalWorld)
 	{
@@ -2433,6 +2449,7 @@ void CoopAI::OnLoadingComplete()
 				line += string(" ") + names[i] + "=" + pVar->GetString();
 		CryLogAlways("[CoopAI] engine update settings:%s", line.c_str());
 	}
+	CoopHeap::Check("loaded: engine settings");
 	s_inLoading = false;
 	s_coopServerLoading = false;
 	if (!s_loadHides.empty())
@@ -2446,8 +2463,14 @@ void CoopAI::OnLoadingComplete()
 	// the interactive objects' flags as loaded, before the story changes them
 	if (gEnv->bServer && g_pGame)
 		ScanUsableObjects(true);
+	CoopHeap::Check("loaded: usable objects");
 	if (gEnv->bServer && g_pGame)
 		CaptureHideBase();
+	CoopHeap::Check("loaded: hide base");
+	// (the things to carry: where the level file has them)
+	if (gEnv->bServer && g_pGame)
+		CoopProps::CaptureBase();
+	CoopHeap::Check("loaded: things to carry");
 	// the level's own entities: what the level load made, but for the
 	// dynamic network objects among them (see SSpawnLog)
 	if (gEnv->bServer && s_coopLevelLoading && gEnv->pEntitySystem)
@@ -2460,7 +2483,9 @@ void CoopAI::OnLoadingComplete()
 		CryLogAlways("[CoopAI] %d entities of the level file", (int)s_levelEntityIds.size());
 	}
 	s_coopLevelLoading = false;
+	CoopHeap::Check("loaded: level entities");
 	RegisterCommands();
+	CoopHeap::Check("loaded: commands");
 
 	if (s_clientSPLoad)
 	{
@@ -2486,6 +2511,7 @@ void CoopAI::OnLoadingComplete()
 
 	gEnv->pAISystem->Enable(true);
 	LogStats("after load");
+	CoopHeap::Check("loaded: AI on");
 
 	const int registered = RegisterMissingAI();
 	if (registered > 0)
@@ -2495,12 +2521,17 @@ void CoopAI::OnLoadingComplete()
 	}
 
 	DisableScriptPhysicsSync();
+	CoopHeap::Check("loaded: script physics sync");
 	RestoreGlobalTokens();
+	CoopHeap::Check("loaded: global tokens");
 	CryLogAlways("[CoopAI] dynamic network aspects switched off for %d AI actors", DisableAIDynamicAspects());
+	CoopHeap::Check("loaded: AI aspects");
 	RegisterFlowInspector();
+	CoopHeap::Check("loaded: flow inspector");
 
 	CryLogAlways("[CoopAI] level loaded: AI system reset for game start");
 	gEnv->pAISystem->Reset(IAISystem::RESET_ENTER_GAME);
+	CoopHeap::Check("loaded: AI reset");
 	LogStats("after reset");
 	if (DebugFlags() & 8)
 	{
@@ -2512,6 +2543,7 @@ void CoopAI::OnLoadingComplete()
 	if (ILevel* pLevel = g_pGame->GetIGameFramework()->GetILevelSystem()->GetCurrentLevel())
 		if (pLevel->GetLevelInfo() && IsCoopLevel(pLevel->GetLevelInfo()->GetName()))
 			CoopSave::OnLevelReady(pLevel->GetLevelInfo()->GetName());
+	CoopHeap::Check("loaded: CoopSave ready");
 
 	// coop_sp_world 2: single player only while loading (HUD, objectives,
 	// level entities are created as in the campaign), network mode while
@@ -2523,6 +2555,7 @@ void CoopAI::OnLoadingComplete()
 		CryLogAlways("[CoopAI] coop_sp_world=2: level loaded, server back to network mode");
 	}
 	s_updateTimer = 0.0f;
+	CoopHeap::Check("loaded: the end");
 }
 
 void CoopAI::OnGameEnded()
@@ -2664,7 +2697,9 @@ bool CoopAI::IsLevelEntity(EntityId id)
 
 void CoopAI::ResyncChannel(int channelId)
 {
-	SendSyncHistory(channelId);
+	// (a friend kept through a load: the things were sent him by the load
+	// itself, CoopProps::OnGameLoaded - twice, 1000 messages at once)
+	SendSyncHistory(channelId, false);
 }
 
 int CoopAI::ReleaseAIVoiceListeners()
@@ -2709,6 +2744,7 @@ int CoopAI::ReleaseAIVoiceListeners()
 void CoopAI::OnGameLoaded(bool clientsKept)
 {
 	TakeLevelTOD("save loaded");
+	CoopProps::OnGameLoaded();
 	// (a soldier the save brought back with a voice-chat listener)
 	ReleaseAIVoiceListeners();
 	// (the friends kept through the load: the load stopped their voice-chat
@@ -3538,7 +3574,8 @@ void CoopAI::ResetHitchTimer()
 
 void CoopAI::Update(float frameTime)
 {
-	CoopHeap::CheckFrame(s_levelReady);
+	CoopHeap::CheckFrame(s_levelReady || s_levelReadyClient);
+	CoopProps::Update(frameTime);
 	WatchLevelTOD();
 	CoopMenu::LoadSettingsOnce();
 	LogHitch();
@@ -3934,6 +3971,102 @@ namespace
 		return (to - from).GetLengthSquared() > minDist * minDist;
 	}
 
+	// (shooter, cloaked joined player) whose fire was held (logged) and still is
+	std::set<std::pair<EntityId, EntityId> > s_fireHeld;
+
+	// A soldier at a vehicle's gun whose target - or the memory of it, a
+	// "Perception of X" dummy - is a joined player cloaked beyond
+	// ai_CloakMinDist holds his fire, as the foot soldiers' own cloak
+	// reaction does (Cover2's sn_target_cloak_reaction begins with "firecmd
+	// 0"; the engine's OnTargetCloaked reaches seated gunners too, but the
+	// in-vehicle behaviours ignore it). The bridge helicopter's door gunner
+	// fired 5 s FIREMODE_FORCED bursts at where the cloaked companion had
+	// stood and hit it 4 times (the autotester's soak, 2026-10-22). The
+	// scripts give the fire back with their next firecmd. coop_cloak_mute:
+	// 1 soldiers in vehicle seats, 2 also at mounted guns, 3 every soldier;
+	// negative: log only; 0 off. Never a vehicle's own AI (its scripted
+	// shots), never for the host (single player's way for him)
+	void HoldFireAtCloaked()
+	{
+		static ICVar* pMode = gEnv->pConsole->GetCVar("coop_cloak_mute");
+		const int mode = pMode ? pMode->GetIVal() : 0;
+		const int scope = mode < 0 ? -mode : mode;
+		std::set<std::pair<EntityId, EntityId> > held;
+		IGameFramework* pFw = g_pGame->GetIGameFramework();
+		IActorSystem* pActors = pFw->GetIActorSystem();
+		IActor* pHost = pFw->GetClientActor();
+		bool anyCloaked = false;
+		if (scope)
+		{
+			IActorIteratorPtr it = pActors->CreateActorIterator();
+			while (IActor* p = it->Next())
+			{
+				CActor* pA = static_cast<CActor*>(p);
+				if (p->IsPlayer() && p != pHost && p->GetHealth() > 0 && pA->GetActorClass() == CPlayer::GetActorClassType()
+					&& static_cast<CPlayer*>(pA)->IsCloaked())
+				{
+					anyCloaked = true;
+					break;
+				}
+			}
+		}
+		if (anyCloaked)
+		{
+			IActorIteratorPtr it = pActors->CreateActorIterator();
+			while (IActor* pSoldier = it->Next())
+			{
+				if (pSoldier->IsPlayer() || pSoldier->GetHealth() <= 0)
+					continue;
+				IEntity* pShooter = pSoldier->GetEntity();
+				IAIObject* pAI = pShooter->GetAI();
+				IPipeUser* pPU = pAI && pAI->IsEnabled() ? pAI->CastToIPipeUser() : 0;
+				IAIObject* pTarget = pPU ? pPU->GetAttentionTarget() : 0;
+				if (!pTarget)
+					continue;
+				const char* where = 0;
+				if (pSoldier->GetLinkedVehicle())
+					where = "in a vehicle";
+				else if (scope >= 2 && pSoldier->GetCurrentItem() && static_cast<CItem*>(pSoldier->GetCurrentItem())->IsMounted())
+					where = "at a mounted gun";
+				else if (scope >= 3)
+					where = "on foot";
+				if (!where)
+					continue;
+				IAIObject* pOwner = pTarget;
+				if (IPuppet* pPuppet = pAI->CastToIPuppet())
+					if (IAIObject* pEventOwner = pPuppet->GetEventOwner(pTarget))
+						pOwner = pEventOwner;
+				if (pOwner->GetAIType() != AIOBJECT_PLAYER)
+					continue;
+				IActor* pPlayer = pActors->GetActor(pOwner->GetEntityID());
+				if (!pPlayer || pPlayer == pHost || pPlayer->GetHealth() <= 0 || !CoopHiddenByCloak(pPlayer, pAI->GetPos()))
+					continue;
+				// (a passenger not firing anyway is left out of the log: every
+				// helicopter trooper and truck passenger was "held", the test)
+				const std::pair<EntityId, EntityId> key(pShooter->GetId(), pPlayer->GetEntityId());
+				const bool logged = s_fireHeld.count(key) != 0;
+				const EFireMode was = pPU->GetFireMode();
+				if (was != FIREMODE_OFF || logged)
+					held.insert(key);
+				if (mode > 0 && was != FIREMODE_OFF)
+					pPU->SetFireMode(FIREMODE_OFF);
+				if (was != FIREMODE_OFF && !logged)
+					CryLogAlways("[CoopAI] %s (%s) %s fire at %s: cloaked (%.0f m; target %s, fire mode was %d)", pShooter->GetName(), where,
+						mode > 0 ? "holds" : "would hold", pPlayer->GetEntity()->GetName(), (pPlayer->GetEntity()->GetWorldPos() - pShooter->GetWorldPos()).GetLength(),
+						pTarget->GetName(), (int)was);
+			}
+		}
+		for (std::set<std::pair<EntityId, EntityId> >::const_iterator it = s_fireHeld.begin(); it != s_fireHeld.end(); ++it)
+			if (!held.count(*it))
+			{
+				IEntity* pS = gEnv->pEntitySystem->GetEntity(it->first);
+				IEntity* pP = gEnv->pEntitySystem->GetEntity(it->second);
+				if (pS && pP)
+					CryLogAlways("[CoopAI] %s may fire at %s again", pS->GetName(), pP->GetName());
+			}
+		s_fireHeld.swap(held);
+	}
+
 	bool CoopCanSee(IAIObject* pAI, IEntity* pAIEntity, IActor* pPlayer, const AgentParameters& params, bool alerted)
 	{
 		s_visionWhy[0] = 0;
@@ -3996,6 +4129,7 @@ namespace
 	{
 		if (!gEnv->bServer || !gEnv->bMultiplayer || !gEnv->pAISystem || !CoopAI::IsCoopSession())
 			return;
+		HoldFireAtCloaked();
 		ICVar* pVisionOn = gEnv->pConsole->GetCVar("coop_vision");
 		if (pVisionOn && !pVisionOn->GetIVal())
 			return;
@@ -5651,6 +5785,18 @@ namespace
 	{
 		if (!gEnv->pConsole || !CoopAI::IsCoopSession())
 			return;
+		// (no real sound system - the AI companion's game, a test game: the
+		// failed CSoundSystem was deleted and its console variables still
+		// point into it; setting them wrote into freed memory and damaged
+		// MSVCR80's small-block heap - the crashes as a level loads, 5 boots
+		// of 8 right here, 2026-10-22)
+		ICVar* pEnable = gEnv->pConsole->GetCVar("s_SoundEnable");
+		ICVar* pDummy = gEnv->pConsole->GetCVar("s_DummySound");
+		if (CoopSound::NoRealSoundSystem() || (pEnable && !pEnable->GetIVal()) || (pDummy && pDummy->GetIVal()))
+		{
+			CryLogAlways("[CoopSound] no sound system here: its limits are left alone");
+			return;
+		}
 		ICVar* pVoices = gEnv->pConsole->GetCVar("coop_sound_voices");
 		const int voices = pVoices ? pVoices->GetIVal() : 64;
 		s_soundVoicesSet = voices;
@@ -7479,11 +7625,14 @@ namespace
 	}
 
 	// server: what a joining player has missed (markers, running cutscenes)
-	void SendSyncHistory(int channelId)
+	void SendSyncHistory(int channelId, bool props)
 	{
 		CGameRules* pRules = g_pGame->GetGameRules();
 		if (!pRules)
 			return;
+		// (the things a hand moved, who holds what)
+		if (props)
+			CoopProps::SendHistory(channelId);
 		for (size_t i = 0; i < s_radarHistory.size(); ++i)
 		{
 			const SSyncMsg& m = s_radarHistory[i];

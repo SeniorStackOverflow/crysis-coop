@@ -15,6 +15,7 @@
 #include "ScriptBind_GameRules.h"
 #include "GameRules.h"
 #include "CoopAgent.h"
+#include "CoopProps.h"
 #include "Game.h"
 #include "GameCVars.h"
 #include "Actor.h"
@@ -1765,6 +1766,50 @@ void CGameRules::CoopSendTurret(const CoopTurretParams& params, int exceptChanne
 		GetGameObject()->InvokeRMI(ClCoopTurret(), params, eRMI_ToRemoteClients);
 }
 
+void CGameRules::CoopSendPropToServer(const CoopPropParams& params)
+{
+	GetGameObject()->InvokeRMI(SvCoopProp(), params, eRMI_ToServer);
+}
+
+// the things to carry go to the games in the game only: one still connecting
+// or loading the level is told everything at once when it is in
+// (CoopProps::SendHistory). A continued campaign's 523 moved things, sent as
+// the host's load ended, reached the companion while it loaded the level and
+// its connection broke (three different net errors, 2026-10-22)
+static bool CoopPropChannel(int channelId)
+{
+	INetChannel* pChannel = channelId ? g_pGame->GetIGameFramework()->GetNetChannel(channelId) : 0;
+	return pChannel && !pChannel->IsLocal() && pChannel->GetContextViewState() >= eCVS_InGame;
+}
+
+int CGameRules::CoopSendProp(const CoopPropParams& params, int channelId)
+{
+	int reached = 0;
+	for (size_t i = 0; i < (channelId ? 1 : m_channelIds.size()); ++i)
+	{
+		const int channel = channelId ? channelId : m_channelIds[i];
+		if (!CoopPropChannel(channel))
+			continue;
+		GetGameObject()->InvokeRMI(ClCoopProp(), params, eRMI_ToClientChannel, channel);
+		++reached;
+	}
+	return reached;
+}
+
+int CGameRules::CoopSendPropState(const CoopPropParams& params, int channelId)
+{
+	int reached = 0;
+	for (size_t i = 0; i < (channelId ? 1 : m_channelIds.size()); ++i)
+	{
+		const int channel = channelId ? channelId : m_channelIds[i];
+		if (!CoopPropChannel(channel))
+			continue;
+		GetGameObject()->InvokeRMI(ClCoopPropState(), params, eRMI_ToClientChannel, channel);
+		++reached;
+	}
+	return reached;
+}
+
 void CGameRules::CoopSendSyncToServer(int kind, int op, EntityId entity, const char* name, const char* text, int type, float f)
 {
 	CoopSyncParams params;
@@ -3184,6 +3229,15 @@ bool CGameRules::OnCollision(const SGameCollision& event)
 		return true;
 
 	//Prevent squad-mates being hit by bullets/collision damage from object held by the player
+	// (Crysis Coop: a thing in anybody's hands, CoopProps' list: the host's own
+	// hand and the friends', who are no "client actor" here)
+	if (CoopProps::Enabled())
+	{
+		IEntity *pTarget = event.pCollision->iForeignData[1]==PHYS_FOREIGN_ID_ENTITY ? (IEntity*)event.pCollision->pForeignData[1]:0;
+		IEntity *pSource = event.pCollision->iForeignData[0]==PHYS_FOREIGN_ID_ENTITY ? (IEntity*)event.pCollision->pForeignData[0]:0;
+		if ((pTarget && CoopProps::IsHeld(pTarget->GetId())) || (pSource && CoopProps::IsHeld(pSource->GetId())))
+			return false;
+	}
 	if(!gEnv->bMultiplayer)
 	{
 		IEntity *pTarget = event.pCollision->iForeignData[1]==PHYS_FOREIGN_ID_ENTITY ? (IEntity*)event.pCollision->pForeignData[1]:0;

@@ -162,7 +162,14 @@ function New-BootDir([string]$RunDir, [string]$Name) {
 # (VoiceChat: the host's voice chat on, as in a real game - its default -
 # with the microphone off; the user's silence came from voice-chat streams)
 function Write-GameCfg([string]$Prof, [string]$Sound, [bool]$VoiceChat = $false) {
-    $lines = @("r_Fullscreen = 0", "r_Width = 800", "r_Height = 600", "cl_voice_recording = 0", "net_enable_voice_chat = $(if ($VoiceChat) { 1 } else { 0 })")
+    # (g_startFirstTime 0 as in the person's game.cfg: a profile's first
+    # start runs the engine's machine spec detection, and right then the
+    # engine's small-block heap was damaged in 3 boots of 8 - the cause of
+    # the test games' start crashes, 2026-10-22; the person's games never run it.
+    # And the person's spec, 3, which the detection gave this PC: without it the
+    # host ran at 4, where the companion could not join a continued campaign
+    # until the 10-22 fix (battle dust; scenarios join-spec4, sound-voip-ai-spec4))
+    $lines = @("r_Fullscreen = 0", "r_Width = 800", "r_Height = 600", "cl_voice_recording = 0", "net_enable_voice_chat = $(if ($VoiceChat) { 1 } else { 0 })", "g_startFirstTime = 0", "sys_spec = 3")
     if ($Sound -eq "wav") { $lines += @("s_SoundEnable = 1", "s_DummySound = 0", "s_OutputConfig = 2") }
     else { $lines += @("s_SoundEnable = 0", "s_DummySound = 1") }
     Assert-SafeWrite $Prof

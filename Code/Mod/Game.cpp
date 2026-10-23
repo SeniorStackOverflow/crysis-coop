@@ -16,6 +16,8 @@
 #include "CoopAgent.h"
 #include "GameCVars.h"
 #include "CoopAI.h"
+#include "CoopPak.h"
+#include "CoopHeap.h"
 #include "CoopRelay.h"
 #include "CoopSave.h"
 #include "CoopSound.h"
@@ -125,6 +127,7 @@ CGame::CGame()
 
 CGame::~CGame()
 {
+  CoopSound::GuardFailedSoundSystem(false);
   CoopRelay::Shutdown();
   m_pFramework->EndGameContext();
   m_pFramework->UnregisterListener(this);
@@ -149,6 +152,10 @@ CGame::~CGame()
 bool CGame::Init(IGameFramework *pFramework)
 {
   LOADING_TIME_PROFILE_SECTION(GetISystem());
+	// (Crysis Coop: the engine's heap from the start, in the autotester's
+	// games: whole when the mod begins?)
+	CoopHeap::Check("the mod's Init begins");
+	CoopSound::GuardFailedSoundSystem(true);
 
 #ifdef GAME_DEBUG_MEM
 	DumpMemInfo("CGame::Init start");
@@ -161,9 +168,15 @@ bool CGame::Init(IGameFramework *pFramework)
 
 	RegisterConsoleVars();
 	RegisterConsoleCommands();
+	CoopHeap::Check("the game's console variables registered");
 	CoopAI::Init();
+	CoopHeap::Check("CoopAI::Init");
 	CoopAgent::Init();
+	CoopHeap::Check("CoopAgent::Init");
+	CoopPak::Init();
+	CoopHeap::Check("CoopPak::Init");
 	RegisterGameObjectEvents();
+	CoopHeap::Check("Init: game object events");
 
 	// Initialize static item strings
 	m_pItemStrings = new SItemStrings();
@@ -171,8 +184,10 @@ bool CGame::Init(IGameFramework *pFramework)
 	m_pItemSharedParamsList = new CItemSharedParamsList();
 
 	LoadActionMaps();
+	CoopHeap::Check("Init: action maps");
 
 	InitScriptBinds();
+	CoopHeap::Check("Init: script binds");
 
 	//load user levelnames for ingame text and savegames
 	XmlNodeRef lnames = GetISystem()->LoadXmlFile("Game/Scripts/GameRules/LevelNames.xml");
@@ -187,8 +202,10 @@ bool CGame::Init(IGameFramework *pFramework)
 		}
 	}
 
+	CoopHeap::Check("Init: level names");
   // Register all the games factory classes e.g. maps "Player" to CPlayer
   InitGameFactory(m_pFramework);
+	CoopHeap::Check("Init: game factory");
 
 	//FIXME: horrible, remove this ASAP
 	//gEnv->pPhysicalWorld->AddEventClient( EventPhysImpulse::id,OnImpulse,0 );  
@@ -197,9 +214,12 @@ bool CGame::Init(IGameFramework *pFramework)
 
 	string itemFolder = "scripts/entities/items/xml";
 	pFramework->GetIItemSystem()->Scan(itemFolder.c_str());
+	CoopHeap::Check("Init: item scan");
 	m_pWeaponSystem->Scan(itemFolder.c_str());
+	CoopHeap::Check("Init: weapon scan");
 
 	m_pOptionsManager = COptionsManager::CreateOptionsManager();
+	CoopHeap::Check("Init: options manager");
 
 	m_pSPAnalyst = new CSPAnalyst();
  
@@ -310,6 +330,7 @@ bool CGame::Init(IGameFramework *pFramework)
 	else
 		GameWarning("[GameProfiles]: PlayerProfileManager not available. Running without.");
 
+	CoopHeap::Check("Init: the profile");
 	m_pOptionsManager->SetProfileManager(m_pPlayerProfileManager);
 
 	// CLaptopUtil must be created before CFlashMenuObject as this one relies on it
@@ -336,7 +357,9 @@ bool CGame::Init(IGameFramework *pFramework)
 	if (!gEnv->pSystem->IsDedicated())
 	{
 		m_pFlashMenuObject = new CFlashMenuObject;
+		CoopHeap::Check("Init: the menu made");
 		m_pFlashMenuObject->Load();
+		CoopHeap::Check("Init: the menu loaded");
 	}
 
 	if (bIsFirstTime)
@@ -369,6 +392,7 @@ bool CGame::Init(IGameFramework *pFramework)
 	}
 
   m_pFramework->RegisterListener(this,"Game", FRAMEWORKLISTENERPRIORITY_GAME);
+	CoopHeap::Check("Init: the end");
 
 #ifdef GAME_DEBUG_MEM
 	DumpMemInfo("CGame::Init end");
@@ -381,6 +405,7 @@ void CoopCaptureOriginalFlowNodes(IFlowSystem* pFlow); // Nodes/CoopFlowNodes.cp
 
 bool CGame::CompleteInit()
 {
+	CoopHeap::Check("CompleteInit begins");
 	// Initialize Game02 flow nodes
 
 	if (IFlowSystem *pFlow = m_pFramework->GetIFlowSystem())
@@ -400,11 +425,22 @@ bool CGame::CompleteInit()
 #ifdef GAME_DEBUG_MEM
 	DumpMemInfo("CGame::CompleteInit");
 #endif
+	CoopHeap::Check("CGame::CompleteInit");
 	return true;
 }
 
 int CGame::Update(bool haveFocus, unsigned int updateFlags)
 {
+	// (Crysis Coop: the engine's heap, every frame before a level, in the
+	// autotester's games)
+	{
+		static int s_heapFrames = 0;
+		if (!gEnv->pGame || !g_pGame->GetIGameFramework()->GetClientActor())
+		{
+			++s_heapFrames;
+			CoopHeap::Check(s_heapFrames == 1 ? "the first frame" : "a frame before the level (menu, loading)");
+		}
+	}
 	bool bRun = m_pFramework->PreUpdate( true, updateFlags );
 	float frameTime = gEnv->pTimer->GetFrameTime();
 
@@ -416,6 +452,7 @@ int CGame::Update(bool haveFocus, unsigned int updateFlags)
 		m_pSoundMoods->Update();
 
 		CoopAI::Update(frameTime);
+		CoopPak::Update();
 		CoopAgent::Update(frameTime);
 	}
 

@@ -13,6 +13,8 @@ History:
 #include "StdAfx.h"
 #include "Throw.h"
 #include "CoopAI.h"
+#include "CoopProps.h"
+#include "CoopAgent.h"
 #include "Actor.h"
 #include "Player.h"
 #include "Game.h"
@@ -202,7 +204,11 @@ void CThrow::StartFire()
 		
 		m_hold_timer=m_throwparams.hold_duration;
 
-		m_pWeapon->RequestStartFire();
+		// (Crysis Coop: a thing from the hand is no fire for the others: they
+		// played a grenade throw with a grenade in the hand; CoopProps sends the
+		// throw itself)
+		if (!(m_throwableId && CoopProps::Enabled()))
+			m_pWeapon->RequestStartFire();
 
 		m_pWeapon->RequireUpdate(eIUS_FireMode);
 	}
@@ -213,9 +219,11 @@ void CThrow::StopFire()
 {
 	if (m_firing && !m_throwing && !m_thrown)
 	{
+		const bool coopThing = m_throwableId && CoopProps::Enabled();
 		DoThrow();
 
-		m_pWeapon->RequestStopFire();
+		if (!coopThing)
+			m_pWeapon->RequestStopFire();
 
 		m_pWeapon->RequireUpdate(eIUS_FireMode);
 	}
@@ -393,6 +401,7 @@ void CThrow::DoDrop()
 						}
 					}
 
+					Vec3 droppedV(ZERO);
 					if(CheckForIntersections(pPE,info.eyeDirection))
 					{
 						Matrix34 newTM = pEntity->GetWorldTM();
@@ -402,13 +411,17 @@ void CThrow::DoDrop()
 						pe_action_set_velocity asv;
 						asv.v = (-info.eyeDirection*speed);
 						pPE->Action(&asv);
+						droppedV = asv.v;
 					}
 					else
 					{
 						pe_action_set_velocity asv;
 						asv.v = (info.eyeDirection*speed);
 						pPE->Action(&asv);
+						droppedV = asv.v;
 					}	
+					// Crysis Coop: the drop to the server and every other game
+					CoopProps::OnLocalRelease(pActor, pEntity->GetId(), CoopProps::eR_Drop, droppedV, Vec3(ZERO));
 
 					SEntityEvent entityEvent;
 					entityEvent.event = ENTITY_EVENT_PICKUP;
@@ -477,6 +490,20 @@ void CThrow::ThrowObject(IEntity* pEntity, IPhysicalEntity* pPE)
 	Vec3 pos = GetFiringPos(hit);
 	Vec3 dir = ApplySpread(GetFiringDir(hit, pos), GetSpread());
 	Vec3 vel = GetFiringVelocity(dir);
+	// (Crysis Coop: the AI companion's game has no first-person view - its
+	// camera and the hand's helpers stay at the world's origin: where it looks)
+	const bool companion = CoopAgent::IsCompanion() && pPlayer;
+	if (companion)
+	{
+		SMovementState st;
+		if (IMovementController* pMC = pPlayer->GetMovementController())
+		{
+			pMC->GetMovementState(st);
+			if (st.eyeDirection.GetLengthSquared() > 0.01f)
+				dir = st.eyeDirection.GetNormalized();
+		}
+	}
+	Vec3 thrownV(ZERO), thrownW(ZERO);
 
 	float speed = 12.0f;
 	if(strengthMode)
@@ -493,6 +520,8 @@ void CThrow::ThrowObject(IEntity* pEntity, IPhysicalEntity* pPE)
 		Matrix34 newTM = pEntity->GetWorldTM();
 		newTM.SetTranslation(newTM.GetTranslation()-(dir*0.4f));
 		pEntity->SetWorldTM(newTM,ENTITY_XFORM_POS);
+		if (CoopProps::Enabled() && pPlayer)
+			CryLogAlways("[CoopProp] %s: no room to throw %s (something right before it): it falls where it is", pPlayer->GetEntity()->GetName(), pEntity->GetName());
 	}
 	else
 	{
@@ -500,13 +529,16 @@ void CThrow::ThrowObject(IEntity* pEntity, IPhysicalEntity* pPE)
 		asv.v = (dir*speed)+vel;
 		AABB box;
 		pEntity->GetWorldBounds(box);
-		Vec3 finalW = -gEnv->pSystem->GetViewCamera().GetMatrix().GetColumn0()*(8.0f/max(0.1f,box.GetRadius()));
+		const Vec3 right = companion ? pPlayer->GetViewQuatFinal().GetColumn0() : gEnv->pSystem->GetViewCamera().GetMatrix().GetColumn0();
+		Vec3 finalW = -right*(8.0f/max(0.1f,box.GetRadius()));
 		finalW.x *= Random(0.5f,1.3f);
 		finalW.y *= Random(0.5f,1.3f);
 		finalW.z *= Random(0.5f,1.3f);
 		asv.w = finalW;
 		//asv.w = Vec3(Random(-4.5f,3.5f),Random(-1.75f,2.5f),Random(-1.5f,2.2f));
 		pPE->Action(&asv);
+		thrownV = asv.v;
+		thrownW = asv.w;
 	}		
 
 	SEntityEvent entityEvent;
@@ -516,6 +548,9 @@ void CThrow::ThrowObject(IEntity* pEntity, IPhysicalEntity* pPE)
 		entityEvent.nParam[1] = pPlayer->GetEntityId();
 	entityEvent.fParam[0] = speed;
 	pEntity->SendEvent( entityEvent );
+
+	// Crysis Coop: the throw to the server and every other game
+	CoopProps::OnLocalRelease(pPlayer, pEntity->GetId(), CoopProps::eR_Throw, thrownV, thrownW);
 }
 
 //-----------------------------------------------------

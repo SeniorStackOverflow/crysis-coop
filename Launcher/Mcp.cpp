@@ -476,7 +476,7 @@ namespace
 		{ "observe", "Look at the game as the AI companion (the second player). Returns JSON: 'me' (health, suit, weapon and ammo, position, facing, vehicle), "
 			"'order' (the current order and what the companion is doing now), 'teammates' (the human host and others: health, down, distance, compass direction, "
 			"bearing in degrees from where the companion looks: 0 ahead, 90 to the right, -90 to the left), 'enemies' (nearest 10: name, distance, direction, bearing, "
-			"visible, alerted 0-2, vehicle), 'vehicles' nearby, 'events' and 'chat' since the last look. Call it often: every few seconds of play.",
+			"visible, alerted 0-2, vehicle), 'vehicles' nearby, 'held' (the thing it carries, if any), 'events' and 'chat' since the last look. Call it often: every few seconds of play.",
 			"{\"type\":\"object\",\"properties\":{}}" },
 		{ "play_freely", "Let the companion play on its own (the default): follow the host, fire at enemies it sees, revive a downed teammate, ride along in the host's vehicle.",
 			"{\"type\":\"object\",\"properties\":{}}" },
@@ -497,6 +497,13 @@ namespace
 		{ "say", "Say something in the game's chat: the human host reads it on the screen. Keep it short.",
 			"{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}" },
 		{ "use", "Press the use key on what is in front of the companion (a door, a switch, a pick-up).",
+			"{\"type\":\"object\",\"properties\":{}}" },
+		{ "pick_up", "Pick up a loose thing (a crate, a barrel, a bottle) with the left hand and carry it: by its name or id, or the nearest one within 8 m. "
+			"Everybody in the game sees it carried. It keeps it until told to throw or drop it (a thing in both hands keeps it from shooting).",
+			"{\"type\":\"object\",\"properties\":{\"thing\":{\"type\":\"string\",\"description\":\"a thing's name or id; empty = the nearest\"}}}" },
+		{ "throw_thing", "Throw what the companion carries: toward world coordinates x y z, toward a named object, or where it looks.",
+			"{\"type\":\"object\",\"properties\":{\"target\":{\"type\":\"string\",\"description\":\"an object's name\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"z\":{\"type\":\"number\"}}}" },
+		{ "drop_thing", "Put down what the companion carries.",
 			"{\"type\":\"object\",\"properties\":{}}" },
 		{ "throw_grenade", "Throw a hand grenade at an enemy (by name from observe, or the best one: a group, or one behind cover). The companion throws on its own too in fights; it never throws when a teammate is close to the target or the way up is blocked.",
 			"{\"type\":\"object\",\"properties\":{\"enemy\":{\"type\":\"string\",\"description\":\"the enemy's name; empty = the best target\"}}}" },
@@ -546,6 +553,21 @@ namespace
 		else if (name == "fire_at_will") command = std::string("fire ") + (args->Str("enabled", "true") == "false" ? "off" : "on");
 		else if (name == "say") command = "say " + args->Str("text");
 		else if (name == "use") command = "use";
+		else if (name == "pick_up") command = "grab " + args->Str("thing", "nearest");
+		else if (name == "throw_thing")
+		{
+			const std::string target = args->Str("target");
+			if (!target.empty())
+				command = "throw " + target;
+			// (the height decides the throw: none made up)
+			else if (args->Get("x") && args->Get("y") && args->Get("z"))
+				command = "throw " + args->Str("x") + " " + args->Str("y") + " " + args->Str("z");
+			else if (args->Get("x") || args->Get("y") || args->Get("z"))
+				return Text("throw_thing needs a target name, or x, y and z (as observe gives positions)", true);
+			else
+				command = "throw";
+		}
+		else if (name == "drop_thing") command = "drop";
 		else if (name == "throw_grenade") command = "grenade " + args->Str("enemy", "best");
 		else if (name == "switch_weapon") command = "weapon " + args->Str("weapon", "next");
 		else if (name == "suit_mode") command = "suit " + args->Str("mode", "armor");

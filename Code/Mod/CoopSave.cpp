@@ -16,6 +16,8 @@
 #include "CoopText.h"
 #include "CoopSave.h"
 #include "CoopRevive.h"
+#include "CoopProps.h"
+#include "CoopHeap.h"
 #include "CoopAI.h"
 #include "CoopCloud.h"
 #include "CoopRelay.h"
@@ -2124,6 +2126,9 @@ namespace
 			CoopAI::GuardPhysicsEvents(30.0f);
 			const bool keep = s_loadKeepClients && KeepBegin();
 			FreeAbsentSeats("before the load");
+			// (the things in the players' hands: let go of before the load
+			// puts everything back)
+			CoopProps::BeforeLoad();
 			s_perceptionDropped = 0;
 			// (-1: testing, the load as before the check: it crashes again)
 			checked = (!s_pLoadAIReset || s_pLoadAIReset->GetIVal() >= 0) && PatchPerception(true);
@@ -2309,6 +2314,7 @@ namespace
 	// coop_host [level] [campaign name]: a new campaign
 	void CmdHost(IConsoleCmdArgs* pArgs)
 	{
+		CoopHeap::Check("coop_host");
 		const char* level = LEVELS[0];
 		int first = 1;
 		if (pArgs->GetArgCount() > 1)

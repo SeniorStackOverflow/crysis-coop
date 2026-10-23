@@ -154,6 +154,14 @@ public:
 	void DrawNear(bool drawNear, EntityId entityId=0);
 	bool PerformPickUp();
 	int  CanPerformPickUp(CActor *pActor, IPhysicalEntity *pPhysicalEntity = NULL, bool getEntityInfo = false);
+	int  CanPerformPickUpSP(CActor *pActor, IPhysicalEntity *pPhysicalEntity, bool getEntityInfo);
+	// Crysis Coop: let go of the thing held in the left hand (a drop; the
+	// server said no, or takes it)
+	void CoopForceDrop();
+	// the thing in the left hand from the pick-up to the throw (GetHeldEntityId
+	// is 0 while it is picked up, thrown or swung)
+	EntityId CoopHeldId() const { return (m_currentState & (eOHS_PICKING | eOHS_HOLDING_OBJECT | eOHS_THROWING_OBJECT | eOHS_MELEE)) ? m_heldEntityId : 0; }
+	bool CoopHolding() const { return (m_currentState & eOHS_HOLDING_OBJECT) != 0; }
 	int  CheckItemsInProximity(Vec3 pos, Vec3 dir, bool getEntityInfo);
 
 	void UpdateCrosshairUsabilitySP();
