@@ -13,7 +13,7 @@
     Tags = @("companion", "combat")
     SummaryRu = "Враг за станковым пулемётом у полевых хижин (как в игре 18.10): компаньон стреляет в пулемётчика, а не убегает"
     Session = @{ Fixture = "new:rescue"; Companion = $true }
-    Params = @{ Gun = "ShiTen17"; Gunner = "field_hut_2"; Spot = @(1655, 2290); Wake = @(1610, 2290); Back = @(1650, 2170); Fight = 70 }
+    Params = @{ Gun = "ShiTen17"; Gunner = "field_hut_2"; Spot = @(1650, 2289); Wake = @(1610, 2290); Back = @(1650, 2170); Fight = 70 }
     Body = {
         param($P)
         Step "the host wakes the huts, the companion in front of the nest" {
@@ -35,8 +35,27 @@
             # (the others there shot: this fight is the nest's)
             Send-Game host ('#local g=System.GetEntityByName("' + $P.Gun + '"); local p=g:GetWorldPos(); local k=0; for _,e in ipairs(System.GetEntitiesInSphere(p,400) or {}) do if e.actor and not e.actor:IsPlayer() and e.actor:GetHealth()>0 and e:GetName()~="' + $P.Gunner + '" then g_gameRules:CreateHit(e.id,g_localActorId,g_localActorId,9000,nil,nil,nil,"bullet"); k=k+1 end end; local s=System.GetEntityByName("' + $P.Gunner + '"); local q=s:GetWorldPos(); System.LogAlways(string.format("[CHK] others shot: %d; the gunner at %.0f %.0f %.0f, %.1f m from the gun", k, q.x, q.y, q.z, math.sqrt((q.x-p.x)^2+(q.y-p.y)^2)))')
             Send-Game host ('#local c=System.GetEntityByName("Companion"); local t={x=' + $P.Spot[0] + ',y=' + $P.Spot[1] + ',z=0}; t.z=System.GetTerrainElevation(t)+0.3; g_gameRules.game:MovePlayer(c.id,t,{x=0,y=0,z=0}); local h={x=' + $P.Back[0] + ',y=' + $P.Back[1] + ',z=0}; h.z=System.GetTerrainElevation(h)+0.3; g_gameRules.game:MovePlayer(g_localActorId,h,{x=0,y=0,z=0}); System.LogAlways("[CHK] the companion in front of the nest, the host back")')
-            Pause-Game 1
-            Send-Agent "hold" | Out-Null
+            # (held where it was put, once its own game has it there: a "hold" right
+            # after the move held wherever its game had it a moment later, 1-5 m
+            # off, and from x 1652 a hut's post hides the gunner - both builds
+            # failed there, 2026-10-23)
+            # (the server's MovePlayer does not move a client's own player - its
+            # game keeps its place and sends that back: it moves itself)
+            $at = $null
+            # (and at once a goto there: held at the first step's spot, 45 m west,
+            # it walked back toward it)
+            for ($i = 0; $i -lt 6; $i++) {
+                Send-Game companion ('#local t={x=' + $P.Spot[0] + ',y=' + $P.Spot[1] + ',z=0}; t.z=System.GetTerrainElevation(t)+0.3; System.GetEntity(g_localActorId):SetWorldPos(t)')
+                Pause-Game 0.3
+                $mA = New-Mark
+                Send-Agent ("goto " + $P.Spot[0] + " " + $P.Spot[1] + " 230") | Out-Null
+                [void](Wait-Log companion '^\[CoopAgent\] arrived: holding there' 6 $mA)
+                $mC = New-Mark
+                Send-Game companion '#local p=System.GetEntity(g_localActorId):GetWorldPos(); System.LogAlways(string.format("[CHK] companion at %.1f %.1f %.1f",p.x,p.y,p.z))'
+                $at = Wait-Log companion '^\[CHK\] companion at (-?[\d.]+) (-?[\d.]+)' 3 $mC
+                if ($at -and [Math]::Abs([double]$at.Match.Groups[1].Value - $P.Spot[0]) -lt 1.0 -and [Math]::Abs([double]$at.Match.Groups[2].Value - $P.Spot[1]) -lt 1.0) { break }
+            }
+            Require ($at -and [Math]::Abs([double]$at.Match.Groups[1].Value - $P.Spot[0]) -lt 1.5) ("the companion holds at the spot (" + $(if ($at) { $at.Text } else { 'no line' }) + ")")
             Send-Game host "coop_god 2"
         }
         Step "the fight" {

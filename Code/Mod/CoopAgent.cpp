@@ -531,6 +531,15 @@ namespace
 		float arriveBlockedSince;   // next to the one it follows with something between, since
 		float unreachSince, unreachBest, unreachCheckAt;   // the one it follows out of a straight walk since, the nearest it came, next look
 		float jumpAt;           // when it last jumped up onto something on its way
+		// a climb up onto something (ClimbStep): till then (0: none), toward,
+		// from that height, so high, the jumps so far, its phase and since when
+		float climbUntil, climbSince, climbFromZ, climbRise, climbPhaseAt, climbSeenAt, climbLookAt, climbGroundAt;
+		Vec3 climbDir, climbStart;
+		int climbJumps, climbPhase;
+		bool climbStrength, climbWasAir, climbPressed;
+		Vec3 climbPlace;        // where climbs failed lately, and how often
+		float climbPlaceAt;
+		int climbFails;
 		float waitWayUntil;     // stands till then for the host's way (its own squares only got nearer)
 		float reviveSince;      // at the body of whom it revives, since
 		float reachFailSince;   // next to the body with something between, since
@@ -617,7 +626,8 @@ namespace
 			slideDir(ZERO), slideUntil(0), localFor(ZERO), localAt(-100), localStage(0), localPlans(0), nextCheckFor(ZERO), toCheckFor(ZERO),
 			nextCheckAt(0), toCheckAt(0), nextClear(true), toClear(true), wayCheckAt(0), wayCheckPath(-100), farSince(-1), askAt(0), reportAt(0), useHeld(false), useFor(0), useSince(0), lastHealth(-1), wasDown(false), named(false),
 			weaponAt(0), loot(0), lootSince(0), useAt(0), useBlocked(0), pathGoal(ZERO), pathAt(-100), pathAskAt(0), pathNoneAt(-100), pathNoneGoal(ZERO),
-			localFound(false), doorMode(false), doorFor(ZERO), arriveBlockedSince(-1), unreachSince(-1), unreachBest(0), unreachCheckAt(0), jumpAt(-100), waitWayUntil(0), reviveSince(-1), reachFailSince(-1), bodyToldFor(0),
+			localFound(false), doorMode(false), doorFor(ZERO), arriveBlockedSince(-1), unreachSince(-1), unreachBest(0), unreachCheckAt(0), jumpAt(-100), climbUntil(0), climbSince(0), climbFromZ(0), climbRise(0), climbPhaseAt(0), climbSeenAt(0), climbLookAt(0), climbGroundAt(-1), climbDir(ZERO), climbStart(ZERO), climbJumps(0),
+			climbPhase(0), climbStrength(false), climbWasAir(false), climbPressed(false), climbPlace(ZERO), climbPlaceAt(-100), climbFails(0), waitWayUntil(0), reviveSince(-1), reachFailSince(-1), bodyToldFor(0),
 			dodgeUntil(0), dodgeSide(1), retreating(false), hitAt(-100), lastFought(0), bursts(0), heldFire(0), stuckTimes(0), unseen(0), turning(0), statsAt(0), dropAt(0), downedFor(0), downedSince(0), enemySeenAt(-100),
 			cover(ZERO), haveCover(false), coverAskAt(0), retreatSince(-100), recoveredAt(-100), spreadHeldAt(-100), smallFarAt(-100),
 			coverAt(-100), peekUntil(0), peekUp(true), coverPeek(0), peekSince(0), peekSeenAt(-100), peekSide(1), openSince(-1), peeks(0), leanPeeks(0), hitsConfirmed(0), leanHoldUntil(0), leanHoldSide(0),
@@ -1022,11 +1032,62 @@ namespace
 	// not move (a thin ray slipped past the post of a fence the body then
 	// was caught on), rays at the middle and both sides against what moves
 	// (a bin is pushed aside, a car or a pallet of crates is not)
+	// the terrain on the way is no slope too steep to walk up: the balls and
+	// rays of a walk do not see it. A river bank of ~50 degrees by the bridge
+	// looked a straight walk; the host's way round it was dropped for it, its
+	// squares went straight up and it jumped at the bank (the user's game of
+	// 2026-10-23). Steep for a metre and a half on end (~40 degrees: 1.25 m
+	// up), not a hump: half-metre steps of 40 degrees on the camp's rough
+	// ground made its ways under fire "blocked", it went the long way and
+	// went down (1 fight of 5 won, 3 of 3 before). Down is walked; where
+	// something stands on the slope (stairs, a deck) that is the ground
+	const float TERRAIN_RISE = 1.25f;	// up over TERRAIN_RUN metres
+	const float TERRAIN_RUN = 1.5f;
+	bool TerrainWalkable(const Vec3& from, const Vec3& to)
+	{
+		I3DEngine* p3D = gEnv->p3DEngine;
+		if (!p3D)
+			return true;
+		// (only up to a place that much higher: on the level - a body lying
+		// by the camp's rocks, 2 m off - a hump between is walked round or
+		// over; "blocked" there it went to and fro and never revived him)
+		if (to.z - from.z < 1.0f)
+			return true;
+		const float z0 = p3D->GetTerrainElevation(from.x, from.y);
+		// (not on the terrain there: a floor, a deck)
+		if (fabsf(from.z - z0) > 0.6f)
+			return true;
+		Vec3 dir = to - from;
+		dir.z = 0.0f;
+		const float len = dir.GetLength();
+		if (len < TERRAIN_RUN)
+			return true;
+		dir /= len;
+		const int back = (int)(TERRAIN_RUN / 0.5f);
+		float zs[64];
+		const int steps = std::min(63, (int)(len / 0.5f));
+		zs[0] = z0;
+		for (int k = 1; k <= steps; ++k)
+		{
+			const Vec3 p = from + dir * (0.5f * (float)k);
+			zs[k] = p3D->GetTerrainElevation(p.x, p.y);
+			if (k >= back && zs[k] - zs[k - back] > TERRAIN_RISE)
+			{
+				ray_hit hit;
+				if (!gEnv->pPhysicalWorld->RayWorldIntersection(Vec3(p.x, p.y, zs[k] + 2.2f), Vec3(0, 0, -2.1f), ent_static, WALK_GEOM, &hit, 1))
+					return false;
+			}
+		}
+		return true;
+	}
+
 	bool ClearWay(CPlayer* pMe, const Vec3& from, const Vec3& to, float radius = 0.3f)
 	{
 		const Vec3 dir = to - from;
 		if (dir.x * dir.x + dir.y * dir.y < 0.04f)
 			return true;
+		if (!TerrainWalkable(from, to))
+			return false;
 		// (itself, and what it carries)
 		IPhysicalEntity* skip[2];
 		int nSkip = 0;
@@ -1131,6 +1192,16 @@ namespace
 		return diag ? step * 1.4f : step;
 	}
 
+	// from one square to the next (both looked at): the step is one the body
+	// takes (its own tolerance for a straight step: straightened ways had the
+	// diagonal's for every pair, 54 degrees, and a river bank it could not
+	// walk up was a way, 2026-10-23)
+	bool GridStepOk(int from, int to, bool diag)
+	{
+		const SGrid& g = s_grid;
+		return fabsf(g.ground[to] - g.ground[from]) <= GridStep(diag);
+	}
+
 	// the squares around a place (it stands in the middle of one)
 	void GridBegin(CPlayer* pMe, const Vec3& center, float radius, float cell = GRID_CELL)
 	{
@@ -1230,7 +1301,7 @@ namespace
 			const int i = GridIndex(a + (b - a) * ((float)s / (float)steps));
 			if (i < 0 || !GridFree(i % g.n, i / g.n))
 				return false;
-			if (prev >= 0 && prev != i && fabsf(g.ground[i] - g.ground[prev]) > GridStep(true))
+			if (prev >= 0 && prev != i && !GridStepOk(prev, i, prev % g.n != i % g.n && prev / g.n != i / g.n))
 				return false;
 			prev = i;
 		}
@@ -1359,7 +1430,7 @@ namespace
 				if (!GridFree(nx, ny))
 					continue;
 				const int ni = ny * n + nx;
-				if (closed[ni] || fabsf(g.ground[ni] - g.ground[cur.i]) > GridStep(diag))
+				if (closed[ni] || !GridStepOk(cur.i, ni, diag))
 					continue;
 				// (a diagonal step past a corner: both squares beside it free,
 				// or the body's sweep through it free: a door at an angle)
@@ -1608,6 +1679,213 @@ namespace
 		return !gEnv->pPhysicalWorld->RayWorldIntersection(pos + Vec3(0, 0, 1.3f), dir * 1.6f, ents, WALK_GEOM, &hit, 1, &pSkip, pSkip ? 1 : 0);
 	}
 
+	float LedgeAhead(CPlayer* pMe, const Vec3& pos, const Vec3& dir, bool* pTerrain = 0);
+
+	// room over its head for the body to rise so high (a bridge's deck over a
+	// river bank: a strength jump knocked its head on it)
+	bool HeadRoom(CPlayer* pMe, const Vec3& pos, float rise)
+	{
+		IPhysicalEntity* pSkip = pMe->GetEntity()->GetPhysics();
+		ray_hit hit;
+		return !gEnv->pPhysicalWorld->RayWorldIntersection(pos + Vec3(0, 0, 1.9f), Vec3(0, 0, rise), ent_static | ent_terrain | ent_rigid | ent_sleeping_rigid,
+			WALK_GEOM, &hit, 1, &pSkip, pSkip ? 1 : 0);
+	}
+
+	// up onto something the way goes onto (a container's floor, a ledge, a
+	// bank): as a player does it, not one jump on the spot. A jump lifts the
+	// feet 1.0 m, the strength mode's 4.7 m, and the body steps onto what is
+	// 0.5 m higher; it gets there only pressing on into it all the time in
+	// the air. It jumped once at a bank by the bridge, its way turned along
+	// the bank or stopped in the air ("there"), rose 2 m and fell back, twice;
+	// the user got up in armor jumping again and again (2026-10-23). Not
+	// again where it failed twice lately: a way round then
+	bool StartClimb(CPlayer* pMe, const Vec3& pos, const Vec3& dir, float rise, const char* why, bool terrain = false)
+	{
+		const float now = Now();
+		if (s_bot.climbUntil > 0.0f || rise < 0.45f || rise > 2.8f)
+			return false;
+		const bool samePlace = Dist2D(pos, s_bot.climbPlace) < 3.0f && now - s_bot.climbPlaceAt < 60.0f;
+		if (samePlace && s_bot.climbFails >= 2)
+			return false;
+		CNanoSuit* pSuit = pMe->GetNanoSuit();
+		// (a jump lifts the feet 1.0 m, less on a slope; the strength mode's
+		// 4.7. Up a steep bank of the terrain a jump is tilted off it: four of
+		// them fell back where one strength jump got up, 2026-10-23)
+		const bool strength = rise > 1.0f || (terrain && rise > 0.6f);
+		// (the energy back first, a few seconds: not jumps that fall short)
+		if (strength && !(pSuit && pSuit->GetSuitEnergy() >= 90.0f))
+			return false;
+		// no room over its head here (a bridge's deck): a step along the face
+		// to where there is, then up from there
+		Vec3 start = pos;
+		if (!HeadRoom(pMe, pos, rise + 0.3f))
+		{
+			const Vec3 along(dir.y, -dir.x, 0.0f);
+			bool found = false;
+			for (int k = 0; k < 4 && !found; ++k)
+			{
+				const Vec3 at = pos + along * ((k & 1) ? -1.0f : 1.0f) * (k < 2 ? 1.2f : 2.4f);
+				const float there = LedgeAhead(pMe, at, dir);
+				if (there > 0.0f && HeadRoom(pMe, at, there + 0.3f) && ClearWay(pMe, pos, at))
+				{
+					start = at;
+					rise = there;
+					found = true;
+				}
+			}
+			if (!found)
+			{
+				if (!samePlace || s_bot.climbFails == 0)
+					Event("no room over its head to climb the %.1f m in the way", rise);
+				if (!samePlace)
+				{
+					s_bot.climbPlace = pos;
+					s_bot.climbFails = 0;
+				}
+				s_bot.climbPlaceAt = now;
+				++s_bot.climbFails;
+				return false;
+			}
+		}
+		s_bot.climbUntil = now + (strength ? 6.0f : 5.0f);
+		s_bot.climbSince = now;
+		s_bot.climbDir = dir;
+		s_bot.climbDir.z = 0.0f;
+		s_bot.climbDir.NormalizeSafe(Vec3(0, 1, 0));
+		s_bot.climbFromZ = pos.z;
+		s_bot.climbRise = rise;
+		s_bot.climbJumps = 0;
+		s_bot.climbStart = start;
+		s_bot.climbPhase = Dist2D(start, pos) > 0.3f ? 3 : 0;
+		s_bot.climbGroundAt = -1.0f;
+		s_bot.climbPhaseAt = now;
+		s_bot.climbStrength = strength;
+		s_bot.climbWasAir = false;
+		s_bot.climbSeenAt = now;
+		if (strength)
+			s_bot.strengthJumpAt = now;
+		Event("climbs %.1f m (%s)%s%s", rise, why, strength ? " with the strength" : "", s_bot.climbPhase == 3 ? ", from a step along it (no room over its head here)" : "");
+		return true;
+	}
+
+	// a climb under way: true while it takes the move (phase 0 a step back for
+	// a run, 1 running in, then the jump held till it is off the ground, 2 in
+	// the air pressing on). Up: done; fallen back: again, a few times
+	bool ClimbStep(CPlayer* pMe, const Vec3& pos)
+	{
+		if (s_bot.climbUntil <= 0.0f)
+			return false;
+		const float now = Now();
+		s_bot.climbSeenAt = now;
+		// (shot at, an enemy seen, falling back: that first)
+		if (now - s_bot.hitAt < 6.0f || s_bot.retreating || (s_bot.enemy && now - s_bot.enemySeenAt < 8.0f))
+		{
+			s_bot.climbUntil = 0.0f;
+			s_bot.strengthJumpAt = -1.0f;
+			return false;
+		}
+		const SActorStats* pStats = pMe->GetActorStats();
+		const bool inAir = pStats && pStats->inAir > 0.05f;
+		if (inAir)
+			s_bot.climbGroundAt = -1.0f;
+		else if (s_bot.climbGroundAt < 0.0f)
+			s_bot.climbGroundAt = now;
+		// (up there and standing a moment: not partway up a bank, sliding back)
+		const bool up = pos.z >= s_bot.climbFromZ + s_bot.climbRise - 0.3f && s_bot.climbGroundAt >= 0.0f && now - s_bot.climbGroundAt > 0.3f;
+		if (up)
+		{
+			Event("up %.1f m after %d jump%s (%.1f s)", pos.z - s_bot.climbFromZ, s_bot.climbJumps, s_bot.climbJumps == 1 ? "" : "s", now - s_bot.climbSince);
+			s_bot.climbUntil = 0.0f;
+			s_bot.strengthJumpAt = -1.0f;
+			s_bot.progAt = now;
+			s_bot.stuck = 0;
+			return false;
+		}
+		CNanoSuit* pSuit = pMe->GetNanoSuit();
+		const int most = s_bot.climbStrength ? 2 : 4;
+		// (the energy gone for the strength jump: again when it is back, not a
+		// failure here - two of those and it never climbed that bank again)
+		if (s_bot.climbStrength && s_bot.climbPhase != 2 && !(pSuit && pSuit->GetSuitEnergy() >= 70.0f))
+		{
+			Event("waits for the suit's energy to climb the %.1f m", s_bot.climbRise);
+			s_bot.climbUntil = 0.0f;
+			s_bot.strengthJumpAt = -1.0f;
+			s_bot.climbLookAt = now + 2.0f;
+			return false;
+		}
+		if ((now >= s_bot.climbUntil || s_bot.climbJumps >= most) && s_bot.climbPhase != 2)
+		{
+			const bool samePlace = Dist2D(pos, s_bot.climbPlace) < 3.0f && now - s_bot.climbPlaceAt < 60.0f;
+			if (!samePlace)
+			{
+				s_bot.climbPlace = pos;
+				s_bot.climbFails = 0;
+			}
+			s_bot.climbPlaceAt = now;
+			++s_bot.climbFails;
+			Event("could not climb the %.1f m here (%d jump%s, %.1f s): a way round", s_bot.climbRise, s_bot.climbJumps, s_bot.climbJumps == 1 ? "" : "s",
+				now - s_bot.climbSince);
+			s_bot.climbUntil = 0.0f;
+			s_bot.strengthJumpAt = -1.0f;
+			s_bot.pathAt = -100.0f;
+			return false;
+		}
+		if (s_bot.climbStrength)
+			s_bot.strengthJumpAt = now;
+		// (in the strength mode before the strength jump)
+		const bool ready = !s_bot.climbStrength || (pSuit && pSuit->GetMode() == NANOMODE_STRENGTH);
+		if (s_bot.climbPhase == 2)
+		{
+			// landed below: a step back, a run, a jump again (sliding down a
+			// steep bank counts as the air: longer than a strength jump's 2 s)
+			if ((!inAir && !s_bot.climbWasAir) || now - s_bot.climbPhaseAt > 2.3f)
+			{
+				s_bot.climbPhase = 0;
+				s_bot.climbPhaseAt = now;
+			}
+		}
+		else if (inAir && !s_bot.climbWasAir && s_bot.climbPhase == 1 && s_bot.climbPressed)
+		{
+			++s_bot.climbJumps;
+			s_bot.climbPhase = 2;
+			s_bot.climbPhaseAt = now;
+			s_bot.climbPressed = false;
+		}
+		s_bot.climbWasAir = inAir;
+		// (a run at it: a take-off pressed against a steep bank has no speed on
+		// into it, the air adds little - up to the top's height a metre out,
+		// then back down, again and again; a jump with a run got up)
+		if (s_bot.climbPhase == 0 && (Dist2D(pos, s_bot.climbStart) > 1.4f || now - s_bot.climbPhaseAt > 1.0f))
+		{
+			s_bot.climbPhase = 1;
+			s_bot.climbPhaseAt = now;
+			s_bot.climbPressed = false;
+		}
+		if (s_bot.climbPhase == 3 && (Dist2D(pos, s_bot.climbStart) < 0.4f || now - s_bot.climbPhaseAt > 2.0f))
+		{
+			s_bot.climbPhase = 0;
+			s_bot.climbPhaseAt = now;
+		}
+		Vec3 toStart = s_bot.climbStart - pos;
+		toStart.z = 0.0f;
+		s_ctl.moveDir = s_bot.climbPhase == 3 ? toStart.GetNormalizedSafe(s_bot.climbDir) : s_bot.climbPhase == 0 ? -s_bot.climbDir : s_bot.climbDir;
+		s_ctl.sprint = s_bot.climbPhase == 1;
+		// (facing it all the time: no slower backwards, the run straight in)
+		s_ctl.look = true;
+		s_ctl.yaw = Yaw(s_bot.climbDir);
+		s_ctl.pitch = 0.0f;
+		s_ctl.turnRate = 8.0f;
+		const Vec3 view = pMe->GetViewQuatFinal().GetColumn1();
+		const bool facing = Vec3(view.x, view.y, 0.0f).GetNormalizedSafe(Vec3(0, 1, 0)).Dot(s_bot.climbDir) > 0.9f;
+		// (at the foot: the feet going up the bank, at the place it began, or
+		// long enough on the way back to it)
+		const bool atFoot = pos.z > s_bot.climbFromZ + 0.2f || Dist2D(pos, s_bot.climbStart) < 0.5f || now - s_bot.climbPhaseAt > 0.8f;
+		s_ctl.jump = s_bot.climbPhase == 1 && ready && facing && now - s_bot.climbPhaseAt > 0.15f && atFoot;
+		if (s_ctl.jump)
+			s_bot.climbPressed = true;
+		return true;
+	}
+
 	// along the face of what is in the way ahead, the side nearer to where
 	// it wants to go
 	Vec3 AlongObstacle(CPlayer* pMe, const Vec3& pos, const Vec3& dir, const Vec3& toward)
@@ -1647,8 +1925,6 @@ namespace
 			push = -0.4f;
 		return push ? (dir + right * push).GetNormalizedSafe(dir) : dir;
 	}
-
-	float LedgeAhead(CPlayer* pMe, const Vec3& pos, const Vec3& dir);
 
 	// walk toward a point; true when there
 	// on the way to an item it wants (no strength jumps at it: it jumped at
@@ -1699,12 +1975,19 @@ namespace
 		// next to the one it follows with a wall between (he inside a hut,
 		// it outside by the wall): not there yet, round by the door (for a
 		// while: clutter may keep it from a straight walk to him for good)
-		bool reached = dist <= stopAt;
-		if (reached && mayCatchUp && dist > 1.5f && !ClearWay(pMe, pos, to))
+		// (not in the middle of a climb: it stopped pressing on in the air)
+		bool reached = dist <= stopAt && s_bot.climbUntil <= 0.0f;
+		// (the one it follows up on a bank, a ledge over it: not there yet, for
+		// a while. 4 m below the host it stopped in the middle of a jump up to
+		// him, the distance being the one on the map; the user's game,
+		// 2026-10-23. Not for ever: under a tower, a roof he is on, it stands
+		// as before; not in a fight, it keeps its room there)
+		const bool apart = mayCatchUp && to.z - pos.z > 2.0f && !s_bot.enemy && !pMe->GetLinkedVehicle();
+		if (reached && mayCatchUp && ((dist > 1.5f && !ClearWay(pMe, pos, to)) || apart))
 		{
 			if (s_bot.arriveBlockedSince < 0.0f)
 				s_bot.arriveBlockedSince = now;
-			reached = now - s_bot.arriveBlockedSince > 10.0f;
+			reached = now - s_bot.arriveBlockedSince > (apart ? 20.0f : 10.0f);
 		}
 		else
 			s_bot.arriveBlockedSince = -1.0f;
@@ -1890,7 +2173,7 @@ namespace
 		{
 			// (nearer only in the air, on a jump onto a ledge it fell back
 			// from: not counted)
-			const bool jumping = now - s_bot.jumpAt < 2.0f && Dist2D(pos, s_bot.sjPlace) < 3.0f && s_bot.sjTries >= 2;
+			const bool jumping = s_bot.climbUntil > 0.0f || (now - s_bot.jumpAt < 2.0f && Dist2D(pos, s_bot.sjPlace) < 3.0f && s_bot.sjTries >= 2);
 			if (s_bot.progBest < 1e8f && !jumping)
 			{
 				s_bot.progAt = now;
@@ -1907,27 +2190,29 @@ namespace
 		Vec3 dir = dn.GetLength() > 0.1f ? dn.GetNormalized() : d / dist;
 		// up onto what the way goes on (a container's floor, a step too high
 		// to walk): a jump right before it, not only when it got nowhere
-		if (rise > 0.45f && rise < 1.3f && dn.GetLength() < 1.2f && now - s_bot.jumpAt > 1.5f && !stepIsGoal)
+		if (rise > 0.45f && rise < 1.3f && dn.GetLength() < 1.2f && now - s_bot.jumpAt > 1.5f && !stepIsGoal && s_bot.climbUntil <= 0.0f)
 		{
 			s_ctl.jump = true;
 			s_bot.jumpAt = now;
 		}
-		// a strength jump wanted: in strength mode a moment, then up and on
-		if (s_bot.strengthJumpAt >= 0.0f)
+		// a bank or a ledge right ahead toward where it goes, that much higher
+		// and no straight walk there: up it, as a player does (twice here at
+		// most, then the way round; at the bank by the bridge the way round
+		// was 50 m for the 9 m up to the host). (Not "a short way round found"
+		// first: its squares' ways round along the bank led nowhere, it went
+		// to and fro 60 m without a jump, a test of 2026-10-23)
+		if (!s_bot.toClear && s_bot.climbUntil <= 0.0f && to.z - pos.z > 1.0f && dist > 0.5f && dist < 15.0f && now >= s_bot.climbLookAt
+			&& now - s_bot.hitAt > 6.0f && !s_bot.retreating && !(s_bot.enemy && now - s_bot.enemySeenAt < 8.0f) && !GoingToLoot(to))
 		{
-			CNanoSuit* pSuit = pMe->GetNanoSuit();
-			const float since = now - s_bot.strengthJumpAt;
-			if (since > 2.5f || !pSuit)
-				s_bot.strengthJumpAt = -1.0f;
-			else
-			{
-				dir = s_bot.strengthJumpDir;
-				if (pSuit->GetMode() == NANOMODE_STRENGTH && since > 0.4f && now - s_bot.jumpAt > 1.5f)
-				{
-					s_ctl.jump = true;
-					s_bot.jumpAt = now;
-				}
-			}
+			s_bot.climbLookAt = now + 0.5f;
+			// (not to one under a roof: the floor of a room behind a house's
+			// wall looks a ledge; that way is the door, the review)
+			ray_hit roof;
+			const bool indoors = gEnv->pPhysicalWorld->RayWorldIntersection(to + Vec3(0, 0, 2.0f), Vec3(0, 0, 6.0f), ent_static, WALK_GEOM, &roof, 1) > 0;
+			bool terrain = false;
+			const float ledge = indoors ? 0.0f : LedgeAhead(pMe, pos, d / dist, &terrain);
+			if (ledge > 0.0f)
+				StartClimb(pMe, pos, d / dist, ledge, "a bank up to where it goes", terrain);
 		}
 		// no nearer for a while: a fresh way from where it stands and a few
 		// steps along what is in the way (first to the side the way goes,
@@ -1957,26 +2242,16 @@ namespace
 			else if (s_bot.strengthJumpAt < 0.0f && pMe->GetNanoSuit() && pMe->GetNanoSuit()->GetSuitEnergy() >= 90.0f && now - s_bot.hitAt > 6.0f
 				&& !s_bot.retreating && !(s_bot.enemy && now - s_bot.enemySeenAt < 8.0f) && !GoingToLoot(to))
 			{
-				const float ledge = LedgeAhead(pMe, pos, dir);
+				bool terrain = false;
+				const float ledge = LedgeAhead(pMe, pos, dir, &terrain);
 				// (twice at the same place and still there: not again. It jumped
 				// at a 1.6 m ledge a dozen times on the way to the host, fell back
 				// each time, the energy gone each time, and as each jump got it a
 				// little nearer it never counted as stuck long enough to be put
 				// next to him)
-				const bool samePlace = Dist2D(pos, s_bot.sjPlace) < 3.0f && now - s_bot.sjPlaceAt < 60.0f;
-				if (ledge > 0.0f && rise > 0.3f && !(samePlace && s_bot.sjTries >= 2))
-				{
-					if (!samePlace)
-					{
-						s_bot.sjPlace = pos;
-						s_bot.sjTries = 0;
-					}
-					s_bot.sjPlaceAt = now;
-					++s_bot.sjTries;
-					s_bot.strengthJumpAt = now;
-					s_bot.strengthJumpDir = dir;
-					Event("a strength jump onto something %.1f m high in the way", ledge);
-				}
+				// (a climb now: straight at it, no step along the face)
+				if (ledge > 0.0f && rise > 0.3f && StartClimb(pMe, pos, dir, ledge, "something in the way it got no further at", terrain))
+					s_bot.slideUntil = 0.0f;
 			}
 			Event("no nearer to %s for %.0f s (%.0f m to go): a new way, a way round close by%s", toName && *toName ? toName : "where it goes",
 				stalled, dist, low ? ", a jump over something low" : "");
@@ -2044,6 +2319,7 @@ namespace
 		else
 			s_ctl.moveDir = local.empty() ? dir : Dist2D(local[0], pos) < 1.5f ? Centered(pMe, pos, dir) : dir;
 		s_ctl.sprint = mayRun && dist > 15.0f;
+		ClimbStep(pMe, pos);
 		return false;
 	}
 
@@ -3266,13 +3542,19 @@ namespace
 
 	// something to jump up onto right ahead, too high to step onto, low
 	// enough for a strength jump, room to stand on it: how high (0: none)
-	float LedgeAhead(CPlayer* pMe, const Vec3& pos, const Vec3& dir)
+	float LedgeAhead(CPlayer* pMe, const Vec3& pos, const Vec3& dir, bool* pTerrain)
 	{
 		IPhysicalEntity* pSkip = pMe->GetEntity()->GetPhysics();
 		const int ents = ent_static | ent_terrain | ent_rigid | ent_sleeping_rigid;
 		ray_hit hit;
 		if (!gEnv->pPhysicalWorld->RayWorldIntersection(pos + Vec3(0, 0, 0.6f), dir * 1.2f, ents, WALK_GEOM, &hit, 1, &pSkip, pSkip ? 1 : 0))
 			return 0.0f;
+		// (a slope it walks up is no ledge: up it it jumped and fell back three
+		// times, at the top of the bank by the bridge, 2026-10-23)
+		if (hit.n.z > 0.77f)
+			return 0.0f;
+		if (pTerrain)
+			*pTerrain = hit.bTerrain != 0;
 		const Vec3 over = pos + dir * (hit.dist + 0.6f);
 		ray_hit top;
 		if (!gEnv->pPhysicalWorld->RayWorldIntersection(over + Vec3(0, 0, 3.6f), Vec3(0, 0, -3.6f), ents, WALK_GEOM, &top, 1, &pSkip, pSkip ? 1 : 0))
@@ -4689,6 +4971,12 @@ namespace
 		s_ctl.look = false;
 		s_ctl.sprint = false;
 		s_ctl.jump = false;
+		// (a climb MoveTo no longer looks after - there, another order, down: over)
+		if (s_bot.climbUntil > 0.0f && Now() - s_bot.climbSeenAt > 0.3f)
+		{
+			s_bot.climbUntil = 0.0f;
+			s_bot.strengthJumpAt = -1.0f;
+		}
 		s_ctl.crouch = false;
 		s_ctl.lean = 0;
 		s_ctl.prone = false;
@@ -5580,8 +5868,9 @@ namespace
 				s_bot.fightOpen += frameTime;
 		}
 		// (SuitStep: by the guard, as on every way out of here)
-		// facing the way it walks when it has nobody to aim at
-		if (!aiming && s_ctl.moveDir.GetLengthSquared() > 0.01f)
+		// facing the way it walks when it has nobody to aim at (a climb faces
+		// what it climbs, also stepping back for a run)
+		if (!aiming && s_ctl.moveDir.GetLengthSquared() > 0.01f && s_bot.climbUntil <= 0.0f)
 		{
 			s_ctl.look = true;
 			s_ctl.yaw = Yaw(s_ctl.moveDir);
