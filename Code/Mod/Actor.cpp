@@ -3025,6 +3025,13 @@ EntityId CActor::NetGetCurrentItem() const
 //------------------------------------------------------------------------
 void CActor::NetSetCurrentItem(EntityId id)
 {	
+	// (Crysis Coop: a player's weapon change from its own game arriving
+	// after the seat put its weapon away here - the enter and the item
+	// update are not ordered - drew it again in the seat, a rifle held at
+	// the boat's machine gun. Every game puts it away in the seat and takes
+	// it out when he gets out)
+	if (id && IsPlayer() && GetLinkedVehicle())
+		return;
 	SelectItem(id, false);
 }
 

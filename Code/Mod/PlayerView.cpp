@@ -1083,8 +1083,13 @@ void CPlayerView::ViewSpectatorTarget(SViewParams &viewParams)
 			viewParams.rotation = Quat::CreateRotationVDir((at - s_cam).GetNormalizedSafe(flat));
 			return;
 		}
-		// through his eyes: his own body is not drawn (it filled the view)
-		CoopAI::OnEyeView(pTarget->GetEntityId());
+		// through his eyes: his own body is not drawn (it filled the view) -
+		// in the viewer's own game only. The server runs this view for every
+		// joiner it holds as a spectator too, and hid the host himself there:
+		// hidden is no physics in this engine, the host stood frozen (once in
+		// the air) for the 15 s a joiner waited (the user's games, 10-17..23)
+		if (m_in.entityId == g_pGame->GetIGameFramework()->GetClientActorId())
+			CoopAI::OnEyeView(pTarget->GetEntityId());
 		if (head >= 0 && cutscene)
 		{
 			// scripted: the head the animation moves (as the host's own view)

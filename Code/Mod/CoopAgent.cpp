@@ -2584,6 +2584,12 @@ namespace
 		s_bot.weaponAt = Now() + 1.0f;
 		if (Now() < s_bot.reloadAt || Now() < s_bot.switchAt)
 			return;
+		// not swimming (the fists only there, as in single player: it took
+		// out its rifle again and swam holding it out) nor in a vehicle's seat
+		// (put away there; a rifle drawn as it got in stayed in its hands at
+		// the boat's gun on the host's screen, the user's game of 2026-10-23)
+		if (pMe->GetLinkedVehicle() || pMe->IsSwimming() || pMe->ShouldSwim())
+			return;
 		// not while the left hand picks something up: the weapon in the
 		// right one would stay in the one-hand pose
 		if (COffHand* pOffHand = static_cast<COffHand*>(pMe->GetWeaponByClass(CItem::sOffHandClass)))
@@ -6313,6 +6319,11 @@ namespace
 				Press(pMe, g_pGame->Actions().nextitem, true);
 				Press(pMe, g_pGame->Actions().nextitem, false);
 			}
+			else if (pMe->GetLinkedVehicle() || pMe->IsSwimming() || pMe->ShouldSwim())
+			{
+				Reply(id.c_str(), Fail(pMe->GetLinkedVehicle() ? "weapon: not in a vehicle's seat" : "weapon: not while swimming (the fists only)"));
+				return;
+			}
 			else
 				pMe->SelectItemByName(args.c_str(), true);
 			string name;
@@ -8716,12 +8727,47 @@ void CoopAgent::OnServerRequest(EntityId agent, int op, const char* name)
 			times = 0;
 			return;
 		}
+		// only sunk here - the copy here fell through the ground, in its own
+		// game it stands: the copy back up to where its own game has it, its
+		// fall stopped and no landing counted, at once. It trusted this copy
+		// once: put the companion 33 m under the graveyard, the stop of the
+		// fall killed it, the body sank under the map (the user's game,
+		// 2026-10-23)
+		const float groundHere = gEnv->p3DEngine ? gEnv->p3DEngine->GetTerrainElevation(here.x, here.y) : here.z;
+		if (off < 2.0f && here.z < there.z - 2.5f)
+		{
+			times = 0;
+			CoopAgent::ShieldFall(agent, 2.0f);
+			if (IPhysicalEntity* pPhys = pAgent->GetEntity()->GetPhysics())
+			{
+				pe_action_set_velocity still;
+				still.v.zero();
+				pPhys->Action(&still);
+			}
+			Matrix34 tm = pAgent->GetEntity()->GetWorldTM();
+			tm.SetTranslation(there);
+			pAgent->GetEntity()->SetWorldTM(tm);
+			CryLogAlways("[CoopAgent] %s sank %.1f m here (z %.1f, the ground %.1f), stands at z %.1f in its own game: put back up here", pAgent->GetEntity()->GetName(),
+				there.z - here.z, here.z, groundHere, there.z);
+			return;
+		}
 		if (++times < 2)
 			return;
 		times = 0;
+		// (never put under the map: under the terrain with nothing to stand on
+		// - a mine's tunnel under the terrain has its floor)
+		ray_hit floor;
+		IPhysicalEntity* pSelf = pAgent->GetEntity()->GetPhysics();
+		if (here.z < groundHere - 1.0f && !gEnv->pPhysicalWorld->RayWorldIntersection(here + Vec3(0, 0, 0.5f), Vec3(0, 0, -3.0f), ent_static | ent_terrain,
+			rwi_stop_at_pierceable | rwi_colltype_any, &floor, 1, &pSelf, pSelf ? 1 : 0))
+		{
+			CryLogAlways("[CoopAgent] %s is %.1f m under the ground here (z %.1f): not put back here, at %.1f %.1f %.1f in its own game", pAgent->GetEntity()->GetName(),
+				groundHere - here.z, here.z, there.x, there.y, there.z);
+			return;
+		}
 		pRules->MovePlayer(static_cast<CActor*>(pAgent), here, pAgent->GetEntity()->GetWorldAngles());
-		CryLogAlways("[CoopAgent] %s was %.1f m off in its own game (at %.1f %.1f %.1f, here %.1f %.1f %.1f): put back here",
-			pAgent->GetEntity()->GetName(), off, there.x, there.y, there.z, here.x, here.y, here.z);
+		CryLogAlways("[CoopAgent] %s was %.1f m off in its own game (%.1f up or down; at %.1f %.1f %.1f, here %.1f %.1f %.1f): put back here",
+			pAgent->GetEntity()->GetName(), off, there.z - here.z, there.x, there.y, there.z, here.x, here.y, here.z);
 		return;
 	}
 	if (op == 2)
@@ -9006,6 +9052,23 @@ void CoopAgent::OnPath(int op, const char* goal, const char* text)
 	}
 	if (!path.empty())
 		CoopAI::Trace("AGENT way: %d points to %s", (int)path.size(), goal ? goal : "");
+}
+
+// the server: no fall damage for a player for a moment, see CoopAgent.h
+namespace
+{
+	std::map<EntityId, float> s_fallShield;
+}
+
+void CoopAgent::ShieldFall(EntityId player, float seconds)
+{
+	s_fallShield[player] = gEnv->pTimer->GetCurrTime() + seconds;
+}
+
+bool CoopAgent::FallShielded(EntityId player)
+{
+	std::map<EntityId, float>::iterator it = s_fallShield.find(player);
+	return it != s_fallShield.end() && gEnv->pTimer->GetCurrTime() < it->second;
 }
 
 bool CoopAgent::HostBodyPos(EntityId downed, Vec3& pos)

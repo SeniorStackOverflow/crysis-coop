@@ -754,6 +754,93 @@ function TeamInstantAction:ProcessActorDamage(hit)
 	return died;
 end
 
+-- An AI soldier's death as in single player, for the level: the network
+-- kill (ProcessDeath -> game:KillPlayer -> CActor::Kill) never runs
+-- BasicActor:Kill, so BasicAI.OnDeath never ran - no flow graph got its
+-- "Dead", no spawner its UnitDown, a dead gunner kept his mounted gun. At
+-- Rescue's graveyard four dead suits were to be counted: nothing came after
+-- them, no dialog, no VTOL, the objective stayed (the user's game,
+-- 2026-10-23). The aliens the same: their Kill (BasicAlien:Kill) never runs
+-- either, so BasicAlien.OnDeath (BasicAI.OnDeath, OnDeathCustom) never ran -
+-- core, ice, sphere, ascension and fleet count Trooper/Scout deaths in their
+-- flow graphs. 1 s after it as the stock Kills do; once per death: a script's
+-- own Kill (a door knocking a soldier out, a frozen alien shattered) sets the
+-- stock timer too - each death a new token, each OnDeath once for it.
+-- (Installed when the first death comes: the gamerules load before the
+-- level's AI scripts, BasicAI and BasicAlien are not there yet. A load into
+-- the running level keeps the NPCs' tables: their tokens are dropped then,
+-- CoopForgetDeaths, or a death after it would count as done.)
+CoopDeathTokens = CoopDeathTokens or {};
+local function CoopOnceADeath(tbl, field, done)
+	local stock = tbl[field];
+	if (not stock or tbl["coopOnce" .. field]) then
+		return;
+	end
+	tbl["coopOnce" .. field] = true;
+	tbl[field] = function(entity)
+		local token = entity and entity.coopDeathToken;
+		if (token) then
+			if (entity[done] == token) then
+				return false;
+			end
+			entity[done] = token;
+		end
+		stock(entity);
+		return true;
+	end
+end
+function CoopForgetDeaths()
+	local n = 0;
+	for id in pairs(CoopDeathTokens) do
+		local e = System.GetEntity(id);
+		if (e) then
+			e.coopDeathToken, e.coopAIDeathDone, e.coopAlienDeathDone = nil, nil, nil;
+			n = n + 1;
+		end
+	end
+	CoopDeathTokens = {};
+	return n;
+end
+local function CoopIsAlien(entity)
+	return BasicAlien and BasicAlien.OnDeath and BasicActor and entity.Kill ~= BasicActor.Kill
+		and entity.ResetDamageEffects == BasicAlien.ResetDamageEffects;
+end
+function CoopNPCDied(entity)
+	if (not (entity and entity.actor and entity.actor:GetHealth() <= 0)) then
+		return;
+	end
+	local ran;
+	if (CoopIsAlien(entity)) then
+		ran = BasicAlien.OnDeath(entity);
+	elseif (BasicAI and BasicAI.OnDeath) then
+		ran = BasicAI.OnDeath(entity);
+	else
+		return;
+	end
+	if (ran == false) then
+		CoopLog(string.format("%s's death had reached the level already", tostring(entity:GetName())));
+	else
+		CoopLog(string.format("%s's death reaches the level (Dead)", tostring(entity:GetName())));
+	end
+end
+local stockProcessDeath = TeamInstantAction.ProcessDeath;
+function TeamInstantAction:ProcessDeath(hit)
+	stockProcessDeath(self, hit);
+	local target = hit.target;
+	if (target and target.actor and not target.actor:IsPlayer() and target.AI and BasicActor
+		and (target.Kill == BasicActor.Kill or CoopIsAlien(target))) then
+		if (BasicAI) then
+			CoopOnceADeath(BasicAI, "OnDeath", "coopAIDeathDone");
+		end
+		if (BasicAlien) then
+			CoopOnceADeath(BasicAlien, "OnDeath", "coopAlienDeathDone");
+		end
+		target.coopDeathToken = {};
+		CoopDeathTokens[target.id] = true;
+		Script.SetTimerForFunction(1000, "CoopNPCDied", target);
+	end
+end
+
 -- for the log: a player's explosion, the actors it reaches
 local stockOnExplosion = TeamInstantAction.Server.OnExplosion;
 function TeamInstantAction.Server:OnExplosion(explosion)
@@ -1776,6 +1863,11 @@ function TeamInstantAction:CoopOnCheckpoint(name)
 		self.coopAllDownAt = nil;
 		self.coopRevives = {};
 		self.coopDownSeen = {};
+		-- (CoopTestKeepDeaths: the autotest's A/B, as before the fix)
+		local forgot = CoopTestKeepDeaths and 0 or CoopForgetDeaths();
+		if (forgot > 0) then
+			CoopLog("checkpoint loaded: the deaths of "..forgot.." NPCs before it forgotten (their next death reaches the level)");
+		end
 		HUD.CoopReviveState(wasDown and 6 or 5, NULL_ENTITY, NULL_ENTITY, C.BACK_FADE_TIME);
 	end
 	local kept = self:CoopKeepSpots();

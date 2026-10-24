@@ -447,7 +447,7 @@ function Start-Boot([hashtable]$Session, [string]$RunDir, [string]$Name) {
     if (-not $b) { throw "INFRA: no [CoopBuild] line in 90 s: is $($script:TestMod).dll loaded?" }
     if ($b.Text -notmatch [regex]::Escape("Mods\$($script:TestMod)\Bin32\$($script:TestMod).dll")) { throw "INFRA: another DLL runs: $($b.Text)" }
     $script:Boot.Marks.Build = $b.Text
-    $ready = Wait-Log host '^\[CoopSave\] progress loaded: |^\[Coop\] checkpoint loaded: |checkpoint rescue_start|^\[CoopAI\] co-op AI|Co-op code' 420
+    $ready = Wait-Log host '^\[CoopSave\] progress loaded: |^\[Coop\] checkpoint loaded: |checkpoint [A-Za-z]+_start |^\[CoopAI\] co-op AI|Co-op code' 420
     if (-not $ready) { throw "INFRA: the level was not ready within 420 s" }
     Write-Step "level ready: $($ready.Text)"
     $script:Boot.Marks.Ready = New-Mark

@@ -7579,7 +7579,8 @@ namespace
 			CoopAI::Trace("EYEVIEW off: %u shown", s_eyeHidden);
 			s_eyeHidden = 0;
 		}
-		if (eyeView)
+		// (never this game's own player: hidden, its physics stops)
+		if (eyeView && s_eyeViewTarget != g_pGame->GetIGameFramework()->GetClientActorId())
 			if (IActor* pActor = g_pGame->GetIGameFramework()->GetIActorSystem()->GetActor(s_eyeViewTarget))
 			{
 				if (!pActor->GetEntity()->IsInvisible())

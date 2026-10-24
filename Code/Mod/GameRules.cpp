@@ -933,6 +933,13 @@ void CGameRules::RevivePlayer(CActor *pActor, const Vec3 &pos, const Ang3 &angle
 		health = g_pGameCVars->g_playerHealthValue;
 	pActor->SetMaxHealth(health);
 
+	// Crysis Coop: up where it revives, upright, before its living body is
+	// made: made at the body lying there (under the ground's surface, tilted
+	// as it fell), the server's copy of a revived companion kept falling
+	// through the ground at the graveyard (the user's game, 2026-10-23)
+	if (CoopAI::IsCoopSession() && pActor->IsPlayer())
+		pActor->GetEntity()->SetWorldTM(Matrix34::Create(Vec3(1.0f, 1.0f, 1.0f), Quat::CreateRotationZ(angles.z), pos));
+
 	if (!m_pGameFramework->IsChannelOnHold(pActor->GetChannelId()))
 		pActor->GetGameObject()->SetAspectProfile(eEA_Physics, eAP_Alive);
 

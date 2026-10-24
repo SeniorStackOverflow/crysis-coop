@@ -12,6 +12,7 @@ History:
 *************************************************************************/
 #include "StdAfx.h"
 #include "CoopAI.h"
+#include "CoopAgent.h"
 #include "Game.h"
 #include "GameCVars.h"
 #include "GameActions.h"
@@ -2914,6 +2915,36 @@ void CPlayer::UpdateStats(float frameTime)
 	// You will still get damage if you don't open a parachute in time.
 	if (m_stats.inFreefall.Value() == 2)
 		m_stats.downwardsImpactVelocity = 0.0f;
+
+	// Crysis Coop: a player put back up here (a correction of the server's
+	// copy, a teleport, its own game's update after the copy here sank) did
+	// not land: the stop of that copy's fall is no impact. The host's copy of
+	// the companion fell through the ground; put back up, the stop of its
+	// 16 m/s fall dealt 531 and killed it (the user's game, 2026-10-23)
+	// (and one that was under the map a moment ago - under the terrain with
+	// nothing at all below it: its own game's update brings it up over a few
+	// frames, smoothed, and the stop of that fall dealt 177, a test; a fall
+	// in a mine's tunnel has its floor below, the damage stays)
+	if (gEnv->bServer && !IsClient() && IsPlayer() && CoopAI::IsCoopSession())
+	{
+		static std::map<EntityId, float> s_coopLastZ, s_coopUnderAt;
+		const Vec3 pos = GetEntity()->GetWorldPos();
+		const float now = gEnv->pTimer->GetCurrTime();
+		if (gEnv->p3DEngine && pos.z < gEnv->p3DEngine->GetTerrainElevation(pos.x, pos.y) - 1.0f)
+		{
+			ray_hit floor;
+			IPhysicalEntity* pSelf = GetEntity()->GetPhysics();
+			if (!gEnv->pPhysicalWorld->RayWorldIntersection(pos + Vec3(0, 0, 0.5f), Vec3(0, 0, -500.0f), ent_static | ent_terrain,
+				rwi_stop_at_pierceable | rwi_colltype_any, &floor, 1, &pSelf, pSelf ? 1 : 0))
+				s_coopUnderAt[GetEntityId()] = now;
+		}
+		std::map<EntityId, float>::iterator itZ = s_coopLastZ.find(GetEntityId());
+		std::map<EntityId, float>::iterator itU = s_coopUnderAt.find(GetEntityId());
+		if ((itZ != s_coopLastZ.end() && pos.z - itZ->second > 1.0f) || (itU != s_coopUnderAt.end() && now - itU->second < 1.5f)
+			|| CoopAgent::FallShielded(GetEntityId()))
+			m_stats.downwardsImpactVelocity = 0.0f;
+		s_coopLastZ[GetEntityId()] = pos.z;
+	}
 
 	// Apply Fall Damage
 	assert(NumberValid(m_stats.downwardsImpactVelocity));

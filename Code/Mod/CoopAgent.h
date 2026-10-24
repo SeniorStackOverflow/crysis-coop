@@ -57,6 +57,11 @@ namespace CoopAgent
 	// false: not known lately
 	bool HostBodyPos(EntityId downed, Vec3& pos);
 
+	// the server: no fall damage for a player for a moment (its copy here was
+	// put back up after it fell through the ground: the stop is no landing)
+	void ShieldFall(EntityId player, float seconds);
+	bool FallShielded(EntityId player);
+
 	// a vehicle's engine and its sounds, for a log line (diagnostics)
 	string EngineState(IVehicle* pVehicle);
 
